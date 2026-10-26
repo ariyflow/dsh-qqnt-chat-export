@@ -1,0 +1,22 @@
+# Local data the plugin produces or reads — never commit any of it.
+node_modules/
+__pycache__/
+*.pyc
+
+# Decrypted databases, keys, and the query index live in the work directory,
+# which defaults to %TEMP%\qqnt-chat-export. Keep an accidental copy out of git.
+key.txt
+nt_msg.db*
+index.sqlite*
+build-status.json
+.qqnt-work/
+exports/
+QQ导出_*/
+
+# Tooling and packaging noise.
+*.log
+*.zip
+*.tgz
+.DS_Store
+.vscode/
+.idea/

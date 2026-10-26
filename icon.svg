@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="QQ group chat export">
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#2B6CB0"/>
+  <path d="M14 16h36a3 3 0 0 1 3 3v20a3 3 0 0 1-3 3H33l-11 9 1.6-9H14a3 3 0 0 1-3-3V19a3 3 0 0 1 3-3z" fill="#FFFFFF"/>
+  <path d="M32 23v11" stroke="#2B6CB0" stroke-width="3.4" stroke-linecap="round"/>
+  <path d="M27 30.5 32 35.5 37 30.5" stroke="#2B6CB0" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <path d="M24 39h16" stroke="#2B6CB0" stroke-width="3.4" stroke-linecap="round"/>
+</svg>

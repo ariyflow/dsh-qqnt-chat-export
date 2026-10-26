@@ -1,0 +1,19 @@
+- insert:
+    - id: qqnt-chat-export
+      name: 'dsh-qqnt-chat-export'
+      config:
+        # 64-bit Python 3 on PATH, or an absolute path to one. It needs the
+        # sqlcipher3 package (`pip install sqlcipher3-wheels`).
+        pythonPath: python
+        # Holds key.txt, the decrypted database copies, and index.sqlite.
+        # Empty means %TEMP%\qqnt-chat-export. Delete it after exporting.
+        workDir: ''
+        # Empty means %USERPROFILE%\Documents\Tencent Files.
+        tencentRoot: ''
+        # QQ number to use when the client holds several accounts. Empty means
+        # the account with the largest message database.
+        account: ''
+        # Local browsing UI on http://127.0.0.1:46728. Set 0 to turn it off.
+        webPort: 46728
+        # Loopback only. Do not widen this: the page shows every chat.
+        webHost: '127.0.0.1'

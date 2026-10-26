@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QQ 聊天记录查看器</title>
+<style>
+  :root {
+    --bg: #ffffff; --panel: #f6f8fa; --line: #e3e6ea; --text: #1f2328;
+    --muted: #6e7781; --accent: #0969da; --accent-soft: #ddf4ff;
+    --out: #1a7f37; --danger: #cf222e; --warn: #9a6700;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117; --panel: #161b22; --line: #30363d; --text: #e6edf3;
+      --muted: #8b949e; --accent: #4493f8; --accent-soft: #0c2d6b;
+      --out: #3fb950; --danger: #f85149; --warn: #d29922;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    display: flex; flex-direction: column;
+  }
+  button, input, select { font: inherit; color: inherit; }
+  button { cursor: pointer; border: 1px solid var(--line); background: var(--bg); border-radius: 6px; padding: 5px 12px; }
+  button:hover { background: var(--panel); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { filter: brightness(1.08); }
+  button.ghost { background: transparent; }
+  input, select {
+    border: 1px solid var(--line); background: var(--bg); border-radius: 6px;
+    padding: 5px 9px; min-width: 0;
+  }
+  input:focus, select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+  .hidden { display: none !important; }
+
+  header.top {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; padding: 10px 18px; border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .logo {
+    width: 34px; height: 34px; border-radius: 9px; background: #2b6cb0; color: #fff;
+    display: grid; place-items: center; font-weight: 700; font-size: 13px;
+  }
+  h1 { font-size: 15px; margin: 0; }
+  .meta { margin: 1px 0 0; color: var(--muted); font-size: 12px; }
+  .actions { display: flex; gap: 8px; }
+
+  .banner {
+    margin: 10px 18px 0; padding: 10px 14px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--panel);
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .banner.error { border-color: var(--danger); color: var(--danger); }
+  .banner .grow { flex: 1; min-width: 200px; }
+  .bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 6px; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+
+  main { flex: 1; display: flex; min-height: 0; }
+  aside {
+    width: 300px; border-right: 1px solid var(--line); display: flex;
+    flex-direction: column; min-height: 0; background: var(--panel);
+  }
+  .aside-head { padding: 10px; border-bottom: 1px solid var(--line); display: grid; gap: 8px; }
+  .tabs { display: flex; gap: 6px; }
+  .tab { flex: 1; padding: 4px 0; font-size: 13px; }
+  .tab.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .sessions { overflow: auto; flex: 1; }
+  .session {
+    padding: 8px 12px; border-bottom: 1px solid var(--line); cursor: pointer;
+    display: grid; grid-template-columns: 1fr auto; gap: 2px 8px;
+  }
+  .session:hover { background: var(--bg); }
+  .session.active { background: var(--accent-soft); }
+  .session .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session .sub { color: var(--muted); font-size: 12px; grid-column: 1 / -1; display: flex; gap: 8px; }
+  .badge {
+    font-size: 11px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line);
+    color: var(--muted); align-self: center;
+  }
+  .badge.private { color: var(--warn); border-color: var(--warn); }
+  .count { color: var(--muted); font-size: 12px; }
+
+  .content { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .filters {
+    display: flex; gap: 8px; align-items: center; padding: 10px 16px;
+    border-bottom: 1px solid var(--line); flex-wrap: wrap;
+  }
+  .filters input[type=date] { width: 140px; }
+  .filters label { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 4px; }
+  .filters .spacer { flex: 1; }
+  .summary { padding: 8px 16px; color: var(--muted); font-size: 13px; border-bottom: 1px solid var(--line); }
+  .messages { overflow: auto; flex: 1; padding: 4px 0; }
+  .row { display: grid; grid-template-columns: 132px 150px 1fr auto; gap: 12px; padding: 5px 16px; border-bottom: 1px solid transparent; }
+  .row:hover { background: var(--panel); }
+  .row .time { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .row .who { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .who .me { color: var(--out); font-size: 11px; border: 1px solid currentColor; border-radius: 4px; padding: 0 4px; margin-left: 6px; }
+  .row .msg { white-space: pre-wrap; word-break: break-word; }
+  .row .msg.clamped { display: -webkit-box; -webkit-line-clamp: 10; -webkit-box-orient: vertical; overflow: hidden; }
+  .row .msg .ph { color: var(--muted); background: var(--panel); border-radius: 4px; padding: 0 4px; }
+  .row .tools { align-self: start; }
+  .row .expand { font-size: 12px; padding: 0 8px; color: var(--accent); }
+  mark { background: #fff3b0; color: inherit; border-radius: 2px; }
+  @media (prefers-color-scheme: dark) { mark { background: #6b5900; } }
+  .more { padding: 12px; text-align: center; border-top: 1px solid var(--line); }
+  .empty { padding: 40px 20px; text-align: center; color: var(--muted); }
+  .toast {
+    position: fixed; right: 18px; bottom: 18px; padding: 10px 16px; border-radius: 8px;
+    background: var(--text); color: var(--bg); opacity: 0; transition: opacity .2s;
+    pointer-events: none; max-width: 420px;
+  }
+  .toast.show { opacity: .94; }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="logo">QQ</span>
+    <div>
+      <h1>聊天记录查看器</h1>
+      <p class="meta" id="meta">正在读取状态…</p>
+    </div>
+  </div>
+  <div class="actions">
+    <button class="ghost" id="sync" title="重新复制 QQ 数据库并重建索引">从 QQ 同步</button>
+    <button class="ghost" id="reload">刷新</button>
+  </div>
+</header>
+
+<div class="banner hidden" id="banner">
+  <div class="grow"><div id="bannerText"></div><div class="bar"><i id="bannerBar"></i></div></div>
+  <button class="primary hidden" id="bannerAction">建立索引</button>
+</div>
+
+<main>
+  <aside>
+    <div class="aside-head">
+      <input id="sessionFilter" placeholder="筛选会话：群名 / 昵称 / 群号">
+      <div class="tabs">
+        <button class="tab active" data-kind="all">全部</button>
+        <button class="tab" data-kind="group">群聊</button>
+        <button class="tab" data-kind="private">私聊</button>
+      </div>
+    </div>
+    <div class="sessions" id="sessions"></div>
+  </aside>
+
+  <section class="content">
+    <form class="filters" id="filters">
+      <input id="keyword" placeholder="关键词" style="width:130px">
+      <input id="sender" placeholder="发送者 / QQ" style="width:120px">
+      <label>从 <input type="date" id="since"></label>
+      <label>到 <input type="date" id="until"></label>
+      <button class="primary" type="submit">查询</button>
+      <button class="ghost" type="button" id="clear">清空</button>
+      <span class="spacer"></span>
+      <select id="format">
+        <option value="txt">纯文本 .txt</option>
+        <option value="csv">表格 .csv</option>
+        <option value="json">JSON .json</option>
+        <option value="md">Markdown .md</option>
+        <option value="html">网页 .html</option>
+        <option value="sqlite">数据库 .sqlite</option>
+      </select>
+      <button class="primary" type="button" id="download">下载</button>
+    </form>
+    <div class="summary" id="summary">选择左侧的会话，直接输入关键词可跨全部会话查询。</div>
+    <div class="messages" id="messages"></div>
+    <div class="more"><button class="ghost hidden" id="more">加载更多</button></div>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  'use strict'
+
+  var PAGE = 60
+  var state = {
+    sessions: [],
+    kind: 'all',
+    sessionKind: '',
+    chatId: '',
+    chatName: '',
+    keyword: '',
+    sender: '',
+    since: '',
+    until: '',
+    filters: null,
+    offset: 0,
+    total: 0,
+    rows: 0,
+    indexReady: false,
+    building: false,
+    autoLoaded: false,
+    poll: 0
+  }
+
+  var $ = function (id) { return document.getElementById(id) }
+  var esc = function (text) {
+    return String(text == null ? '' : text)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+  }
+
+  function toast(message) {
+    var el = $('toast')
+    el.textContent = message
+    el.classList.add('show')
+    clearTimeout(el._timer)
+    el._timer = setTimeout(function () { el.classList.remove('show') }, 3200)
+  }
+
+  function api(path, init) {
+    var options = init || {}
+    var headers = { accept: 'application/json' }
+    if (options.headers) {
+      Object.keys(options.headers).forEach(function (key) { headers[key] = options.headers[key] })
+    }
+    return fetch(path, { method: options.method || 'GET', headers: headers }).then(function (res) {
+      return res.json().catch(function () { return {} }).then(function (body) {
+        if (!res.ok) throw new Error(body.error || ('请求失败 ' + res.status))
+        return body
+      })
+    })
+  }
+
+  function num(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',') }
+
+  // ---------------------------------------------------------------- 状态与索引
+  function paintStatus(status) {
+    var parts = []
+    if (status.index && status.index.exists) {
+      parts.push('索引 ' + num(status.index.messages || 0) + ' 条')
+      if (status.index.chats) parts.push(num(status.index.chats) + ' 个会话')
+    } else {
+      parts.push('未建立索引')
+    }
+    if (status.db && status.db.exists) {
+      var when = new Date(status.db.mtime * 1000)
+      parts.push('数据副本 ' + when.toLocaleString('zh-CN', { hour12: false }))
+    } else {
+      parts.push('没有数据副本')
+    }
+    if (status.key === false) parts.push('密钥未就绪')
+    if (status.port) parts.push('端口 ' + status.port)
+    $('meta').textContent = parts.join(' · ')
+
+    state.indexReady = !!(status.index && status.index.exists)
+    var build = status.build || { state: 'idle' }
+    var banner = $('banner')
+    var text = $('bannerText')
+    var bar = $('bannerBar')
+    var action = $('bannerAction')
+    action.classList.add('hidden')
+    banner.classList.remove('error')
+
+    if (build.state === 'running') {
+      state.building = true
+      banner.classList.remove('hidden')
+      var total = build.total || 0
+      var done = build.processed || 0
+      var pct = total > 0 ? Math.min(100, Math.round(done * 100 / total)) : 0
+      text.textContent = (build.step || '建立索引') + ' · ' + num(done) + ' / ' + num(total) + ' 条（' + pct + '%）'
+      bar.parentNode.style.display = ''
+      bar.style.width = pct + '%'
+      scheduleBuildPoll()
+      return
+    }
+    state.building = false
+    bar.parentNode.style.display = 'none'
+
+    if (build.state === 'error') {
+      banner.classList.remove('hidden')
+      banner.classList.add('error')
+      text.textContent = '索引失败：' + (build.error || '未知错误')
+      action.textContent = '重试'
+      action.classList.remove('hidden')
+      action.onclick = function () { startBuild(false) }
+      return
+    }
+    if (!state.indexReady) {
+      banner.classList.remove('hidden')
+      text.textContent = status.key === false
+        ? '还没有数据库密钥。先在对话里运行 qqnt_extract_key 提取密钥，再回来建立索引。'
+        : '还没有索引。首次需要把整库解析一遍（约 1 分钟），之后查询都是秒开。'
+      action.textContent = '建立索引'
+      action.classList.remove('hidden')
+      action.onclick = function () { startBuild(false) }
+      return
+    }
+    banner.classList.add('hidden')
+    action.onclick = null
+  }
+
+  function scheduleBuildPoll() {
+    if (state.poll) return
+    state.poll = setTimeout(function () {
+      state.poll = 0
+      refreshStatus(true)
+    }, 1200)
+  }
+
+  function refreshStatus(quiet) {
+    return api('/api/status').then(function (status) {
+      paintStatus(status)
+      if (state.building) return
+      if (state.indexReady && state.sessions.length === 0) loadSessions()
+      if (state.indexReady && !state.autoLoaded) {
+        state.autoLoaded = true
+        loadMessages(true)
+      }
+      if (!state.indexReady) {
+        $('sessions').innerHTML = ''
+        $('messages').innerHTML = ''
+        $('summary').textContent = '索引就绪后即可查询。'
+      }
+      if (!quiet && state.indexReady && !state.building) loadSessions()
+    }).catch(function (error) {
+      if (!quiet) toast(error.message)
+      $('meta').textContent = '无法读取状态：' + error.message
+    })
+  }
+
+  function startBuild(refresh) {
+    if (state.building) { toast('索引正在建立，请稍候'); return }
+    if (refresh && !confirm('重新从 QQ 复制数据库并重建索引？数据库约 1 GB，耗时 1~2 分钟。')) return
+    api('/api/index/build' + (refresh ? '?refresh=1' : ''), { method: 'POST' })
+      .then(function () {
+        state.building = true
+        $('banner').classList.remove('hidden')
+        $('bannerText').textContent = '索引任务已启动…'
+        $('bannerBar').parentNode.style.display = ''
+        $('bannerBar').style.width = '2%'
+        $('bannerAction').classList.add('hidden')
+        scheduleBuildPoll()
+      })
+      .catch(function (error) { toast(error.message) })
+  }
+
+  // ---------------------------------------------------------------- 会话
+  function loadSessions() {
+    return api('/api/sessions').then(function (payload) {
+      state.sessions = payload.sessions || []
+      renderSessions()
+    }).catch(function (error) { toast(error.message) })
+  }
+
+  function renderSessions() {
+    var term = $('sessionFilter').value.trim().toLowerCase()
+    var host = $('sessions')
+    host.innerHTML = ''
+    var shown = 0
+    state.sessions.forEach(function (item) {
+      if (state.kind !== 'all' && item.kind !== state.kind) return
+      if (term) {
+        var hay = (item.name + ' ' + item.id + ' ' + (item.qq || '')).toLowerCase()
+        if (hay.indexOf(term) === -1) return
+      }
+      shown += 1
+      var row = document.createElement('div')
+      row.className = 'session' + (item.kind === state.sessionKind && item.id === state.chatId ? ' active' : '')
+      row.innerHTML =
+        '<div class="name">' + esc(item.name) + '</div>' +
+        '<div class="count">' + num(item.messages) + '</div>' +
+        '<div class="sub"><span class="badge ' + (item.kind === 'private' ? 'private' : '') + '">' +
+        (item.kind === 'private' ? '私聊' : '群聊') + '</span><span>' +
+        esc(item.kind === 'private' ? (item.qq || item.id) : ('群 ' + item.id)) + '</span><span>' +
+        esc(item.lastTime || '') + '</span></div>'
+      row.onclick = function () { pickSession(item) }
+      host.appendChild(row)
+    })
+    if (!shown) {
+      host.innerHTML = '<div class="empty">没有匹配的会话</div>'
+    }
+  }
+
+  function pickSession(item) {
+    state.sessionKind = item.kind
+    state.chatId = item.id
+    state.chatName = item.name
+    // 切换会话时清掉上一轮筛选，否则新会话会莫名其妙显示 0 条
+    $('keyword').value = ''
+    $('sender').value = ''
+    $('since').value = ''
+    $('until').value = ''
+    renderSessions()
+    loadMessages(true)
+  }
+
+  // ---------------------------------------------------------------- 消息
+  function currentFilters() {
+    var args = {
+      keyword: $('keyword').value.trim(),
+      sender: $('sender').value.trim(),
+      since: $('since').value,
+      until: $('until').value
+    }
+    if (state.chatId) {
+      args.chatKind = state.sessionKind
+      args.chatId = state.chatId
+    }
+    return args
+  }
+
+  function queryString(filters, extra) {
+    var args = {}
+    Object.keys(filters).forEach(function (key) {
+      if (filters[key] !== '' && filters[key] != null) args[key] = filters[key]
+    })
+    Object.keys(extra || {}).forEach(function (key) { args[key] = extra[key] })
+    return new URLSearchParams(args).toString()
+  }
+
+  function loadMessages(reset) {
+    if (!state.indexReady) { toast('先建立索引'); return }
+    if (reset) {
+      // 记住本次查询的筛选条件：翻页与高亮都用它，不受之后输入框改动影响
+      state.filters = currentFilters()
+      state.offset = 0
+      state.rows = 0
+      $('messages').innerHTML = ''
+    }
+    var filters = state.filters || currentFilters()
+    var query = queryString(filters, { offset: state.offset, limit: PAGE })
+    $('summary').textContent = '查询中…'
+    api('/api/messages?' + query).then(function (payload) {
+      state.total = payload.total || 0
+      var rows = payload.rows || []
+      var host = $('messages')
+      if (reset && rows.length === 0) {
+        host.innerHTML = '<div class="empty">没有符合条件的消息</div>'
+      }
+      rows.forEach(function (item) { host.appendChild(renderRow(item, filters.keyword || '')) })
+      state.offset += rows.length
+      state.rows += rows.length
+      var scope = state.chatId ? '「' + state.chatName + '」' : '全部会话'
+      var filtered = ['keyword', 'sender', 'since', 'until'].some(function (key) {
+        return filters[key] !== undefined && filters[key] !== ''
+      })
+      $('summary').textContent = scope + (filtered ? '（已筛选）' : '') +
+        ' · 共 ' + num(state.total) + ' 条' +
+        (state.rows && state.rows < state.total ? '，已显示 ' + num(state.rows) + ' 条' : '')
+      $('more').classList.toggle('hidden', state.offset >= state.total)
+    }).catch(function (error) {
+      $('summary').textContent = '查询失败：' + error.message
+    })
+  }
+
+  function renderRow(item, keyword) {
+    var row = document.createElement('div')
+    row.className = 'row'
+
+    var time = document.createElement('div')
+    time.className = 'time'
+    time.textContent = item.time
+
+    var who = document.createElement('div')
+    who.className = 'who'
+    who.title = item.qq || ''
+    who.textContent = item.sender
+    if (item.out) {
+      var me = document.createElement('span')
+      me.className = 'me'
+      me.textContent = '我'
+      who.appendChild(me)
+    }
+
+    var msg = document.createElement('div')
+    msg.className = 'msg'
+    var text = esc(item.text)
+    if (keyword) {
+      var safeKeyword = esc(keyword)
+      text = text.split(safeKeyword).join('<mark>' + safeKeyword + '</mark>')
+    }
+    // 只把纯占位符（[图片]、[语音] …）标灰，别把整条回复也灰掉
+    msg.innerHTML = /^\[[^\]]{1,12}\]$/.test(item.text) ? '<span class="ph">' + text + '</span>' : text
+
+    var tools = document.createElement('div')
+    tools.className = 'tools'
+    if (item.text.length > 500 || item.text.split('\n').length > 10) {
+      msg.classList.add('clamped')
+      var toggle = document.createElement('button')
+      toggle.className = 'ghost expand'
+      toggle.textContent = '展开'
+      toggle.onclick = function () {
+        var clamped = msg.classList.toggle('clamped')
+        toggle.textContent = clamped ? '展开' : '收起'
+      }
+      tools.appendChild(toggle)
+    }
+
+    row.appendChild(time)
+    row.appendChild(who)
+    row.appendChild(msg)
+    row.appendChild(tools)
+    return row
+  }
+
+  // ---------------------------------------------------------------- 下载
+  function download() {
+    if (!state.indexReady) { toast('先建立索引'); return }
+    if (!state.total) { toast('当前没有可导出的消息'); return }
+    if (state.total > 20000 && !confirm('将要导出 ' + num(state.total) + ' 条消息，可能是个大文件。继续？')) return
+    var label = state.chatId ? state.chatName : '全部会话'
+    var keyword = $('keyword').value.trim()
+    if (keyword) label += '_' + keyword
+    var query = queryString(currentFilters(), { format: $('format').value, label: label })
+    toast('正在生成 ' + $('format').value.toUpperCase() + ' 文件…')
+    window.location.href = '/api/export?' + query
+  }
+
+  // ---------------------------------------------------------------- 事件
+  $('filters').addEventListener('submit', function (event) {
+    event.preventDefault()
+    var since = $('since').value
+    var until = $('until').value
+    if (since && until && since > until) {
+      toast('起始日期晚于结束日期，换个区间再查')
+      return
+    }
+    loadMessages(true)
+  })
+  $('clear').addEventListener('click', function () {
+    $('keyword').value = ''
+    $('sender').value = ''
+    $('since').value = ''
+    $('until').value = ''
+    loadMessages(true)
+  })
+  $('download').addEventListener('click', download)
+  $('more').addEventListener('click', function () { loadMessages(false) })
+  $('reload').addEventListener('click', function () { refreshStatus(false) })
+  $('sync').addEventListener('click', function () { startBuild(true) })
+  $('sessionFilter').addEventListener('input', renderSessions)
+  Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (tab) {
+    tab.addEventListener('click', function () {
+      Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (other) {
+        other.classList.toggle('active', other === tab)
+      })
+      state.kind = tab.getAttribute('data-kind')
+      renderSessions()
+    })
+  })
+
+  refreshStatus(false)
+})()
+</script>
+</body>
+</html>

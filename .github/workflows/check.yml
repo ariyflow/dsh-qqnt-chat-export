@@ -1,0 +1,45 @@
+name: check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Node syntax
+        run: |
+          node --check index.js
+          node --check web.js
+
+      - name: Inline page script syntax
+        run: |
+          node -e "const fs=require('fs');const html=fs.readFileSync('page.html','utf8');const m=html.match(/<script>([\s\S]*?)<\/script>/);if(!m)throw new Error('page.html has no inline script');fs.writeFileSync('page-inline.js',m[1]);"
+          node --check page-inline.js
+          rm page-inline.js
+
+      - name: Python syntax
+        run: python -m py_compile scripts/qqnt_export.py scripts/qqnt_query.py
+
+      - name: JSON manifests
+        run: |
+          node -e "for (const f of ['package.json','locale/en.json','locale/zh.json']) { JSON.parse(require('fs').readFileSync(f,'utf8')); } console.log('json ok')"
+
+      - name: Manifest and bundle patch
+        run: |
+          node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));const patch=pkg.dsh&&pkg.dsh.bundle&&pkg.dsh.bundle.patch;if(!patch||!fs.existsSync(patch))throw new Error('dsh.bundle.patch is missing or points at nothing');const yaml=fs.readFileSync(patch,'utf8');if(!yaml.includes(\"name: '\"+pkg.name+\"'\"))throw new Error('patch does not insert ' + pkg.name);if(!fs.existsSync('scripts/qqnt_export.py'))throw new Error('missing bundled exporter');if(!fs.existsSync('page.html'))throw new Error('missing page.html');console.log('manifest ok')"
+
+      - name: Icon size
+        run: |
+          node -e "const fs=require('fs');const size=fs.statSync('icon.svg').size;if(size>256*1024)throw new Error('icon.svg exceeds 256 KiB');console.log('icon', size, 'bytes')"
