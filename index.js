@@ -38,19 +38,51 @@ const PROMPT_ORDER = 5000
 /** One-line probe: Python version, pointer width, and whether sqlcipher3 resolves. */
 const PYTHON_PROBE = "import json,struct,sys,importlib.util as u;print(json.dumps({'version':sys.version.split()[0],'bits':struct.calcsize('P')*8,'sqlcipher3':u.find_spec('sqlcipher3') is not None}))"
 
+/** Expand a leading `~` because config values do not go through a shell. */
+function expandHome(value) {
+  if (value === '~') return os.homedir()
+  if (value.startsWith('~/') || value.startsWith('~\\')) return path.join(os.homedir(), value.slice(2))
+  return value
+}
+
 /** Read the row's config defensively; this bundle declares no Config schema. */
 function resolveSettings(config) {
   const raw = config && typeof config === 'object' ? config : {}
   const str = (value) => (typeof value === 'string' && value.trim() !== '' ? value.trim() : '')
   const webPort = Number.parseInt(String(raw.webPort ?? ''), 10)
+  const pythonPath = str(raw.pythonPath)
+  const python = pythonPath === ''
+    ? (process.platform === 'win32' ? 'python' : 'python3')
+    : /[\\/]/.test(pythonPath) ? path.resolve(expandHome(pythonPath)) : pythonPath
   return {
-    python: str(raw.pythonPath) || 'python',
-    workDir: str(raw.workDir) ? path.resolve(str(raw.workDir)) : DEFAULT_WORK_DIR,
-    tencentRoot: str(raw.tencentRoot) ? path.resolve(str(raw.tencentRoot)) : '',
+    python,
+    workDir: str(raw.workDir) ? path.resolve(expandHome(str(raw.workDir))) : DEFAULT_WORK_DIR,
+    tencentRoot: str(raw.tencentRoot) ? path.resolve(expandHome(str(raw.tencentRoot))) : '',
     account: str(raw.account),
     webPort: Number.isFinite(webPort) && webPort >= 0 ? webPort : DEFAULT_WEB_PORT,
     webHost: str(raw.webHost) || '127.0.0.1',
   }
+}
+
+/**
+ * The user's downloads directory, following the XDG user-dirs file on Linux.
+ * Its localized name (e.g. `~/下载`) means `~/Downloads` is not a safe guess.
+ */
+function defaultDownloadDir() {
+  if (process.platform === 'win32') return path.join(os.homedir(), 'Downloads')
+  const fromEnv = process.env.XDG_DOWNLOAD_DIR
+  if (fromEnv) return path.resolve(fromEnv)
+  try {
+    const configHome = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config')
+    const file = path.join(configHome, 'user-dirs.dirs')
+    const match = /^XDG_DOWNLOAD_DIR="(.*)"$/m.exec(readFileSync(file, 'utf8'))
+    if (match) {
+      return path.resolve(match[1].replace(/^\$HOME(?=\/|$)/, os.homedir()))
+    }
+  } catch {
+    // No XDG config; fall through to the conventional name.
+  }
+  return path.join(os.homedir(), 'Downloads')
 }
 
 /** SQLCipher writes one native error block per rejected candidate key. */
@@ -127,7 +159,7 @@ function run(command, argv, { signal, cwd }) {
     child.on('error', (error) => {
       signal?.removeEventListener('abort', onAbort)
       reject(error.code === 'ENOENT'
-        ? new Error(`cannot run "${command}": not found on PATH. Set pythonPath in the config of this bundle to a 64-bit Python 3 executable.`)
+        ? new Error(`cannot run "${command}": not found on PATH. Set pythonPath in the config of this bundle to a 64-bit Python 3 executable${process.platform === 'win32' ? ' (for example python.exe).' : ' (for example python3 or the python binary of a virtualenv).'}`)
         : error)
     })
     child.on('close', (code) => {
@@ -174,7 +206,7 @@ function globalArgs(settings, account) {
 /** Run the exporter and return its exit code plus scrubbed combined output. */
 async function runCli(settings, argv, exec) {
   if (!existsSync(CLI)) throw new Error(`bundled helper is missing: ${CLI}`)
-  mkdirSync(settings.workDir, { recursive: true })
+  mkdirSync(settings.workDir, { recursive: true, mode: 0o700 })
   const result = await run(settings.python, ['-X', 'utf8', CLI, ...argv], {
     signal: exec.signal,
     cwd: settings.workDir,
@@ -229,6 +261,9 @@ function renderStatus(_args, value) {
   const lines = []
   if (value.pythonVersion !== '') {
     lines.push(`Python ${value.pythonVersion} (${value.bits}-bit); sqlcipher3 ${value.sqlcipher3 ? 'available' : 'MISSING'}`)
+    if (!value.sqlcipher3) {
+      lines.push(`Install it with: ${value.pythonPath} -m pip install sqlcipher3-wheels`)
+    }
   }
   if (value.output !== '') lines.push(value.output)
   return [{ type: 'text', text: lines.join('\n\n') }]
@@ -250,7 +285,7 @@ function exportTool(settings) {
         },
         outDir: {
           type: 'string',
-          description: 'Absolute output directory. Defaults to QQ导出_<group> inside the user\'s Downloads folder.',
+          description: 'Absolute output directory. Defaults to QQ导出_<group> inside the user\'s downloads folder (the XDG download directory on Linux).',
         },
         formats: {
           type: 'array',
@@ -273,7 +308,7 @@ function exportTool(settings) {
       const group = String(args.group).trim()
       const outDir = typeof args.outDir === 'string' && args.outDir.trim() !== ''
         ? path.resolve(args.outDir.trim())
-        : path.join(os.homedir(), 'Downloads', `QQ导出_${group}`)
+        : path.join(defaultDownloadDir(), `QQ导出_${group}`)
       const formats = Array.isArray(args.formats) && args.formats.length > 0
         ? [...new Set(args.formats)].filter((format) => DEFAULT_FORMATS.includes(format))
         : DEFAULT_FORMATS
@@ -411,7 +446,7 @@ function groupsTool(settings) {
 /** Workflow and guardrails the tool definitions do not carry. */
 const GUIDANCE = `## QQ chat export
 
-The qqnt_* tools read the message database of the NTQQ client installed on this machine. Use them in order: qqnt_status, then qqnt_extract_key, then qqnt_list_groups, then qqnt_export_group. Key extraction only works while QQ is logged in; when it finds no key, ask the user to confirm QQ is signed in rather than retrying. Confirm the exact group number with the user before exporting, because the common off-by-one-digit guess exports nothing. Never move, edit, or delete files under the QQ data directory, and do not end the QQ process.`
+The qqnt_* tools read the message database of the NTQQ client installed on this machine. Use them in order: qqnt_status, then qqnt_extract_key, then qqnt_list_groups, then qqnt_export_group. Key extraction only works while QQ is logged in; when it finds no key, ask the user to confirm QQ is signed in rather than retrying. Confirm the exact group number with the user before exporting, because the common off-by-one-digit guess exports nothing. Never move, edit, or delete files under the QQ data directory, and do not end the QQ process. On Linux the key is read from the qq main process memory: if the kernel's ptrace scope denies it, the tool prints the exact sysctl command to run; report that fix instead of retrying blindly.`
 
 /** Appended only while the browsing UI is actually listening. */
 function webGuidance(url) {

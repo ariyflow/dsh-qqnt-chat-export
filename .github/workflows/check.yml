@@ -5,8 +5,17 @@ on:
   pull_request:
 
 jobs:
-  syntax:
-    runs-on: ubuntu-latest
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both backends must keep importing and probing: Win32 via ctypes,
+        # Linux via /proc and the ptrace-scope check.
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -31,6 +40,13 @@ jobs:
 
       - name: Python syntax
         run: python -m py_compile scripts/qqnt_export.py scripts/qqnt_query.py
+
+      # Running `info` loads the platform backend and enumerates processes;
+      # `status` opens the query layer without needing sqlcipher3.
+      - name: Runtime smoke test
+        run: |
+          python scripts/qqnt_export.py info
+          python scripts/qqnt_query.py --work "${RUNNER_TEMP}/qqnt-smoke" status
 
       - name: JSON manifests
         run: |
@@ -59,7 +75,7 @@ jobs:
 
       - name: Manifest and bundle patch
         run: |
-          node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));const patch=pkg.dsh&&pkg.dsh.bundle&&pkg.dsh.bundle.patch;if(!patch||!fs.existsSync(patch))throw new Error('dsh.bundle.patch is missing or points at nothing');const yaml=fs.readFileSync(patch,'utf8');if(!yaml.includes(\"name: '\"+pkg.name+\"'\"))throw new Error('patch does not insert ' + pkg.name);if(!fs.existsSync('scripts/qqnt_export.py'))throw new Error('missing bundled exporter');if(!fs.existsSync('page.html'))throw new Error('missing page.html');console.log('manifest ok')"
+          node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));const patch=pkg.dsh&&pkg.dsh.bundle&&pkg.dsh.bundle.patch;if(!patch||!fs.existsSync(patch))throw new Error('dsh.bundle.patch is missing or points at nothing');const yaml=fs.readFileSync(patch,'utf8');if(!yaml.includes(\"name: '\"+pkg.name+\"'\"))throw new Error('patch does not insert ' + pkg.name);if(!fs.existsSync('scripts/qqnt_export.py'))throw new Error('missing bundled exporter');if(!fs.existsSync('page.html'))throw new Error('missing page.html');for (const os of ['win32','linux']) { if (!pkg.os || !pkg.os.includes(os)) throw new Error('package.json os lacks ' + os); } console.log('manifest ok')"
 
       - name: Icon size
         run: |

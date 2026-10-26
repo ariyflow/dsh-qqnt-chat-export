@@ -29,6 +29,7 @@ import os
 import sqlite3
 import sys
 import time
+import urllib.parse
 
 import qqnt_export as q
 
@@ -87,6 +88,17 @@ def paths(work):
     }
 
 
+def readonly_uri(path):
+    """Build a read-only SQLite URI that survives spaces and non-ASCII paths.
+
+    `workDir` defaults to the system temp directory, which is not guaranteed to
+    be ASCII or free of spaces (Windows `%TEMP%`, Linux XDG paths), so the path
+    has to be percent-encoded rather than interpolated raw.
+    """
+    normalized = os.path.abspath(path).replace('\\', '/')
+    return 'file:%s?mode=ro' % urllib.parse.quote(normalized, safe='/:')
+
+
 def read_key(p):
     try:
         with open(p['key'], encoding='ascii', errors='replace') as f:
@@ -102,7 +114,7 @@ def copy_db(src, dst):
     """Copy one database with its 1 KB Tencent header stripped, reusing the copy."""
     if not os.path.exists(src):
         return None
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    q.ensure_workdir(os.path.dirname(dst))
     if os.path.exists(dst) and os.path.getsize(dst) == os.path.getsize(src) - q.HEADER_SIZE:
         return dst
     q.copy_shared(src, dst, skip=q.HEADER_SIZE)
@@ -137,7 +149,7 @@ def index_counts(path):
     if not os.path.exists(path):
         return {}, 0
     try:
-        conn = sqlite3.connect('file:%s?mode=ro' % path.replace('\\', '/'), uri=True)
+        conn = sqlite3.connect(readonly_uri(path), uri=True)
         meta = dict(conn.execute('SELECT k, v FROM meta').fetchall())
         messages = conn.execute('SELECT count(*) FROM messages').fetchone()[0]
         chats = conn.execute('SELECT count(*) FROM chats').fetchone()[0]
@@ -202,7 +214,7 @@ def acquire_lock(p):
 
 
 def cmd_build(p, root, account, refresh):
-    os.makedirs(p['work'], exist_ok=True)
+    q.ensure_workdir(p['work'])
     lock = acquire_lock(p)
     try:
         run_build(p, root, account, refresh)
@@ -363,7 +375,7 @@ def run_build(p, root, account, refresh):
 def open_index(p):
     if not os.path.exists(p['index']):
         q.die('还没有索引。先建立索引（首次约需 1 分钟）。')
-    return sqlite3.connect('file:%s?mode=ro' % p['index'].replace('\\', '/'), uri=True)
+    return sqlite3.connect(readonly_uri(p['index']), uri=True)
 
 
 def like_escape(text):
@@ -637,9 +649,9 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     p = paths(args.work)
-    if sys.platform != 'win32':
-        q.die('本工具依赖 Windows 的进程内存读取接口，只能在 Windows 上运行')
-    root = args.root or (q.default_roots()[0] if q.default_roots() else None)
+    if not (q.IS_WINDOWS or q.IS_LINUX):
+        q.die('本工具仅支持 Windows 与 Linux（当前平台: %s）' % sys.platform)
+    root = args.root
 
     try:
         if args.cmd == 'build':

@@ -3,8 +3,10 @@
 """
 qqnt_export.py — NTQQ (QQ NT / QQ 9.9.x) 群聊记录导出工具
 
+支持 Windows 与 Linux。
+
 流程：
-  1. 从运行中的 QQ.exe 进程内存里取 16 字节数据库密钥（密钥由服务器下发，无法离线推导）
+  1. 从运行中的 QQ 进程内存里取 16 字节数据库密钥（密钥由服务器下发，无法离线推导）
   2. 剥掉 nt_msg.db 开头的 1024 字节腾讯自定义头
   3. 用 SQLCipher 4 打开并解析消息 Protobuf
   4. 导出为可读 txt + 可查询 sqlite
@@ -21,16 +23,30 @@ from __future__ import annotations
 
 import argparse
 import ctypes
-import ctypes.wintypes as wt
 import csv
 import datetime
+import errno
 import json
 import os
 import re
-import shutil
 import sqlite3
 import sys
 import time
+
+# --------------------------------------------------------------------------
+# 平台
+# --------------------------------------------------------------------------
+IS_WINDOWS = sys.platform == 'win32'
+IS_LINUX = sys.platform.startswith('linux')
+
+
+class MemoryAccessDenied(Exception):
+    """当前用户无权读取 QQ 进程内存（Linux 上通常由 ptrace 保护导致）。"""
+
+
+def qq_process_label():
+    return 'QQ.exe' if IS_WINDOWS else 'QQ'
+
 
 # --------------------------------------------------------------------------
 # 常量
@@ -70,12 +86,33 @@ def human(n):
         n /= 1024
 
 
+def ensure_workdir(path):
+    """Create the work directory and keep its plaintext contents private.
+
+    On Linux the default work directory lives under /tmp, so a world-readable
+    mode would expose key.txt, the decrypted database, and index.sqlite to every
+    local user. Windows ACLs already scope %TEMP% per user.
+    """
+    os.makedirs(path, exist_ok=True)
+    if not IS_WINDOWS:
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
+    return path
+
+
 def sqlcipher_module():
     try:
         from sqlcipher3 import dbapi2 as mod
         return mod
     except ImportError:
-        die('缺少依赖 sqlcipher3，请先执行:\n    pip install sqlcipher3-wheels')
+        die('缺少依赖 sqlcipher3。请先安装（需要 64 位 Python 3）：\n'
+            '    Windows: python -m pip install sqlcipher3-wheels\n'
+            '    Linux:   python3 -m pip install sqlcipher3-wheels\n'
+            '如果系统 pip 受 PEP 668 管理（externally-managed-environment），\n'
+            '建议先建虚拟环境，例如 python3 -m venv ~/.venvs/qqnt && '
+            '~/.venvs/qqnt/bin/pip install sqlcipher3-wheels')
 
 
 def open_encrypted(path, key, readonly=True):
@@ -91,183 +128,485 @@ def open_encrypted(path, key, readonly=True):
 
 
 # --------------------------------------------------------------------------
-# Win32：进程枚举 / 内存读取 / 共享读文件
+# 平台层：进程枚举 / 内存读取 / 共享读文件
 # --------------------------------------------------------------------------
-k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+if IS_WINDOWS:
+    import ctypes.wintypes as wt
 
-PROCESS_QUERY_INFORMATION = 0x0400
-PROCESS_VM_READ = 0x0010
-MEM_COMMIT = 0x1000
-PAGE_GUARD = 0x100
-PAGE_NOACCESS = 0x01
-READABLE = (0x02, 0x04, 0x08, 0x20, 0x40, 0x80)
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
 
-GENERIC_READ = 0x80000000
-FILE_SHARE_ALL = 0x01 | 0x02 | 0x04
-OPEN_EXISTING = 3
-INVALID_HANDLE = ctypes.c_void_p(-1).value
+    PROCESS_QUERY_INFORMATION = 0x0400
+    PROCESS_VM_READ = 0x0010
+    MEM_COMMIT = 0x1000
+    PAGE_GUARD = 0x100
+    PAGE_NOACCESS = 0x01
+    READABLE = (0x02, 0x04, 0x08, 0x20, 0x40, 0x80)
 
+    GENERIC_READ = 0x80000000
+    FILE_SHARE_ALL = 0x01 | 0x02 | 0x04
+    OPEN_EXISTING = 3
+    INVALID_HANDLE = ctypes.c_void_p(-1).value
 
-class MBI64(ctypes.Structure):
-    _fields_ = [('BaseAddress', ctypes.c_ulonglong),
-                ('AllocationBase', ctypes.c_ulonglong),
-                ('AllocationProtect', wt.DWORD),
-                ('__a1', wt.DWORD),
-                ('RegionSize', ctypes.c_ulonglong),
-                ('State', wt.DWORD),
-                ('Protect', wt.DWORD),
-                ('Type', wt.DWORD),
-                ('__a2', wt.DWORD)]
+    class MBI64(ctypes.Structure):
+        _fields_ = [('BaseAddress', ctypes.c_ulonglong),
+                    ('AllocationBase', ctypes.c_ulonglong),
+                    ('AllocationProtect', wt.DWORD),
+                    ('__a1', wt.DWORD),
+                    ('RegionSize', ctypes.c_ulonglong),
+                    ('State', wt.DWORD),
+                    ('Protect', wt.DWORD),
+                    ('Type', wt.DWORD),
+                    ('__a2', wt.DWORD)]
 
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [('dwSize', wt.DWORD), ('cntUsage', wt.DWORD),
+                    ('th32ProcessID', wt.DWORD), ('th32DefaultHeapID', ctypes.c_void_p),
+                    ('th32ModuleID', wt.DWORD), ('cntThreads', wt.DWORD),
+                    ('th32ParentProcessID', wt.DWORD), ('pcPriClassBase', ctypes.c_long),
+                    ('dwFlags', wt.DWORD), ('szExeFile', ctypes.c_wchar * 260)]
 
-class PROCESSENTRY32W(ctypes.Structure):
-    _fields_ = [('dwSize', wt.DWORD), ('cntUsage', wt.DWORD),
-                ('th32ProcessID', wt.DWORD), ('th32DefaultHeapID', ctypes.c_void_p),
-                ('th32ModuleID', wt.DWORD), ('cntThreads', wt.DWORD),
-                ('th32ParentProcessID', wt.DWORD), ('pcPriClassBase', ctypes.c_long),
-                ('dwFlags', wt.DWORD), ('szExeFile', ctypes.c_wchar * 260)]
+    k32.CreateToolhelp32Snapshot.restype = wt.HANDLE
+    k32.CreateToolhelp32Snapshot.argtypes = [wt.DWORD, wt.DWORD]
+    k32.Process32FirstW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    k32.Process32NextW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    k32.OpenProcess.restype = wt.HANDLE
+    k32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+    k32.VirtualQueryEx.restype = ctypes.c_size_t
+    k32.VirtualQueryEx.argtypes = [wt.HANDLE, ctypes.c_ulonglong,
+                                   ctypes.POINTER(MBI64), ctypes.c_size_t]
+    k32.ReadProcessMemory.restype = wt.BOOL
+    k32.ReadProcessMemory.argtypes = [wt.HANDLE, ctypes.c_ulonglong, ctypes.c_void_p,
+                                      ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
+    k32.CloseHandle.argtypes = [wt.HANDLE]
+    k32.CreateFileW.restype = wt.HANDLE
+    k32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p,
+                                wt.DWORD, wt.DWORD, wt.HANDLE]
+    k32.ReadFile.argtypes = [wt.HANDLE, ctypes.c_void_p, wt.DWORD,
+                             ctypes.POINTER(wt.DWORD), ctypes.c_void_p]
 
+    def find_pids(exe='QQ.exe'):
+        snap = k32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+        if snap == INVALID_HANDLE:
+            return []
+        out = []
+        try:
+            e = PROCESSENTRY32W()
+            e.dwSize = ctypes.sizeof(e)
+            ok = k32.Process32FirstW(snap, ctypes.byref(e))
+            while ok:
+                if e.szExeFile.lower() == exe.lower():
+                    out.append(int(e.th32ProcessID))
+                ok = k32.Process32NextW(snap, ctypes.byref(e))
+        finally:
+            k32.CloseHandle(snap)
+        return out
 
-k32.CreateToolhelp32Snapshot.restype = wt.HANDLE
-k32.CreateToolhelp32Snapshot.argtypes = [wt.DWORD, wt.DWORD]
-k32.Process32FirstW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
-k32.Process32NextW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
-k32.OpenProcess.restype = wt.HANDLE
-k32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
-k32.VirtualQueryEx.restype = ctypes.c_size_t
-k32.VirtualQueryEx.argtypes = [wt.HANDLE, ctypes.c_ulonglong,
-                               ctypes.POINTER(MBI64), ctypes.c_size_t]
-k32.ReadProcessMemory.restype = wt.BOOL
-k32.ReadProcessMemory.argtypes = [wt.HANDLE, ctypes.c_ulonglong, ctypes.c_void_p,
-                                  ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
-k32.CloseHandle.argtypes = [wt.HANDLE]
-k32.CreateFileW.restype = wt.HANDLE
-k32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p,
-                            wt.DWORD, wt.DWORD, wt.HANDLE]
-k32.ReadFile.argtypes = [wt.HANDLE, ctypes.c_void_p, wt.DWORD,
-                         ctypes.POINTER(wt.DWORD), ctypes.c_void_p]
+    def copy_shared(src, dst, skip=0, chunk=8 * 1024 * 1024):
+        """用 FILE_SHARE_READ|WRITE|DELETE 打开，QQ 运行中也能复制。"""
+        h = k32.CreateFileW(src, GENERIC_READ, FILE_SHARE_ALL, None,
+                            OPEN_EXISTING, 0x80, None)  # FILE_ATTRIBUTE_NORMAL
+        if h == INVALID_HANDLE:
+            raise OSError(ctypes.get_last_error(), 'CreateFileW failed: ' + src)
+        buf = ctypes.create_string_buffer(chunk)
+        read = wt.DWORD(0)
+        total = 0
+        try:
+            with open(dst, 'wb') as fo:
+                skip_left = skip
+                while skip_left > 0:                      # 丢弃自定义头（1 KB）
+                    n = min(len(buf), skip_left)
+                    if not k32.ReadFile(h, buf, n, ctypes.byref(read), None) or read.value == 0:
+                        break
+                    skip_left -= read.value
+                while True:
+                    if not k32.ReadFile(h, buf, chunk, ctypes.byref(read), None) or read.value == 0:
+                        break
+                    fo.write(buf.raw[:read.value])
+                    total += read.value
+        finally:
+            k32.CloseHandle(h)
+        return total
 
-
-def find_pids(exe='QQ.exe'):
-    snap = k32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
-    if snap == INVALID_HANDLE:
-        return []
-    out = []
-    try:
-        e = PROCESSENTRY32W()
-        e.dwSize = ctypes.sizeof(e)
-        ok = k32.Process32FirstW(snap, ctypes.byref(e))
-        while ok:
-            if e.szExeFile.lower() == exe.lower():
-                out.append(int(e.th32ProcessID))
-            ok = k32.Process32NextW(snap, ctypes.byref(e))
-    finally:
-        k32.CloseHandle(snap)
-    return out
-
-
-def copy_shared(src, dst, skip=0, chunk=8 * 1024 * 1024):
-    """用 FILE_SHARE_READ|WRITE|DELETE 打开，QQ 运行中也能复制。"""
-    h = k32.CreateFileW(src, GENERIC_READ, FILE_SHARE_ALL, None,
-                        OPEN_EXISTING, 0x80, None)  # FILE_ATTRIBUTE_NORMAL
-    if h == INVALID_HANDLE:
-        raise OSError(ctypes.get_last_error(), 'CreateFileW failed: ' + src)
-    buf = ctypes.create_string_buffer(chunk)
-    read = wt.DWORD(0)
-    total = 0
-    try:
-        with open(dst, 'wb') as fo:
-            skip_left = skip
-            while skip_left > 0:                      # 丢弃自定义头（1 KB）
-                n = min(len(buf), skip_left)
-                if not k32.ReadFile(h, buf, n, ctypes.byref(read), None) or read.value == 0:
+    def scan_process_memory(pid, max_candidates=400000):
+        """返回该进程里所有『长度恰为 16 的可打印 ASCII 串』。"""
+        h = k32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
+        if not h:
+            return set()
+        found = set()
+        addr = 0
+        mbi = MBI64()
+        size = ctypes.sizeof(mbi)
+        buf = ctypes.create_string_buffer(4 * 1024 * 1024)
+        read = ctypes.c_size_t(0)
+        pat = re.compile(rb'[\x20-\x7e]+')
+        try:
+            while addr < 0x7FFFFFFF0000:
+                if k32.VirtualQueryEx(h, addr, ctypes.byref(mbi), size) != size:
                     break
-                skip_left -= read.value
+                base, rsize = int(mbi.BaseAddress), int(mbi.RegionSize)
+                if rsize <= 0:
+                    break
+                if (mbi.State == MEM_COMMIT and (mbi.Protect & 0xFF) in READABLE
+                        and not (mbi.Protect & PAGE_GUARD) and not (mbi.Protect & PAGE_NOACCESS)):
+                    off = 0
+                    while off < rsize:
+                        n = min(len(buf), rsize - off)
+                        if k32.ReadProcessMemory(h, base + off, buf, n, ctypes.byref(read)):
+                            for m in pat.finditer(bytes(buf.raw[:read.value])):
+                                s = m.group()
+                                if len(s) == 16:
+                                    found.add(s)
+                                    if len(found) > max_candidates:
+                                        return found
+                        off += n
+                addr = base + rsize
+        finally:
+            k32.CloseHandle(h)
+        return found
+
+    def memory_access_state():
+        return '允许（Windows 进程 API）'
+
+elif IS_LINUX:
+    # QQ NT for Linux 的主进程是 /opt/QQ/qq（也可能由 linuxqq 包装脚本拉起）。
+    # 数据库密钥在 qq 主进程内存里，读取 /proc/<pid>/mem 需要 ptrace 权限。
+    QQ_PROCESS_NAMES = ('qq', 'linuxqq')
+    SCAN_CHUNK = 4 * 1024 * 1024
+    MAX_SCAN_BYTES = 4 * 1024 * 1024 * 1024
+    SKIP_MAP_NAMES = ('[vvar]', '[vvar_vclock]', '[vdso]', '[vsyscall]', '[sigpage]')
+
+    def _proc_file(pid, name):
+        try:
+            with open('/proc/%d/%s' % (pid, name), 'rb') as f:
+                return f.read()
+        except OSError:
+            return b''
+
+    def _is_qq_process(pid):
+        comm = _proc_file(pid, 'comm').decode('utf-8', 'replace').strip().lower()
+        if comm in QQ_PROCESS_NAMES:
+            return True
+        try:
+            exe = os.path.basename(os.readlink('/proc/%d/exe' % pid)).lower()
+        except OSError:
+            exe = ''
+        return exe in QQ_PROCESS_NAMES
+
+    def find_pids(exe=None):
+        """返回 QQ 主进程 PID；渲染进程（--type=...）不持有数据库密钥。"""
+        main, others = [], []
+        try:
+            entries = os.listdir('/proc')
+        except OSError:
+            return []
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            if not _is_qq_process(pid):
+                continue
+            cmdline = _proc_file(pid, 'cmdline').replace(b'\x00', b' ')
+            others.append(pid)
+            if b'--type=' not in cmdline:
+                main.append(pid)
+        return main or others
+
+    def _ptrace_scope():
+        try:
+            with open('/proc/sys/kernel/yama/ptrace_scope', encoding='ascii') as f:
+                return int(f.read().strip())
+        except (OSError, ValueError):
+            return None
+
+    def _memory_hint(pid):
+        scope = _ptrace_scope()
+        lines = [
+            '无法读取 QQ 进程 %d 的内存（权限不足）。' % pid,
+            'Linux 的 ptrace 保护默认禁止读取非子进程的内存，而 QQ 不是本命令的子进程。',
+        ]
+        if scope is not None:
+            lines.append('当前 kernel.yama.ptrace_scope = %d。' % scope)
+        lines += [
+            '临时放开（重启后恢复，需要管理员）：',
+            '    sudo sysctl -w kernel.yama.ptrace_scope=0',
+            '然后重新执行本命令。',
+            '也可以让本命令以 root 身份运行（工作目录中的文件会归 root 所有）。',
+            '如果依然被拒绝，请确认 QQ 与当前用户相同，且 /proc 没有用 hidepid 挂载。',
+        ]
+        return '\n'.join(lines)
+
+    def memory_access_state():
+        scope = _ptrace_scope()
+        if scope == 3:
+            return '受限（kernel.yama.ptrace_scope=3 禁止 ptrace，root 也需要先改回 0/1）'
+        if os.geteuid() == 0:
+            return '允许（root）'
+        if scope == 0:
+            return '允许（kernel.yama.ptrace_scope=0）'
+        if scope is not None:
+            return ('受限（kernel.yama.ptrace_scope=%d；提取密钥前需 '
+                    'sudo sysctl -w kernel.yama.ptrace_scope=0 或使用 root）' % scope)
+        return '未知（无法读取 kernel.yama.ptrace_scope）'
+
+    def copy_shared(src, dst, skip=0, chunk=8 * 1024 * 1024):
+        """Linux 允许直接读取正在写入的文件，不需要 Windows 的共享标志。"""
+        total = 0
+        with open(src, 'rb', buffering=0) as fi, open(dst, 'wb', buffering=0) as fo:
+            if skip:
+                fi.seek(skip)
             while True:
-                if not k32.ReadFile(h, buf, chunk, ctypes.byref(read), None) or read.value == 0:
+                block = fi.read(chunk)
+                if not block:
                     break
-                fo.write(buf.raw[:read.value])
-                total += read.value
-    finally:
-        k32.CloseHandle(h)
-    return total
+                fo.write(block)
+                total += len(block)
+        return total
 
+    def _readable_regions(pid):
+        """产出可以包含运行时数据的映射：[start, end)。
 
-def scan_process_memory(pid, max_candidates=400000):
-    """返回该进程里所有『长度恰为 16 的可打印 ASCII 串』。"""
-    h = k32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
-    if not h:
+        只读且映射到文件的页（二进制、.so、.pak 等）不可能存放服务器下发的
+        密钥，跳过它们可以少读几百 MB。
+        """
+        try:
+            with open('/proc/%d/maps' % pid, encoding='utf-8', errors='replace') as maps:
+                for line in maps:
+                    parts = line.split(None, 5)
+                    if len(parts) < 2 or 'r' not in parts[1]:
+                        continue
+                    try:
+                        start_s, end_s = parts[0].split('-')
+                        start, end = int(start_s, 16), int(end_s, 16)
+                    except ValueError:
+                        continue
+                    if end <= start:
+                        continue
+                    path = parts[5].strip() if len(parts) > 5 else ''
+                    if path in SKIP_MAP_NAMES:
+                        continue
+                    if path.startswith('/') and 'w' not in parts[1]:
+                        continue
+                    yield start, end
+        except OSError:
+            return
+
+    def scan_process_memory(pid, max_candidates=400000):
+        """用 /proc/<pid>/mem 扫描 16 字节可打印 ASCII 候选密钥。"""
+        try:
+            fd = os.open('/proc/%d/mem' % pid, os.O_RDONLY)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EPERM):
+                raise MemoryAccessDenied(_memory_hint(pid))
+            if exc.errno in (errno.ENOENT, errno.ESRCH):
+                return set()          # 进程已经退出
+            raise
+        found = set()
+        pat = re.compile(rb'[\x20-\x7e]+')
+        scanned = 0
+        try:
+            for start, end in _readable_regions(pid):
+                if scanned >= MAX_SCAN_BYTES:
+                    break
+                addr = start
+                tail = b''
+                while addr < end and scanned < MAX_SCAN_BYTES:
+                    n = min(SCAN_CHUNK, end - addr, MAX_SCAN_BYTES - scanned)
+                    try:
+                        data = os.pread(fd, n, addr)
+                    except OSError as exc:
+                        # 进程运行中映射被回收会返回 EIO；跳过这一块即可。
+                        if exc.errno in (errno.EIO, errno.EFAULT,
+                                         errno.ENOENT, errno.ESRCH):
+                            data = b''
+                        else:
+                            raise
+                    if not data:
+                        addr += n
+                        scanned += n
+                        tail = b''
+                        continue
+                    window = tail + data
+                    for match in pat.finditer(window):
+                        candidate = match.group()
+                        if len(candidate) == 16:
+                            found.add(candidate)
+                            if len(found) > max_candidates:
+                                return found
+                    tail = window[-15:]
+                    addr += len(data)
+                    scanned += len(data)
+        finally:
+            os.close(fd)
+        return found
+
+else:
+    def find_pids(exe=None):
+        return []
+
+    def copy_shared(src, dst, skip=0, chunk=8 * 1024 * 1024):
+        raise OSError('unsupported platform: %s' % sys.platform)
+
+    def scan_process_memory(pid, max_candidates=400000):
         return set()
-    found = set()
-    addr = 0
-    mbi = MBI64()
-    size = ctypes.sizeof(mbi)
-    buf = ctypes.create_string_buffer(4 * 1024 * 1024)
-    read = ctypes.c_size_t(0)
-    pat = re.compile(rb'[\x20-\x7e]+')
-    try:
-        while addr < 0x7FFFFFFF0000:
-            if k32.VirtualQueryEx(h, addr, ctypes.byref(mbi), size) != size:
-                break
-            base, rsize = int(mbi.BaseAddress), int(mbi.RegionSize)
-            if rsize <= 0:
-                break
-            if (mbi.State == MEM_COMMIT and (mbi.Protect & 0xFF) in READABLE
-                    and not (mbi.Protect & PAGE_GUARD) and not (mbi.Protect & PAGE_NOACCESS)):
-                off = 0
-                while off < rsize:
-                    n = min(len(buf), rsize - off)
-                    if k32.ReadProcessMemory(h, base + off, buf, n, ctypes.byref(read)):
-                        for m in pat.finditer(bytes(buf.raw[:read.value])):
-                            s = m.group()
-                            if len(s) == 16:
-                                found.add(s)
-                                if len(found) > max_candidates:
-                                    return found
-                    off += n
-            addr = base + rsize
-    finally:
-        k32.CloseHandle(h)
-    return found
+
+    def memory_access_state():
+        return '不支持当前平台'
 
 
 # --------------------------------------------------------------------------
 # 定位 QQ 数据目录
 # --------------------------------------------------------------------------
 def default_roots():
+    """按平台返回候选的 QQ 数据根目录（find_account 会跨 root 挑选最大的库）。"""
     home = os.path.expanduser('~')
-    return [os.path.join(home, 'Documents', 'Tencent Files')]
+    if IS_WINDOWS:
+        return [os.path.join(home, 'Documents', 'Tencent Files')]
+
+    config_home = os.environ.get('XDG_CONFIG_HOME') or os.path.join(home, '.config')
+    roots = [
+        # QQ NT for Linux（官方 .deb / AppImage）
+        os.path.join(config_home, 'QQ'),
+        # Flatpak 安装
+        os.path.join(home, '.var', 'app', 'com.qq.QQ', 'config', 'QQ'),
+        os.path.join(home, '.var', 'app', 'com.tencent.qq', 'config', 'QQ'),
+        # Snap 安装
+        os.path.join(home, 'snap', 'qq', 'current', '.config', 'QQ'),
+        os.path.join(home, 'snap', 'qq', 'common', '.config', 'QQ'),
+        # 从 Windows 迁移过来的数据目录也可能放在这些位置
+        os.path.join(home, 'Documents', 'Tencent Files'),
+        os.path.join(home, '文档', 'Tencent Files'),
+    ]
+    return list(dict.fromkeys(roots))
 
 
-def find_account(root, account=None):
-    """返回 (uin, nt_db_dir, nt_data_dir, nt_msg_size)"""
-    if not os.path.isdir(root):
-        # 用注册表兜底
-        alt = os.path.join(os.environ.get('USERPROFILE', ''), 'Documents', 'Tencent Files')
-        if os.path.isdir(alt):
-            root = alt
-        else:
-            die('找不到 QQ 数据目录: ' + root)
-    best = None
-    for name in os.listdir(root):
-        d = os.path.join(root, name, 'nt_qq')
-        db = os.path.join(d, 'nt_db')
-        if not os.path.isdir(db):
-            continue
-        msg = os.path.join(db, 'nt_msg.db')
+def _make_account(root, label, dbdir, datadir, hash_=''):
+    msg = os.path.join(dbdir, 'nt_msg.db')
+    try:
         size = os.path.getsize(msg) if os.path.exists(msg) else 0
-        if account:
-            if name != str(account):
+    except OSError:
+        size = 0
+    return {
+        'label': label,
+        'hash': hash_,
+        'dbdir': dbdir,
+        'datadir': datadir,
+        'size': size,
+        'dir': os.path.dirname(dbdir),
+        'root': root,
+    }
+
+
+def linux_account_uin(root, dirname, hash_account_count=1):
+    """Linux 的数据目录名是 nt_qq_<md5>，尽量从明文 MMKV / 登录标记还原 QQ 号。
+
+    QQ for Linux 把 `<uin>_flash_file_download_dir_key` 和
+    `<root>/nt_qq_<hash>/nt_data/flashfransfer` 一起明文写在
+    `global/nt_data/mmkv/mmkv.default` 里，可据此把哈希目录映射回账号。
+    还原失败时返回空串，调用方退回使用哈希。
+    """
+    token = dirname.encode()
+    for base in (os.path.join(root, 'global', 'nt_data', 'mmkv'),
+                 os.path.join(root, 'global', 'nt_data')):
+        try:
+            names = sorted(os.listdir(base))
+        except OSError:
+            continue
+        for name in names:
+            if name.endswith('.crc'):
                 continue
-            best = (name, db, os.path.join(d, 'nt_data'), size)
-            break
-        if best is None or size > best[3]:
-            best = (name, db, os.path.join(d, 'nt_data'), size)
-    if not best:
-        if account:
-            die('没有找到账号 %s 的 nt_qq/nt_db 目录。用 info 看有哪些账号。' % account)
-        die('在 %s 下没有找到 nt_qq/nt_db 目录，确认 QQ 版本是 NT 架构' % root)
-    return best
+            path = os.path.join(base, name)
+            try:
+                if os.path.getsize(path) > 8 * 1024 * 1024:
+                    continue
+                with open(path, 'rb') as f:
+                    data = f.read()
+            except OSError:
+                continue
+            if token not in data:
+                continue
+            # 形如 12345_flash_file_download_dir_key ... nt_qq_<hash>
+            pattern = re.compile(
+                rb'([1-9]\d{4,11})_[A-Za-z0-9_]{0,64}.{0,200}?' + re.escape(token),
+                re.S)
+            match = pattern.search(data)
+            if match:
+                return match.group(1).decode('ascii')
+            # 更宽松的兜底：哈希目录前一段里最靠近的 uin 键名。
+            index = data.find(token)
+            prefix = data[max(0, index - 512):index]
+            match = re.search(rb'([1-9]\d{4,11})_[A-Za-z0-9_]{3,64}', prefix)
+            if match:
+                return match.group(1).decode('ascii')
+
+    if hash_account_count == 1:
+        # 只登录过一个账号时，global/nt_data/Login/.<uin> 标记文件同样可靠。
+        login = os.path.join(root, 'global', 'nt_data', 'Login')
+        try:
+            names = os.listdir(login)
+        except OSError:
+            names = []
+        uins = [name.lstrip('.') for name in names
+                if re.fullmatch(r'\.?[1-9]\d{4,11}', name)]
+        if len(uins) == 1:
+            return uins[0]
+    return ''
+
+
+def _iter_accounts(root):
+    """遍历一个数据根目录下的所有账号（兼容 Windows 与 Linux 的目录布局）。"""
+    if not os.path.isdir(root):
+        return
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return
+
+    hash_dirs = [name for name in names
+                 if name.startswith('nt_qq_')
+                 and os.path.isdir(os.path.join(root, name, 'nt_db'))]
+    for name in names:
+        entry = os.path.join(root, name)
+        # Windows: <root>/<uin>/nt_qq/{nt_db,nt_data}
+        ntqq = os.path.join(entry, 'nt_qq')
+        if os.path.isdir(os.path.join(ntqq, 'nt_db')):
+            yield _make_account(root, name, os.path.join(ntqq, 'nt_db'),
+                                os.path.join(ntqq, 'nt_data'))
+            continue
+        # Linux:  <root>/nt_qq_<hash>/{nt_db,nt_data}
+        if name in hash_dirs:
+            uin = linux_account_uin(root, name, len(hash_dirs))
+            yield _make_account(root, uin or name[len('nt_qq_'):],
+                                os.path.join(entry, 'nt_db'),
+                                os.path.join(entry, 'nt_data'),
+                                hash_=name[len('nt_qq_'):])
+
+
+def find_account(root=None, account=None):
+    """返回 (uin, nt_db_dir, nt_data_dir, nt_msg_size)"""
+    roots = [root] if root else default_roots()
+    accounts = []
+    for candidate in roots:
+        accounts.extend(_iter_accounts(candidate))
+    if not accounts and root:
+        # Keep the original Windows behaviour: a wrong/explicit --root still
+        # falls back to the platform's default data directory.
+        roots = default_roots()
+        for candidate in roots:
+            accounts.extend(_iter_accounts(candidate))
+    if not accounts:
+        die('找不到 QQ 数据目录（已查找: %s）。确认 QQ 为 NT 架构并已登录过。'
+            % ', '.join(roots))
+
+    if account:
+        want = str(account).strip()
+        for acc in accounts:
+            if want in (acc['label'], acc['hash'], 'nt_qq_' + acc['hash']):
+                return acc['label'], acc['dbdir'], acc['datadir'], acc['size']
+        known = ', '.join(sorted({acc['label'] for acc in accounts}))
+        die('没有找到账号 %s。可用账号: %s' % (want, known))
+
+    best = max(accounts, key=lambda acc: acc['size'])
+    return best['label'], best['dbdir'], best['datadir'], best['size']
 
 
 # --------------------------------------------------------------------------
@@ -286,7 +625,7 @@ def cmd_key(args):
     uin, dbdir, datadir, _ = find_account(args.root, args.account)
     src = os.path.join(dbdir, 'nt_msg.db')
     keyfile = os.path.join(args.work, 'key.txt')
-    os.makedirs(args.work, exist_ok=True)
+    ensure_workdir(args.work)
 
     if os.path.exists(keyfile) and not args.force:
         key = open(keyfile, encoding='ascii', errors='replace').read().strip()
@@ -298,18 +637,27 @@ def cmd_key(args):
 
     pids = find_pids()
     if not pids:
-        die('没有找到 QQ.exe 进程。请先启动 QQ 并完成登录，再运行本命令。')
-    print('QQ.exe 进程: %s' % ', '.join(map(str, pids)))
+        die('没有找到 %s 进程。请先启动 QQ 并完成登录，再运行本命令。'
+            % qq_process_label())
+    print('%s 进程: %s' % (qq_process_label(), ', '.join(map(str, pids))))
     print('注意：QQ 必须处于已登录状态，密钥才在内存里。')
 
     clear = strip_db(src, args.work)
+    print('账号: %s' % uin)
     print('数据库副本: %s (%s)' % (clear, human(os.path.getsize(clear))))
     print('开始扫描进程内存（通常需要 1~3 分钟）...')
+    if IS_LINUX:
+        state = memory_access_state()
+        if state.startswith('受限') or state.startswith('未知'):
+            warn('内存读取权限：%s' % state)
 
     t0 = time.time()
     cands = set()
     for pid in pids:
-        got = scan_process_memory(pid)
+        try:
+            got = scan_process_memory(pid)
+        except MemoryAccessDenied as exc:
+            die(str(exc))
         cands |= got
         print('  pid %-6d 累计候选 %d' % (pid, len(cands)), flush=True)
 
@@ -324,6 +672,11 @@ def cmd_key(args):
             print('\n*** 找到密钥: %s ***  (第 %d 个, 用时 %.0fs)' % (key, i, time.time() - t0))
             with open(keyfile, 'w', encoding='ascii') as f:
                 f.write(key)
+            if not IS_WINDOWS:
+                try:
+                    os.chmod(keyfile, 0o600)
+                except OSError:
+                    pass
             print('已保存到: ' + keyfile)
             return
         if i % 5000 == 0:
@@ -334,7 +687,7 @@ def cmd_key(args):
 
 def strip_db(src, work, quiet=False):
     """剥掉 1024 字节自定义头，返回明文 SQLCipher 文件路径"""
-    os.makedirs(work, exist_ok=True)
+    ensure_workdir(work)
     dst = os.path.join(work, 'nt_msg.db')
     if os.path.exists(dst) and os.path.getsize(dst) == os.path.getsize(src) - HEADER_SIZE:
         return dst
@@ -524,19 +877,22 @@ def load_key(args, dbdir):
 
 
 def cmd_info(args):
-    print('QQ.exe 进程 : %s' % (', '.join(map(str, find_pids())) or '未运行'))
-    for root in ([args.root] if args.root else default_roots()):
+    print('%s 进程 : %s' % (qq_process_label(),
+                            (', '.join(map(str, find_pids())) or '未运行')))
+    print('内存读取    : %s' % memory_access_state())
+    roots = [args.root] if args.root else default_roots()
+    existing = [root for root in roots if os.path.isdir(root)]
+    for root in (existing or roots[:1]):
         if not os.path.isdir(root):
             print('数据目录    : %s (不存在)' % root)
             continue
         print('数据目录    : %s' % root)
-        for name in sorted(os.listdir(root)):
-            db = os.path.join(root, name, 'nt_qq', 'nt_db')
-            if not os.path.isdir(db):
-                continue
-            msg = os.path.join(db, 'nt_msg.db')
-            size = os.path.getsize(msg) if os.path.exists(msg) else 0
-            print('  账号 %-12s nt_msg.db %s' % (name, human(size)))
+        accounts = list(_iter_accounts(root))
+        if not accounts:
+            print('  （没有找到 nt_qq/nt_db 目录）')
+        for acc in accounts:
+            print('  账号 %-12s nt_msg.db %s  %s'
+                  % (acc['label'], human(acc['size']), acc['dir']))
     keyfile = os.path.join(args.work, 'key.txt')
     print('密钥缓存    : %s' % (keyfile if os.path.exists(keyfile) else '无'))
 
@@ -746,7 +1102,7 @@ SELECT time, sender_name, text FROM messages WHERE text LIKE '%关键词%';
 # --------------------------------------------------------------------------
 def main(argv=None):
     p = argparse.ArgumentParser(
-        description='NTQQ 群聊记录导出（仅限导出你自己的聊天记录）',
+        description='NTQQ 群聊记录导出（Windows / Linux，仅限导出你自己的聊天记录）',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='示例:\n'
                '  python qqnt_export.py info\n'
@@ -754,7 +1110,7 @@ def main(argv=None):
                '  python qqnt_export.py groups\n'
                '  python qqnt_export.py export --group 123456789 --out ./out\n')
     p.add_argument('--work', default='.qqnt-work', help='工作目录（默认 .qqnt-work）')
-    p.add_argument('--root', default=None, help='Tencent Files 目录')
+    p.add_argument('--root', default=None, help='QQ 数据根目录（Tencent Files 或 ~/.config/QQ）')
     p.add_argument('--account', default=None, help='指定 QQ 号（多账号时）')
     p.add_argument('--key', default=None, help='直接提供密钥，跳过提取')
 
@@ -778,9 +1134,8 @@ def main(argv=None):
     s.set_defaults(func=cmd_export)
 
     args = p.parse_args(argv)
-    if sys.platform != 'win32':
-        die('本工具依赖 Windows 的进程内存读取接口，只能在 Windows 上运行')
-    args.root = args.root or (default_roots()[0] if default_roots() else None)
+    if not (IS_WINDOWS or IS_LINUX):
+        die('本工具仅支持 Windows 与 Linux（当前平台: %s）' % sys.platform)
     args.func(args)
 
 

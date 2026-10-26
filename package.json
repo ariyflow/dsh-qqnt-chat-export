@@ -1,7 +1,7 @@
 {
   "name": "dsh-qqnt-chat-export",
-  "version": "0.2.0",
-  "description": "Read, search, and export NTQQ chat history (groups and private chats) as text, CSV, JSON, Markdown, HTML, or SQLite — a DeepSeek Harness bundle with model tools and a local web UI.",
+  "version": "0.3.0",
+  "description": "Read, search, and export NTQQ chat history (groups and private chats) as text, CSV, JSON, Markdown, HTML, or SQLite on Windows and Linux — a DeepSeek Harness bundle with model tools and a local web UI.",
   "type": "module",
   "license": "MIT",
   "author": "ariyflow <ariyflow@users.noreply.github.com>",
@@ -23,7 +23,8 @@
     "sqlcipher"
   ],
   "os": [
-    "win32"
+    "win32",
+    "linux"
   ],
   "engines": {
     "node": ">=18"

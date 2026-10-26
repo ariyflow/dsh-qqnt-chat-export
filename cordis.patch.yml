@@ -4,11 +4,15 @@
       config:
         # 64-bit Python 3 on PATH, or an absolute path to one. It needs the
         # sqlcipher3 package (`pip install sqlcipher3-wheels`).
-        pythonPath: python
+        # Empty means "python" on Windows and "python3" on Linux.
+        pythonPath: ''
         # Holds key.txt, the decrypted database copies, and index.sqlite.
-        # Empty means %TEMP%\qqnt-chat-export. Delete it after exporting.
+        # Empty means %TEMP%\qqnt-chat-export on Windows and
+        # $TMPDIR/qqnt-chat-export (usually /tmp) on Linux.
+        # Delete it after exporting.
         workDir: ''
-        # Empty means %USERPROFILE%\Documents\Tencent Files.
+        # Empty means %USERPROFILE%\Documents\Tencent Files on Windows and
+        # $XDG_CONFIG_HOME/QQ (usually ~/.config/QQ) on Linux.
         tencentRoot: ''
         # QQ number to use when the client holds several accounts. Empty means
         # the account with the largest message database.

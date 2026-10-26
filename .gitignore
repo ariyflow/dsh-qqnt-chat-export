@@ -4,7 +4,8 @@ __pycache__/
 *.pyc
 
 # Decrypted databases, keys, and the query index live in the work directory,
-# which defaults to %TEMP%\qqnt-chat-export. Keep an accidental copy out of git.
+# which defaults to the system temp dir (%TEMP%\qqnt-chat-export on Windows,
+# /tmp/qqnt-chat-export on Linux). Keep an accidental copy out of git.
 key.txt
 nt_msg.db*
 index.sqlite*
