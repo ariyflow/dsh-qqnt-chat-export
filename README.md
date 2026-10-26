@@ -132,3 +132,5 @@ MIT，见 [LICENSE](LICENSE)。
 
 ## 特别感谢
 
+- https://github.com/JackHanXyz/qq-nt-decrypt
+- https://github.com/QQBackup/qq-win-db-key
