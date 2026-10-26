@@ -1,4 +1,4 @@
-﻿# dsh-qqnt-chat-export
+# dsh-qqnt-chat-export
 
 把 Windows 上的 **NTQQ（QQ NT / 9.9.x）聊天记录**读出来、搜出来、导出来 —— 一个 DeepSeek Harness 插件包：四个模型工具 + 一个本地网页界面，支持群聊和私聊，可导出 6 种格式。
 
@@ -129,3 +129,6 @@ docs/screenshot.png   界面截图（虚构数据）
 MIT，见 [LICENSE](LICENSE)。
 
 本项目仅供学习参考，未获腾讯授权。对于任何用途所造成的一切后果，本人不承担任何责任。
+
+## 特别感谢
+

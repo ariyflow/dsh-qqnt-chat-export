@@ -36,6 +36,27 @@ jobs:
         run: |
           node -e "for (const f of ['package.json','locale/en.json','locale/zh.json']) { JSON.parse(require('fs').readFileSync(f,'utf8')); } console.log('json ok')"
 
+      # A UTF-8 BOM makes package.json invalid JSON and breaks bundle installation.
+      - name: No byte-order marks
+        run: |
+          python - <<'PY'
+          import pathlib
+          import sys
+
+          suffixes = {'.json', '.md', '.yml', '.js', '.py', '.html'}
+          bad = []
+          for path in pathlib.Path('.').rglob('*'):
+              if not path.is_file() or '.git' in path.parts:
+                  continue
+              if path.suffix in suffixes or path.name in {'LICENSE', 'NOTICE'}:
+                  if path.read_bytes().startswith(b'\xef\xbb\xbf'):
+                      bad.append(str(path))
+          if bad:
+              print('UTF-8 BOM found in: ' + ', '.join(sorted(bad)))
+              sys.exit(1)
+          print('no byte-order marks')
+          PY
+
       - name: Manifest and bundle patch
         run: |
           node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));const patch=pkg.dsh&&pkg.dsh.bundle&&pkg.dsh.bundle.patch;if(!patch||!fs.existsSync(patch))throw new Error('dsh.bundle.patch is missing or points at nothing');const yaml=fs.readFileSync(patch,'utf8');if(!yaml.includes(\"name: '\"+pkg.name+\"'\"))throw new Error('patch does not insert ' + pkg.name);if(!fs.existsSync('scripts/qqnt_export.py'))throw new Error('missing bundled exporter');if(!fs.existsSync('page.html'))throw new Error('missing page.html');console.log('manifest ok')"

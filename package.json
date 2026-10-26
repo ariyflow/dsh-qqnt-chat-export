@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "dsh-qqnt-chat-export",
   "version": "0.2.0",
   "description": "Read, search, and export NTQQ chat history (groups and private chats) as text, CSV, JSON, Markdown, HTML, or SQLite — a DeepSeek Harness bundle with model tools and a local web UI.",
