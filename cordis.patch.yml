@@ -8,7 +8,8 @@
         # sqlcipher3 package (`pip install sqlcipher3-wheels`).
         # Empty means "python" on Windows and "python3" on Linux.
         # The web settings page can create a private virtualenv and install
-        # sqlcipher3 there; it never modifies the system Python.
+        # sqlcipher3 there (default PyPI or the Tsinghua mirror); it never
+        # modifies the system Python.
         pythonPath: ''
         # Holds key.txt, the decrypted database copies, and index.sqlite.
         # Empty means %TEMP%\qqnt-chat-export on Windows and

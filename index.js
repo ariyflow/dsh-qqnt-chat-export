@@ -27,7 +27,7 @@ import {
   validatePatch,
   venvPython,
 } from './settings.js'
-import { cleanupStorage, storageSnapshot } from './storage.js'
+import { buildRunning, cleanupStorage, storageSnapshot } from './storage.js'
 import { startWebServer } from './web.js'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -39,6 +39,11 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const CLI = path.join(HERE, 'scripts', 'qqnt_export.py')
 
 const DEFAULT_FORMATS = ['txt', 'sqlite', 'csv']
+/** One-click setup can use the default PyPI or the Tsinghua mirror. */
+const SETUP_SOURCES = {
+  default: null,
+  tsinghua: 'https://pypi.tuna.tsinghua.edu.cn/simple',
+}
 const KEY_TIMEOUT_MS = 10 * 60_000
 const EXPORT_TIMEOUT_MS = 15 * 60_000
 /** Prompt placement after the built-in `tools:sdk` section. */
@@ -436,7 +441,7 @@ The qqnt_* tools read the message database of the NTQQ client installed on this 
 
 /** Appended only while the browsing UI is actually listening. */
 function webGuidance(url) {
-  return ` The same data, including private chats and keyword search across every chat, is browsable at ${url} in a browser tab; that page also downloads the current query as txt, csv, json, markdown, html, or sqlite. The page opens with a startup checklist that names this URL, checks Python/sqlcipher3 and the cached key, and offers a one-click setup that creates a private virtualenv and installs sqlcipher3-wheels into it. Never install Python packages into the global/system interpreter; use that one-click setup or another virtualenv and point the Python interpreter setting at it.`
+  return ` The same data, including private chats and keyword search across every chat, is browsable at ${url} in a browser tab; that page also downloads the current query as txt, csv, json, markdown, html, or sqlite. The page opens with a startup checklist that names this URL, checks Python/sqlcipher3 and the cached key, and offers a one-click setup that creates a private virtualenv and installs sqlcipher3-wheels into it. The same checklist and the settings page have a 提取密钥 button that runs key extraction with visible progress and logs; when the user is working in the browser, point them there instead of asking them to run a tool. Never install Python packages into the global/system interpreter; use that one-click setup or another virtualenv and point the Python interpreter setting at it.`
 }
 
 /** One-shot Python/sqlcipher3 probe used by the settings page. */
@@ -512,9 +517,14 @@ export function apply(ctx, config) {
   let webServer = null
   let applying = false
   let setupAbort = null
+  let keyJobAbort = null
   const setup = {
-    state: 'idle', step: '', log: [], error: '',
+    state: 'idle', step: '', log: [], error: '', source: 'default',
     startedAt: 0, finishedAt: 0, venv: '', python: '',
+  }
+  const keyJob = {
+    state: 'idle', step: '', log: [], error: '', force: false,
+    startedAt: 0, finishedAt: 0, folded: 0, dropped: 0, key: false,
   }
 
   const setupLog = (line) => {
@@ -523,7 +533,12 @@ export function apply(ctx, config) {
     setup.log.push(text.length > 500 ? `${text.slice(0, 500)}…` : text)
     if (setup.log.length > 200) setup.log.splice(0, setup.log.length - 200)
   }
-  const setupSnapshot = () => ({ ...setup, log: setup.log.slice(-160) })
+  const setupSnapshot = () => ({
+    ...setup,
+    log: setup.log.slice(-160),
+    indexUrl: SETUP_SOURCES[setup.source] || '',
+  })
+  const keyJobSnapshot = () => ({ ...keyJob, log: keyJob.log.slice(-200) })
 
   const ensureDir = (dir) => {
     mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -547,7 +562,15 @@ export function apply(ctx, config) {
   const handlers = {
     getSettings: () => publicSettings(settings, defaults, { url: webUrl, file: settingsFile() }),
     getStorage: () => storageSnapshot(settings.workDir),
-    cleanupStorage: (ids) => cleanupStorage(settings.workDir, ids),
+    cleanupStorage: (ids) => {
+      if (keyJob.state === 'running') {
+        throw Object.assign(new Error('密钥提取进行中，等它结束后再清理'), { status: 409 })
+      }
+      if (setup.state === 'running') {
+        throw Object.assign(new Error('环境配置进行中，等它结束后再清理'), { status: 409 })
+      }
+      return cleanupStorage(settings.workDir, ids)
+    },
     getDiagnostics: async () => {
       const storage = storageSnapshot(settings.workDir)
       return {
@@ -559,11 +582,21 @@ export function apply(ctx, config) {
       }
     },
     getSetup: () => setupSnapshot(),
-    startSetup: () => {
+    startSetup: (source = 'default') => {
+      const choice = String(source || 'default')
+      if (!Object.prototype.hasOwnProperty.call(SETUP_SOURCES, choice)) {
+        throw Object.assign(new Error('未知的安装源，只能选择默认源或清华镜像'), { status: 400 })
+      }
+      if (keyJob.state === 'running') {
+        throw Object.assign(new Error('密钥提取进行中，等它结束后再配置环境'), { status: 409 })
+      }
       if (setup.state === 'running') return setupSnapshot()
-      void runSetup()
+      void runSetup(choice)
       return setupSnapshot()
     },
+    getKeyJob: () => keyJobSnapshot(),
+    startKeyJob: (force) => startKeyJob(force === true),
+    canStartBuild: () => keyJob.state !== 'running' && setup.state !== 'running',
     updateSettings: (patch) => commitSettings({ ...overrides, ...validatePatch(patch) }),
     resetSettings: () => commitSettings({}),
   }
@@ -575,6 +608,9 @@ export function apply(ctx, config) {
    */
   async function commitSettings(nextOverrides) {
     if (applying) throw Object.assign(new Error('设置正在应用，请稍候'), { status: 409 })
+    if (keyJob.state === 'running') {
+      throw Object.assign(new Error('密钥提取进行中，完成后再修改设置'), { status: 409 })
+    }
     applying = true
     try {
       const next = resolveSettings(bundleConfig, nextOverrides)
@@ -691,17 +727,22 @@ export function apply(ctx, config) {
    * One-click setup: create a private virtualenv and install sqlcipher3-wheels
    * into it. System Python is never modified, and the page shows the full log.
    */
-  async function runSetup() {
+  async function runSetup(source = 'default') {
+    const indexUrl = SETUP_SOURCES[source] || ''
+    const sourceLabel = indexUrl ? '清华镜像' : '默认源'
     setupAbort = new AbortController()
     const signal = setupAbort.signal
     const venvDir = defaultVenvDir()
     const target = venvPython(venvDir)
     Object.assign(setup, {
-      state: 'running', step: '准备', log: [], error: '',
+      state: 'running', step: '准备', log: [], error: '', source,
       startedAt: Date.now(), finishedAt: 0, venv: venvDir, python: target,
     })
     try {
       setupLog(`虚拟环境目录：${venvDir}`)
+      setupLog(indexUrl
+        ? `安装源：清华 PyPI 镜像（${indexUrl}）`
+        : '安装源：默认 PyPI')
       ensureDir(path.dirname(venvDir))
       if (existsSync(target) && await hasSqlcipher(target, signal)) {
         setupLog('虚拟环境里已经有 sqlcipher3，直接切换')
@@ -721,16 +762,17 @@ export function apply(ctx, config) {
           if (signal.aborted) throw new Error('配置已取消')
           throw new Error('创建虚拟环境失败。Debian/Ubuntu 可能需要先安装 python3-venv：sudo apt install python3-venv')
         }
-        setup.step = '安装 sqlcipher3'
+        setup.step = indexUrl ? '安装 sqlcipher3（清华镜像）' : '安装 sqlcipher3'
         setupLog('只安装到上面的虚拟环境，不修改系统 Python')
-        setupLog('正在下载并安装 sqlcipher3-wheels（取决于网络，可能需要几分钟）…')
-        const install = await runSetupCommand(target, [
-          '-m', 'pip', 'install', '--disable-pip-version-check', '--no-input', 'sqlcipher3-wheels',
-        ], { signal, timeoutMs: 15 * 60_000 })
+        setupLog(`正在从${sourceLabel}下载并安装 sqlcipher3-wheels（取决于网络，可能需要几分钟）…`)
+        const pipArgs = ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-input']
+        if (indexUrl) pipArgs.push('--index-url', indexUrl)
+        pipArgs.push('sqlcipher3-wheels')
+        const install = await runSetupCommand(target, pipArgs, { signal, timeoutMs: 15 * 60_000 })
         appendSetupOutput(install.output)
         if (install.code !== 0) {
           if (signal.aborted) throw new Error('配置已取消')
-          throw new Error('在虚拟环境里安装 sqlcipher3-wheels 失败；请检查网络或代理后重试')
+          throw new Error(`在虚拟环境里安装 sqlcipher3-wheels 失败（${sourceLabel}）；请检查网络或代理后重试，或换另一个安装源`)
         }
       }
       setup.step = '验证'
@@ -752,6 +794,162 @@ export function apply(ctx, config) {
     } finally {
       setupAbort = null
     }
+  }
+
+  /**
+   * Run the exporter's `key` command as a visible background job. Its output is
+   * streamed into `keyJob.log`; SQLCipher's per-candidate noise is folded and
+   * any recovered key is redacted before it reaches the page.
+   */
+  async function startKeyJob(force) {
+    if (keyJob.state === 'running') return keyJobSnapshot()
+    if (setup.state === 'running') {
+      throw Object.assign(new Error('环境配置进行中，等它结束后再提取密钥'), { status: 409 })
+    }
+    if (buildRunning(settings.workDir)) {
+      throw Object.assign(new Error('索引正在建立，等它结束后再提取密钥'), { status: 409 })
+    }
+    const ptrace = ptraceInfo()
+    if (ptrace.restricted) {
+      throw Object.assign(new Error(
+        'Linux 的 ptrace 限制还没有放开。先在终端执行：sudo sysctl -w kernel.yama.ptrace_scope=0'
+      ), { status: 409 })
+    }
+    if (!(await hasSqlcipher(settings.python, undefined))) {
+      throw Object.assign(new Error(
+        '还没有可用的 sqlcipher3。先点「默认源安装」或「清华镜像安装」'
+      ), { status: 409 })
+    }
+
+    ensureDir(settings.workDir)
+    Object.assign(keyJob, {
+      state: 'running', step: '启动 QQ 进程扫描', log: [], error: '', force: !!force,
+      startedAt: Date.now(), finishedAt: 0, folded: 0, dropped: 0, key: false,
+    })
+    keyJobAbort = new AbortController()
+    const signal = keyJobAbort.signal
+
+    const argv = ['-X', 'utf8', CLI, '--work', settings.workDir]
+    if (settings.tencentRoot) argv.push('--root', settings.tencentRoot)
+    if (settings.account) argv.push('--account', String(settings.account))
+    argv.push('key')
+    if (force) argv.push('--force')
+
+    const child = spawn(settings.python, argv, {
+      cwd: settings.workDir,
+      windowsHide: true,
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let outPending = ''
+    let errPending = ''
+    let settled = false
+    let timer = null
+
+    const scrubPatterns = (value) => String(value)
+      .replace(/(找到密钥:\s*)([!-~]{16})/g, '$1<redacted>')
+      .replace(/(可强制重新提取[）)]?:\s*)([!-~]{16})/g, '$1<redacted>')
+      .replace(/((?:key|密钥)\s*[:=]\s*)([!-~]{16})/gi, '$1<redacted>')
+    const addLine = (raw) => {
+      const text = scrubPatterns(String(raw).replace(/\r/g, '').trimEnd())
+      if (text === '') return
+      if (SQLCIPHER_NOISE.test(text)) {
+        keyJob.folded += 1
+        return
+      }
+      if (/找到密钥|已有可用密钥/.test(text)) {
+        keyJob.log.push('*** 找到可用密钥（内容已隐藏）***')
+        return
+      }
+      keyJob.log.push(text.length > 600 ? `${text.slice(0, 600)}…` : text)
+      if (keyJob.log.length > 250) {
+        keyJob.log.shift()
+        keyJob.dropped += 1
+      }
+      if (text.includes('开始扫描进程内存')) keyJob.step = '扫描 QQ 进程内存'
+      else if (text.includes('候选密钥')) keyJob.step = '校验候选密钥'
+    }
+    const consume = (chunk, source) => {
+      let pending = source === 'out' ? outPending : errPending
+      pending += chunk
+      let index = pending.indexOf('\n')
+      while (index !== -1) {
+        addLine(pending.slice(0, index))
+        pending = pending.slice(index + 1)
+        index = pending.indexOf('\n')
+      }
+      if (pending.length > 8192) {
+        addLine(pending)
+        pending = ''
+      }
+      if (source === 'out') outPending = pending
+      else errPending = pending
+    }
+    const redact = () => {
+      let key = ''
+      try {
+        key = readFileSync(path.join(settings.workDir, 'key.txt'), 'utf8').trim()
+      } catch {
+        // No key file.
+      }
+      const scrub = (text) => {
+        let result = scrubPatterns(text)
+        if (key.length >= 8) result = result.split(key).join('<redacted>')
+        return result
+      }
+      keyJob.log = keyJob.log.map(scrub)
+      if (keyJob.error) keyJob.error = scrub(keyJob.error)
+    }
+    const finish = (code, extraError) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      if (outPending) addLine(outPending)
+      if (errPending) addLine(errPending)
+      keyJob.finishedAt = Date.now()
+      keyJob.key = existsSync(path.join(settings.workDir, 'key.txt'))
+      if (extraError) {
+        keyJob.state = 'error'
+        keyJob.step = '失败'
+        keyJob.error = extraError
+      } else if (code === 0 && keyJob.key) {
+        keyJob.state = 'done'
+        keyJob.step = '完成'
+        addLine('密钥已保存到 key.txt（内容已隐藏）')
+      } else {
+        keyJob.state = 'error'
+        keyJob.step = '失败'
+        keyJob.error = keyJob.error || (
+          `qqnt_export.py 退出码 ${code ?? '未知'}${keyJob.key ? '' : '，且没有生成 key.txt'}；请查看下方日志`
+        )
+      }
+      if (keyJob.folded > 0) addLine(`[已折叠 ${keyJob.folded} 行 SQLCipher 逐候选项日志]`)
+      if (keyJob.dropped > 0) addLine(`[较早的 ${keyJob.dropped} 行日志已省略]`)
+      redact()
+      keyJobAbort = null
+    }
+
+    signal.addEventListener('abort', () => {
+      try { child.kill() } catch { /* already gone */ }
+    }, { once: true })
+    timer = setTimeout(() => {
+      if (settled) return
+      addLine('提取超时（超过 15 分钟），正在终止…')
+      try { child.kill() } catch { /* already gone */ }
+      finish(null, '密钥提取超时（超过 15 分钟）')
+    }, 15 * 60_000)
+
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk) => consume(chunk, 'out'))
+    child.stderr.on('data', (chunk) => consume(chunk, 'err'))
+    child.on('error', (error) => {
+      finish(null, error.code === 'ENOENT'
+        ? `无法运行 ${settings.python}：找不到解释器`
+        : `无法启动密钥提取：${error.message}`)
+    })
+    child.on('close', (code) => finish(code))
+    return keyJobSnapshot()
   }
 
   const startWeb = () => {
@@ -782,6 +980,7 @@ export function apply(ctx, config) {
       startWeb()
       return () => {
         setupAbort?.abort()
+        keyJobAbort?.abort()
         const server = webServer
         webServer = null
         webUrl = ''

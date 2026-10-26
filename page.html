@@ -179,6 +179,8 @@
   }
   .runtime-line.bad { border-color: var(--danger); color: var(--danger); }
   .runtime-line .copy { margin-left: 8px; font-size: 12px; padding: 2px 8px; }
+  .setup-inline-actions { display: inline-flex; gap: 6px; flex-wrap: wrap; margin-left: 6px; }
+  .setup-inline-actions button { font-size: 12px; padding: 2px 8px; }
   dialog.confirm-dialog {
     border: 1px solid var(--line); border-radius: 12px; padding: 0;
     width: min(520px, calc(100vw - 40px)); background: var(--bg); color: var(--text);
@@ -217,7 +219,9 @@
     <div class="startup-line" id="startupKey"></div>
   </div>
   <div class="startup-actions">
-    <button class="primary hidden" type="button" id="startupSetup">一键配置环境</button>
+    <button class="primary hidden" type="button" id="startupSetup">默认源安装</button>
+    <button class="ghost hidden" type="button" id="startupSetupMirror">清华镜像安装</button>
+    <button class="primary hidden" type="button" id="startupKeyBtn">提取密钥</button>
     <button class="ghost" type="button" id="startupSettings">设置</button>
     <button class="ghost" type="button" id="startupDismiss">关闭提示</button>
   </div>
@@ -320,6 +324,22 @@
 
     <section class="card">
       <div class="card-head">
+        <h3>数据库密钥</h3>
+        <button class="ghost" type="button" id="refreshKey">刷新状态</button>
+      </div>
+      <div class="runtime-line" id="keyLine">正在读取密钥状态…</div>
+      <div class="settings-actions">
+        <button class="primary hidden" type="button" id="extractKeyBtn">提取密钥</button>
+        <span class="hint" id="keyHint"></span>
+      </div>
+      <div class="setup-box hidden" id="keyBox">
+        <div class="setup-status" id="keyStatusLine"></div>
+        <pre class="setup-log" id="keyLog"></pre>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
         <h3>存储与清理</h3>
         <button class="ghost" type="button" id="refreshStorage">刷新大小</button>
       </div>
@@ -381,7 +401,9 @@
     startupStartedAt: 0,
     startupKey: true,
     diagnostics: null,
-    setupPoll: 0
+    setupPoll: 0,
+    keyJob: null,
+    keyPoll: 0
   }
 
   var $ = function (id) { return document.getElementById(id) }
@@ -480,7 +502,7 @@
       banner.classList.add('error')
       text.textContent = '索引失败：' + (build.error || '未知错误')
       if (status.key === false) {
-        text.textContent += '（当前还没有数据库密钥，先在对话里运行 qqnt_extract_key）'
+        text.textContent += '（当前还没有数据库密钥，先在启动提示或设置页点「提取密钥」）'
         action.classList.add('hidden')
         action.onclick = null
         return
@@ -493,7 +515,7 @@
     if (!state.indexReady) {
       banner.classList.remove('hidden')
       if (status.key === false) {
-        text.textContent = '还没有数据库密钥。先在对话里运行 qqnt_extract_key 提取密钥，再回来建立索引。'
+        text.textContent = '还没有数据库密钥。先在启动提示或设置页点「提取密钥」，再回来建立索引。'
         action.classList.add('hidden')
         action.onclick = null
         return
@@ -541,7 +563,7 @@
 
   function startBuild(refresh) {
     if (state.building) { toast('索引正在建立，请稍候'); return }
-    if (!state.keyReady) { toast('还没有数据库密钥，先在对话里运行 qqnt_extract_key'); return }
+    if (!state.keyReady) { toast('还没有数据库密钥，先在启动提示或设置页点「提取密钥」'); return }
     if (refresh && !confirm('重新从 QQ 复制数据库并重建索引？数据库约 1 GB，耗时 1~2 分钟。')) return
     api('/api/index/build' + (refresh ? '?refresh=1' : ''), { method: 'POST' })
       .then(function () {
@@ -759,16 +781,19 @@
     $('startupEnv').textContent = '正在检查 Python / sqlcipher3…'
     $('startupEnv').className = 'startup-line'
     $('startupSetup').classList.add('hidden')
+    $('startupSetupMirror').classList.add('hidden')
     api('/api/diagnostics').then(function (info) {
       state.diagnostics = info
       if (typeof info.key === 'boolean') state.startupKey = info.key
       renderStartupEnv(info)
-      renderStartupKey()
+      renderKeyStatus(info)
       syncSetup()
+      syncKeyJob()
     }).catch(function (error) {
       $('startupEnv').className = 'startup-line bad'
       $('startupEnv').textContent = '环境检查失败：' + error.message
       $('startupSetup').classList.remove('hidden')
+      $('startupSetupMirror').classList.remove('hidden')
     })
   }
 
@@ -786,14 +811,16 @@
     $('startupEnv').className = 'startup-line'
     $('startupEnv').textContent = '正在检查 Python / sqlcipher3…'
     $('startupSetup').classList.remove('hidden')
+    $('startupSetupMirror').classList.remove('hidden')
     $('startupKey').className = 'startup-line bad'
     $('startupKey').textContent = '数据库密钥：状态读取失败（可能是 Python 解释器不可用）；请先完成环境配置。'
     api('/api/diagnostics').then(function (info) {
       state.diagnostics = info
       if (typeof info.key === 'boolean') state.startupKey = info.key
       renderStartupEnv(info)
-      renderStartupKey()
+      renderKeyStatus(info)
       syncSetup()
+      syncKeyJob()
     }).catch(function (error) {
       $('startupEnv').className = 'startup-line bad'
       $('startupEnv').textContent = '环境检查失败：' + error.message
@@ -802,39 +829,169 @@
 
   function renderStartupEnv(info) {
     var line = $('startupEnv')
-    var button = $('startupSetup')
+    var buttons = [$('startupSetup'), $('startupSetupMirror')]
     line.className = 'startup-line'
     if (!info.ok || info.error) {
       line.classList.add('bad')
       line.textContent = '环境：Python 检测失败' + (info.error ? '（' + info.error + '）' : '')
-      button.classList.remove('hidden')
+      buttons.forEach(function (button) { button.classList.remove('hidden') })
       return
     }
     if (info.sqlcipher3) {
       line.classList.add('ok')
       line.textContent = '环境：Python ' + info.version + ' (' + info.bits + '-bit) · sqlcipher3 已安装'
-      button.classList.add('hidden')
+      buttons.forEach(function (button) { button.classList.add('hidden') })
       return
     }
     line.classList.add('bad')
-    line.textContent = '环境：Python ' + info.version + ' (' + info.bits + '-bit) · sqlcipher3 未安装，可一键安装到独立虚拟环境'
-    button.classList.remove('hidden')
+    line.textContent = '环境：Python ' + info.version + ' (' + info.bits + '-bit) · sqlcipher3 未安装，可用默认源或清华镜像安装到独立虚拟环境'
+    buttons.forEach(function (button) { button.classList.remove('hidden') })
   }
 
   function renderStartupKey() {
     var line = $('startupKey')
     line.className = 'startup-line'
+    if (state.keyJob && state.keyJob.state === 'running') {
+      line.textContent = '数据库密钥：正在提取…'
+      updateKeyControls()
+      return
+    }
     if (state.startupKey) {
       line.classList.add('ok')
       line.textContent = '数据库密钥：已配置'
+      updateKeyControls()
       return
     }
-    var text = '数据库密钥：未配置。保持 QQ 登录，在对话里运行 qqnt_extract_key。'
+    var envReady = !!(state.diagnostics && state.diagnostics.ok && state.diagnostics.sqlcipher3)
+    var text = '数据库密钥：未配置。保持 QQ 登录，'
+    text += envReady ? '然后点「提取密钥」。' : '先完成环境配置，再点「提取密钥」。'
     if (state.diagnostics && state.diagnostics.restricted) {
       text += ' Linux 还需要先执行：sudo sysctl -w kernel.yama.ptrace_scope=0'
     }
     line.classList.add('bad')
     line.textContent = text
+    updateKeyControls()
+  }
+
+  function updateKeyControls() {
+    var info = state.diagnostics
+    var envReady = !!(info && info.ok && info.sqlcipher3)
+    var keyReady = state.startupKey === true
+    var running = !!(state.keyJob && state.keyJob.state === 'running')
+    var startupButton = $('startupKeyBtn')
+    if (startupButton) {
+      startupButton.classList.toggle('hidden', !envReady || keyReady || running)
+    }
+    var extract = $('extractKeyBtn')
+    if (extract) {
+      extract.classList.toggle('hidden', !envReady)
+      extract.disabled = !envReady || running
+      extract.textContent = keyReady ? '重新提取密钥' : '提取密钥'
+    }
+    var hint = $('keyHint')
+    if (hint) {
+      if (!envReady) hint.textContent = '先完成环境配置'
+      else if (running) hint.textContent = '正在提取，保持 QQ 登录'
+      else if (info.restricted) hint.textContent = 'Linux 需先执行 sudo sysctl -w kernel.yama.ptrace_scope=0'
+      else hint.textContent = '保持 QQ 登录；首次约 1~3 分钟'
+    }
+  }
+
+  function renderKeyStatus(info) {
+    var line = $('keyLine')
+    var keyReady = typeof info.key === 'boolean' ? info.key : state.startupKey
+    state.startupKey = keyReady
+    line.className = 'runtime-line'
+    if (keyReady) {
+      line.textContent = '数据库密钥：已配置（key.txt）'
+    } else {
+      line.classList.add('bad')
+      line.textContent = '数据库密钥：未配置'
+    }
+    updateKeyControls()
+    if (!$('startup').classList.contains('hidden')) renderStartupKey()
+  }
+
+  function renderKeyJob(status) {
+    state.keyJob = status
+    var box = $('keyBox')
+    if (!status || status.state === 'idle') {
+      box.classList.add('hidden')
+      updateKeyControls()
+      return
+    }
+    box.classList.remove('hidden')
+    var text = status.state === 'running'
+      ? '正在提取密钥：' + (status.step || '扫描 QQ 进程内存…')
+      : status.state === 'done'
+        ? '密钥已提取并保存到 key.txt（内容已隐藏）'
+        : '提取失败：' + (status.error || '未知错误')
+    if (status.state === 'running' && status.startedAt) {
+      text += '（已用 ' + Math.max(0, Math.round((Date.now() - status.startedAt) / 1000)) + ' 秒）'
+    }
+    $('keyStatusLine').textContent = text
+    $('keyLog').textContent = (status.log || []).join('\n')
+    $('keyLog').scrollTop = $('keyLog').scrollHeight
+    if (typeof status.key === 'boolean') state.startupKey = status.key
+    if (status.state === 'done') {
+      state.startupKey = true
+    }
+    if (!$('startup').classList.contains('hidden')) renderStartupKey()
+    updateKeyControls()
+  }
+
+  function pollKeyJob() {
+    if (state.keyPoll) return
+    var attempt = 0
+    var tick = function () {
+      state.keyPoll = 0
+      api('/api/key/extract').then(function (status) {
+        renderKeyJob(status)
+        if (status.state === 'running' && attempt < 900) {
+          attempt += 1
+          state.keyPoll = setTimeout(tick, 1000)
+        } else if (status.state === 'done') {
+          toast('数据库密钥已提取')
+          loadSettings()
+          refreshStatus(false)
+        }
+      }).catch(function (error) {
+        toast('读取密钥提取进度失败：' + error.message)
+      })
+    }
+    tick()
+  }
+
+  function syncKeyJob() {
+    api('/api/key/extract').then(function (status) {
+      renderKeyJob(status)
+      if (status.state === 'running') pollKeyJob()
+    }).catch(function () {})
+  }
+
+  function startKeyExtraction(force) {
+    if (!state.diagnostics || !state.diagnostics.ok || !state.diagnostics.sqlcipher3) {
+      toast('先完成环境配置，再提取密钥')
+      openSettings()
+      return
+    }
+    var message = force ? '重新提取会覆盖现有 key.txt。\n' : ''
+    message += '将扫描已登录 QQ 进程的内存，首次约 1~3 分钟；请保持 QQ 登录。'
+    if (state.diagnostics.restricted) {
+      message += '\n\nLinux 需要先执行：sudo sysctl -w kernel.yama.ptrace_scope=0'
+    }
+    if (!confirm(message)) return
+    if ($('settings').classList.contains('hidden')) openSettings()
+    api('/api/key/extract', { method: 'POST', body: { confirm: true, force: !!force } }).then(function (status) {
+      renderKeyJob(status)
+      pollKeyJob()
+    }).catch(function (error) {
+      renderKeyJob({
+        state: 'error', step: '失败', error: error.message, log: [],
+        key: state.startupKey === true,
+      })
+      toast('启动密钥提取失败：' + error.message)
+    })
   }
 
   function dismissStartup() {
@@ -853,11 +1010,12 @@
       return
     }
     box.classList.remove('hidden')
+    var sourceLabel = status.source === 'tsinghua' ? '清华镜像' : '默认源'
     var text = status.state === 'running'
-      ? '正在配置环境：' + (status.step || '…')
+      ? '正在配置环境（' + sourceLabel + '）：' + (status.step || '…')
       : status.state === 'done'
         ? '环境已配置到虚拟环境：' + (status.python || '')
-        : '配置失败：' + (status.error || '未知错误')
+        : '配置失败（' + sourceLabel + '）：' + (status.error || '未知错误')
     if (status.state === 'running' && status.startedAt) {
       text += '（已用 ' + Math.max(0, Math.round((Date.now() - status.startedAt) / 1000)) + ' 秒）'
     }
@@ -895,13 +1053,17 @@
     }).catch(function () {})
   }
 
-  function startSetup() {
+  function startSetup(source) {
+    var choice = source === 'tsinghua' ? 'tsinghua' : 'default'
+    var sourceLabel = choice === 'tsinghua'
+      ? '清华 PyPI 镜像（https://pypi.tuna.tsinghua.edu.cn/simple）'
+      : '默认 PyPI'
     var venv = state.diagnostics && state.diagnostics.venv
       ? state.diagnostics.venv.dir
       : '独立虚拟环境'
     if (!confirm('将在下面的目录创建独立虚拟环境并安装 sqlcipher3-wheels：\n' + venv +
-      '\n\n不会修改系统 Python。继续？')) return
-    api('/api/setup/venv', { method: 'POST', body: { confirm: true } }).then(function (status) {
+      '\n\n安装源：' + sourceLabel + '\n不会修改系统 Python。继续？')) return
+    api('/api/setup/venv', { method: 'POST', body: { confirm: true, source: choice } }).then(function (status) {
       if ($('settings').classList.contains('hidden')) openSettings()
       renderSetup(status)
       pollSetup()
@@ -909,14 +1071,23 @@
   }
 
   // ---------------------------------------------------------------- 设置与清理
-  function appendSetupButton(container) {
-    var button = document.createElement('button')
-    button.className = 'primary copy'
-    button.type = 'button'
-    button.textContent = '一键配置环境'
-    button.onclick = startSetup
+  function appendSetupButtons(container) {
+    var wrap = document.createElement('span')
+    wrap.className = 'setup-inline-actions'
+    var direct = document.createElement('button')
+    direct.className = 'primary'
+    direct.type = 'button'
+    direct.textContent = '默认源安装'
+    direct.onclick = function () { startSetup('default') }
+    var mirror = document.createElement('button')
+    mirror.className = 'ghost'
+    mirror.type = 'button'
+    mirror.textContent = '清华镜像安装'
+    mirror.onclick = function () { startSetup('tsinghua') }
+    wrap.appendChild(direct)
+    wrap.appendChild(mirror)
     container.appendChild(document.createTextNode(' '))
-    container.appendChild(button)
+    container.appendChild(wrap)
   }
 
   function loadDiagnostics() {
@@ -925,14 +1096,14 @@
     line.textContent = '正在检测 Python 与 sqlcipher3…'
     api('/api/diagnostics').then(function (info) {
       state.diagnostics = info
+      renderKeyStatus(info)
       if (!$('startup').classList.contains('hidden')) {
         renderStartupEnv(info)
-        renderStartupKey()
       }
       if (!info.ok || info.error) {
         line.classList.add('bad')
         line.textContent = 'Python 检测失败：' + (info.error || ('退出码异常，解释器 ' + info.python))
-        appendSetupButton(line)
+        appendSetupButtons(line)
         return
       }
       if (!info.sqlcipher3) {
@@ -942,7 +1113,7 @@
           ' <button class="ghost copy" type="button" id="copyInstall">复制命令</button>'
         var copy = $('copyInstall')
         if (copy) copy.onclick = function () { copyText(info.install, '命令已复制') }
-        appendSetupButton(line)
+        appendSetupButtons(line)
       } else {
         line.textContent = 'Python ' + info.version + ' (' + info.bits + '-bit) · sqlcipher3 已安装'
       }
@@ -977,6 +1148,7 @@
       loadDiagnostics()
       loadStorage()
       syncSetup()
+      syncKeyJob()
     }).catch(function (error) { toast('读取设置失败：' + error.message) })
   }
 
@@ -1139,7 +1311,15 @@
   $('startupSettings').addEventListener('click', openSettings)
   $('startupSetup').addEventListener('click', function () {
     openSettings()
-    startSetup()
+    startSetup('default')
+  })
+  $('startupSetupMirror').addEventListener('click', function () {
+    openSettings()
+    startSetup('tsinghua')
+  })
+  $('startupKeyBtn').addEventListener('click', function () {
+    openSettings()
+    startKeyExtraction(state.startupKey === true)
   })
   $('startupDismiss').addEventListener('click', dismissStartup)
   $('copyStartupUrl').addEventListener('click', function () {
@@ -1148,6 +1328,13 @@
   $('closeSettings').addEventListener('click', closeSettings)
   $('settingsForm').addEventListener('submit', saveSettings)
   $('resetSettings').addEventListener('click', resetSettings)
+  $('extractKeyBtn').addEventListener('click', function () {
+    startKeyExtraction(state.startupKey === true)
+  })
+  $('refreshKey').addEventListener('click', function () {
+    loadDiagnostics()
+    syncKeyJob()
+  })
   $('refreshStorage').addEventListener('click', loadStorage)
   $('cleanupBtn').addEventListener('click', cleanupSelected)
   $('setWorkDir').addEventListener('input', updateIndexPath)

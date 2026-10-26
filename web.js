@@ -366,7 +366,39 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
           if (body.confirm !== true) {
             throw Object.assign(new Error('一键配置需要确认'), { status: 400 })
           }
-          return handlers.startSetup()
+          return handlers.startSetup(body.source)
+        })
+        .then((result) => sendJson(res, 202, result))
+        .catch((error) => sendJson(res, error.status ?? 400, { error: error.message }))
+      return
+    }
+    if (req.method === 'GET' && pathname === '/api/key/extract') {
+      if (typeof handlers.getKeyJob !== 'function') {
+        sendJson(res, 501, { error: 'this build has no key extraction API' })
+        return
+      }
+      try {
+        sendJson(res, 200, handlers.getKeyJob())
+      } catch (error) {
+        sendJson(res, 500, { error: error.message })
+      }
+      return
+    }
+    if (req.method === 'POST' && pathname === '/api/key/extract') {
+      if (!isTrustedMutation(req)) {
+        sendJson(res, 403, { error: 'cross-origin requests are refused' })
+        return
+      }
+      if (typeof handlers.startKeyJob !== 'function') {
+        sendJson(res, 501, { error: 'this build has no key extraction API' })
+        return
+      }
+      readJsonBody(req)
+        .then((body) => {
+          if (body.confirm !== true) {
+            throw Object.assign(new Error('提取密钥需要确认'), { status: 400 })
+          }
+          return handlers.startKeyJob(body.force === true)
         })
         .then((result) => sendJson(res, 202, result))
         .catch((error) => sendJson(res, error.status ?? 400, { error: error.message }))
@@ -454,6 +486,10 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       const origin = req.headers.origin
       if (origin !== undefined && !isLoopbackOrigin(origin)) {
         sendJson(res, 403, { error: 'cross-origin requests are refused' })
+        return
+      }
+      if (typeof handlers.canStartBuild === 'function' && !handlers.canStartBuild()) {
+        sendJson(res, 409, { error: '密钥提取或环境配置进行中，请等它结束。' })
         return
       }
       // Report a running build instead of answering 202 for a spawn that the
