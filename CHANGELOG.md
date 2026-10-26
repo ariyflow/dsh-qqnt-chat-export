@@ -1,5 +1,20 @@
 # 更新记录
 
+## 0.4.0
+
+- 新增网页「设置」页面：
+  - 可调网页端口、工作目录 / 索引位置（`index.sqlite`）、Python 解释器、QQ 数据根目录、QQ 号；
+  - 保存到 `settings.json`（Linux `~/.config/dsh-qqnt-chat-export/`，Windows `%APPDATA%\dsh-qqnt-chat-export\`），覆盖 bundle 默认值；
+  - 修改端口会即时重启网页服务，新端口先试绑定，被占用时保留原端口和原设置；`0` 可关闭网页；
+  - 设置页显示 Python / sqlcipher3 检测结果和安装命令，缺少依赖时可直接看到原因。
+- 新增「存储与清理」：按类别统计并删除 `key.txt`、解密数据库副本、`index.sqlite`、临时导出、构建状态/锁；
+  - 删除前必须勾选确认框并点「确认删除」（二次确认），服务端还要求 `confirm: true`；
+  - 只删除 `workDir` 白名单内的文件，不碰 QQ 原始数据；索引构建进行中拒绝清理；
+  - 修复“索引失败：exited with code 1”：构建前检查 sqlcipher3 与密钥，状态文件写入可读原因；
+  - `qqnt_extract_key` 在缺少 sqlcipher3 时提前失败，不再白扫几分钟内存。
+- 新增 `settings.js` / `storage.js`，并加入 npm 打包文件列表。
+- 设置页的写操作要求同源 + 自定义请求头，`settings.json` 在 POSIX 上为 `0600`。
+
 ## 0.3.0
 
 - 新增 Linux 支持（QQ NT for Linux / 9.9.x）；Windows 的 Win32 代码路径与默认值保持不变，两个平台共用同一套导出/查询逻辑：

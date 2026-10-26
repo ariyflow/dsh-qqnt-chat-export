@@ -31,6 +31,8 @@ jobs:
         run: |
           node --check index.js
           node --check web.js
+          node --check settings.js
+          node --check storage.js
 
       - name: Inline page script syntax
         run: |
@@ -75,7 +77,7 @@ jobs:
 
       - name: Manifest and bundle patch
         run: |
-          node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));const patch=pkg.dsh&&pkg.dsh.bundle&&pkg.dsh.bundle.patch;if(!patch||!fs.existsSync(patch))throw new Error('dsh.bundle.patch is missing or points at nothing');const yaml=fs.readFileSync(patch,'utf8');if(!yaml.includes(\"name: '\"+pkg.name+\"'\"))throw new Error('patch does not insert ' + pkg.name);if(!fs.existsSync('scripts/qqnt_export.py'))throw new Error('missing bundled exporter');if(!fs.existsSync('page.html'))throw new Error('missing page.html');for (const os of ['win32','linux']) { if (!pkg.os || !pkg.os.includes(os)) throw new Error('package.json os lacks ' + os); } console.log('manifest ok')"
+          node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));const patch=pkg.dsh&&pkg.dsh.bundle&&pkg.dsh.bundle.patch;if(!patch||!fs.existsSync(patch))throw new Error('dsh.bundle.patch is missing or points at nothing');const yaml=fs.readFileSync(patch,'utf8');if(!yaml.includes(\"name: '\"+pkg.name+\"'\"))throw new Error('patch does not insert ' + pkg.name);for (const f of ['index.js','web.js','settings.js','storage.js','scripts/qqnt_export.py','scripts/qqnt_query.py','page.html']) { if (!fs.existsSync(f)) throw new Error('missing ' + f); } for (const f of ['settings.js','storage.js']) { if (!pkg.files.includes(f)) throw new Error('package.json files lacks ' + f); } for (const os of ['win32','linux']) { if (!pkg.os || !pkg.os.includes(os)) throw new Error('package.json os lacks ' + os); } console.log('manifest ok')"
 
       - name: Icon size
         run: |

@@ -113,9 +113,59 @@
   .toast {
     position: fixed; right: 18px; bottom: 18px; padding: 10px 16px; border-radius: 8px;
     background: var(--text); color: var(--bg); opacity: 0; transition: opacity .2s;
-    pointer-events: none; max-width: 420px;
+    pointer-events: none; max-width: 420px; z-index: 30;
   }
   .toast.show { opacity: .94; }
+
+  button.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+  button.danger:hover { filter: brightness(1.08); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  code { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; font-size: 12px; }
+
+  .settings {
+    position: fixed; inset: 0; z-index: 20; background: var(--bg);
+    overflow: auto; padding: 24px 18px 60px;
+  }
+  .settings-inner { max-width: 980px; margin: 0 auto; display: grid; gap: 16px; }
+  .settings-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+  .settings-head h2 { margin: 0; font-size: 20px; }
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: 18px; background: var(--bg); }
+  .card h3 { margin: 0 0 10px; font-size: 15px; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+  .card-head h3 { margin: 0; }
+  .field { display: grid; grid-template-columns: 190px 1fr; gap: 4px 16px; align-items: center; margin: 12px 0; }
+  .field > span { font-weight: 600; }
+  .field > small { grid-column: 2; color: var(--muted); font-size: 12px; }
+  .field input { width: 100%; }
+  .settings-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+  .settings-actions .hint { margin-left: auto; color: var(--muted); font-size: 12px; }
+  .hint { color: var(--muted); font-size: 13px; }
+  .storage-list { display: grid; gap: 6px; margin-top: 10px; }
+  .storage-row {
+    display: grid; grid-template-columns: 24px 1fr auto; gap: 8px 12px;
+    align-items: start; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px;
+  }
+  .storage-row input { margin-top: 3px; }
+  .storage-row .s-main { display: flex; flex-direction: column; }
+  .storage-row .s-main small { color: var(--muted); font-size: 12px; }
+  .storage-row .s-size { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .storage-row.empty { opacity: .55; }
+  .runtime-line {
+    margin: 10px 0 0; padding: 10px 12px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--panel); font-size: 13px;
+  }
+  .runtime-line.bad { border-color: var(--danger); color: var(--danger); }
+  .runtime-line .copy { margin-left: 8px; font-size: 12px; padding: 2px 8px; }
+  dialog.confirm-dialog {
+    border: 1px solid var(--line); border-radius: 12px; padding: 0;
+    width: min(520px, calc(100vw - 40px)); background: var(--bg); color: var(--text);
+  }
+  dialog.confirm-dialog form { padding: 20px; }
+  dialog.confirm-dialog h3 { margin: 0 0 8px; }
+  dialog.confirm-dialog p { color: var(--muted); }
+  dialog.confirm-dialog .check { display: flex; gap: 8px; align-items: flex-start; margin: 14px 0; font-size: 13px; }
+  dialog::backdrop { background: rgba(0, 0, 0, .45); }
+  @media (max-width: 700px) { .field { grid-template-columns: 1fr; } .field > small { grid-column: 1; } }
 </style>
 </head>
 <body>
@@ -130,6 +180,7 @@
   <div class="actions">
     <button class="ghost" id="sync" title="重新复制 QQ 数据库并重建索引">从 QQ 同步</button>
     <button class="ghost" id="reload">刷新</button>
+    <button class="ghost" id="settingsBtn" title="端口、工作目录、Python 与清理">设置</button>
   </div>
 </header>
 
@@ -176,6 +227,84 @@
   </section>
 </main>
 
+<section class="settings hidden" id="settings" aria-hidden="true">
+  <div class="settings-inner">
+    <header class="settings-head">
+      <div>
+        <h2>设置</h2>
+        <p class="meta" id="settingsMeta">正在读取设置…</p>
+      </div>
+      <button class="ghost" type="button" id="closeSettings">关闭</button>
+    </header>
+
+    <form class="card" id="settingsForm">
+      <h3>运行参数</h3>
+      <div class="runtime-line" id="runtimeLine">正在检测 Python 与 sqlcipher3…</div>
+      <p class="hint">保存后立即生效。修改端口会重启网页服务，需要用新地址重新打开；其他参数会影响后续的查询与导出。</p>
+
+      <label class="field">
+        <span>网页端口</span>
+        <input type="number" id="setWebPort" min="0" max="65535" step="1">
+        <small>0 表示关闭网页服务；默认 46728。新端口被占用时会保留原端口，关闭后需编辑配置文件恢复。</small>
+      </label>
+      <label class="field">
+        <span>工作目录 / 索引位置</span>
+        <input type="text" id="setWorkDir" spellcheck="false" placeholder="默认系统临时目录">
+        <small>key.txt、解密副本和索引都放在这里。当前索引文件：<code id="indexPath"></code></small>
+      </label>
+      <label class="field">
+        <span>Python 解释器</span>
+        <input type="text" id="setPythonPath" spellcheck="false" placeholder="默认 python3 / python">
+        <small>留空使用平台默认值；也可指向装有 sqlcipher3 的虚拟环境，例如 <code>~/.venvs/qqnt/bin/python</code>。</small>
+      </label>
+      <label class="field">
+        <span>QQ 数据根目录</span>
+        <input type="text" id="setTencentRoot" spellcheck="false" placeholder="自动识别">
+        <small>留空自动识别。Windows 一般是 Documents\Tencent Files，Linux 是 ~/.config/QQ。</small>
+      </label>
+      <label class="field">
+        <span>QQ 号</span>
+        <input type="text" id="setAccount" spellcheck="false" placeholder="自动选择最大的库">
+        <small>多账号时指定；留空选择 nt_msg.db 最大的账号。</small>
+      </label>
+
+      <div class="settings-actions">
+        <button class="primary" type="submit">保存设置</button>
+        <button class="ghost" type="button" id="resetSettings">恢复默认</button>
+        <span class="hint" id="settingsFile"></span>
+      </div>
+    </form>
+
+    <section class="card">
+      <div class="card-head">
+        <h3>存储与清理</h3>
+        <button class="ghost" type="button" id="refreshStorage">刷新大小</button>
+      </div>
+      <p class="hint">下面都是本插件在 <code id="storageWorkDir"></code> 生成的明文副本；清理不会影响 QQ 原始数据。删除密钥后需要重新提取，删除索引后需要重建。</p>
+      <div class="storage-list" id="storageList"></div>
+      <div class="settings-actions">
+        <button class="danger" type="button" id="cleanupBtn" disabled>删除选中</button>
+        <span class="hint" id="storageTotal"></span>
+      </div>
+    </section>
+  </div>
+</section>
+
+<dialog class="confirm-dialog" id="confirmDialog">
+  <form method="dialog">
+    <h3>确认删除</h3>
+    <p id="confirmText"></p>
+    <label class="check">
+      <input type="checkbox" id="confirmCheck">
+      <span>我已确认：这些是本插件生成的副本，QQ 原始数据不受影响；删除后无法恢复。</span>
+    </label>
+    <div class="settings-actions">
+      <button class="danger" type="button" id="confirmDelete" disabled>确认删除</button>
+      <button class="ghost" value="cancel">取消</button>
+    </div>
+  </form>
+</dialog>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -198,9 +327,13 @@
     total: 0,
     rows: 0,
     indexReady: false,
+    keyReady: false,
     building: false,
     autoLoaded: false,
-    poll: 0
+    poll: 0,
+    settings: null,
+    storage: null,
+    pendingCleanup: null
   }
 
   var $ = function (id) { return document.getElementById(id) }
@@ -220,11 +353,18 @@
 
   function api(path, init) {
     var options = init || {}
+    var method = options.method || 'GET'
     var headers = { accept: 'application/json' }
     if (options.headers) {
       Object.keys(options.headers).forEach(function (key) { headers[key] = options.headers[key] })
     }
-    return fetch(path, { method: options.method || 'GET', headers: headers }).then(function (res) {
+    if (method !== 'GET' && method !== 'HEAD') headers['x-qqnt-action'] = '1'
+    var body
+    if (options.body !== undefined) {
+      headers['content-type'] = 'application/json'
+      body = JSON.stringify(options.body)
+    }
+    return fetch(path, { method: method, headers: headers, body: body }).then(function (res) {
       return res.json().catch(function () { return {} }).then(function (body) {
         if (!res.ok) throw new Error(body.error || ('请求失败 ' + res.status))
         return body
@@ -233,6 +373,15 @@
   }
 
   function num(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',') }
+
+  function bytes(n) {
+    var value = Number(n) || 0
+    if (value <= 0) return '0 B'
+    var units = ['B', 'KB', 'MB', 'GB', 'TB']
+    var i = 0
+    while (value >= 1024 && i < units.length - 1) { value /= 1024; i += 1 }
+    return (i === 0 ? String(Math.round(value)) : value.toFixed(value >= 100 ? 0 : 1)) + ' ' + units[i]
+  }
 
   // ---------------------------------------------------------------- 状态与索引
   function paintStatus(status) {
@@ -254,6 +403,7 @@
     $('meta').textContent = parts.join(' · ')
 
     state.indexReady = !!(status.index && status.index.exists)
+    state.keyReady = status.key !== false
     var build = status.build || { state: 'idle' }
     var banner = $('banner')
     var text = $('bannerText')
@@ -281,6 +431,12 @@
       banner.classList.remove('hidden')
       banner.classList.add('error')
       text.textContent = '索引失败：' + (build.error || '未知错误')
+      if (status.key === false) {
+        text.textContent += '（当前还没有数据库密钥，先在对话里运行 qqnt_extract_key）'
+        action.classList.add('hidden')
+        action.onclick = null
+        return
+      }
       action.textContent = '重试'
       action.classList.remove('hidden')
       action.onclick = function () { startBuild(false) }
@@ -288,9 +444,13 @@
     }
     if (!state.indexReady) {
       banner.classList.remove('hidden')
-      text.textContent = status.key === false
-        ? '还没有数据库密钥。先在对话里运行 qqnt_extract_key 提取密钥，再回来建立索引。'
-        : '还没有索引。首次需要把整库解析一遍（约 1 分钟），之后查询都是秒开。'
+      if (status.key === false) {
+        text.textContent = '还没有数据库密钥。先在对话里运行 qqnt_extract_key 提取密钥，再回来建立索引。'
+        action.classList.add('hidden')
+        action.onclick = null
+        return
+      }
+      text.textContent = '还没有索引。首次需要把整库解析一遍（约 1 分钟），之后查询都是秒开。'
       action.textContent = '建立索引'
       action.classList.remove('hidden')
       action.onclick = function () { startBuild(false) }
@@ -331,6 +491,7 @@
 
   function startBuild(refresh) {
     if (state.building) { toast('索引正在建立，请稍候'); return }
+    if (!state.keyReady) { toast('还没有数据库密钥，先在对话里运行 qqnt_extract_key'); return }
     if (refresh && !confirm('重新从 QQ 复制数据库并重建索引？数据库约 1 GB，耗时 1~2 分钟。')) return
     api('/api/index/build' + (refresh ? '?refresh=1' : ''), { method: 'POST' })
       .then(function () {
@@ -517,6 +678,190 @@
     window.location.href = '/api/export?' + query
   }
 
+  // ---------------------------------------------------------------- 设置与清理
+  function loadDiagnostics() {
+    var line = $('runtimeLine')
+    line.className = 'runtime-line'
+    line.textContent = '正在检测 Python 与 sqlcipher3…'
+    api('/api/diagnostics').then(function (info) {
+      if (!info.ok || info.error) {
+        line.classList.add('bad')
+        line.textContent = 'Python 检测失败：' + (info.error || ('退出码异常，解释器 ' + info.python))
+        return
+      }
+      if (!info.sqlcipher3) {
+        line.classList.add('bad')
+        line.innerHTML = 'Python ' + esc(info.version) + ' (' + esc(info.bits) + '-bit)，' +
+          '<strong>sqlcipher3 未安装</strong>：运行 <code>' + esc(info.install) + '</code> 后重试。' +
+          ' <button class="ghost copy" type="button" id="copyInstall">复制命令</button>'
+        var copy = $('copyInstall')
+        if (copy) {
+          copy.onclick = function () {
+            if (!navigator.clipboard) { toast('浏览器不允许写剪贴板，请手动复制'); return }
+            navigator.clipboard.writeText(info.install).then(
+              function () { toast('命令已复制') },
+              function () { toast('复制失败，请手动复制') }
+            )
+          }
+        }
+      } else {
+        line.textContent = 'Python ' + info.version + ' (' + info.bits + '-bit) · sqlcipher3 已安装'
+      }
+    }).catch(function (error) {
+      line.classList.add('bad')
+      line.textContent = '检测失败：' + error.message
+    })
+  }
+
+  function updateIndexPath() {
+    var dir = $('setWorkDir').value.trim() ||
+      (state.settings && state.settings.settings ? state.settings.settings.workDir : '')
+    $('indexPath').textContent = dir ? (dir.replace(/[\\/]+$/, '') + '/index.sqlite') : '（工作目录）'
+  }
+
+  function loadSettings() {
+    api('/api/settings').then(function (payload) {
+      state.settings = payload
+      var s = payload.settings
+      $('setWebPort').value = s.webPort
+      $('setWorkDir').value = s.workDir
+      $('setPythonPath').value = s.pythonPath || ''
+      $('setTencentRoot').value = s.tencentRoot || ''
+      $('setAccount').value = s.account || ''
+      $('setPythonPath').placeholder = payload.defaults.python || ''
+      $('setWorkDir').placeholder = payload.defaults.workDir || ''
+      $('setTencentRoot').placeholder = payload.defaults.tencentRoot || '自动识别'
+      $('setAccount').placeholder = payload.defaults.account || '自动选择最大的库'
+      $('settingsMeta').textContent = '当前地址 ' + (payload.url || '（网页服务已关闭）')
+      $('settingsFile').textContent = '配置文件：' + payload.file
+      updateIndexPath()
+      loadDiagnostics()
+      loadStorage()
+    }).catch(function (error) { toast('读取设置失败：' + error.message) })
+  }
+
+  function openSettings() {
+    $('settings').classList.remove('hidden')
+    $('settings').setAttribute('aria-hidden', 'false')
+    loadSettings()
+  }
+
+  function closeSettings() {
+    $('settings').classList.add('hidden')
+    $('settings').setAttribute('aria-hidden', 'true')
+  }
+
+  function saveSettings(event) {
+    event.preventDefault()
+    var port = Number($('setWebPort').value)
+    if (!Number.isInteger(port) || port < 0 || port > 65535) {
+      toast('端口必须是 0~65535 的整数')
+      return
+    }
+    var patch = {
+      webPort: port,
+      workDir: $('setWorkDir').value.trim(),
+      pythonPath: $('setPythonPath').value.trim(),
+      tencentRoot: $('setTencentRoot').value.trim(),
+      account: $('setAccount').value.trim()
+    }
+    api('/api/settings', { method: 'PUT', body: patch }).then(function (result) {
+      state.settings = result
+      var nextUrl = result.url || ''
+      toast(result.restart ? '设置已保存，网页服务已切换端口' : '设置已保存')
+      $('settingsMeta').textContent = nextUrl ? ('当前地址 ' + nextUrl) : '网页服务已关闭'
+      if (result.restart && nextUrl && nextUrl !== location.origin + '/') {
+        $('settingsMeta').innerHTML = '网页已切换到 <a href="' + esc(nextUrl) + '">' + esc(nextUrl) +
+          '</a>，正在跳转…'
+        setTimeout(function () { window.location.href = nextUrl }, 1400)
+        return
+      }
+      refreshStatus(false)
+      loadStorage()
+      loadDiagnostics()
+    }).catch(function (error) { toast('保存失败：' + error.message) })
+  }
+
+  function resetSettings() {
+    if (!confirm('恢复默认设置？如果端口变化，网页会切换到新地址。')) return
+    api('/api/settings/reset', { method: 'POST' }).then(function (result) {
+      toast('已恢复默认设置')
+      state.settings = result
+      var nextUrl = result.url || ''
+      if (result.restart && nextUrl && nextUrl !== location.origin + '/') {
+        window.location.href = nextUrl
+        return
+      }
+      loadSettings()
+      refreshStatus(false)
+    }).catch(function (error) { toast('恢复失败：' + error.message) })
+  }
+
+  function loadStorage() {
+    var host = $('storageList')
+    host.innerHTML = '<div class="hint">正在统计…</div>'
+    api('/api/storage').then(function (payload) {
+      state.storage = payload
+      $('storageWorkDir').textContent = payload.workDir
+      host.innerHTML = ''
+      if (!payload.items.length) {
+        host.innerHTML = '<div class="hint">没有可清理的生成文件。</div>'
+      }
+      payload.items.forEach(function (item) {
+        var row = document.createElement('label')
+        row.className = 'storage-row'
+        row.innerHTML =
+          '<input type="checkbox" value="' + esc(item.id) + '">' +
+          '<span class="s-main"><strong>' + esc(item.label) + '</strong>' +
+          '<small>' + esc(item.detail) + '</small></span>' +
+          '<span class="s-size">' + bytes(item.bytes) + '</span>'
+        host.appendChild(row)
+      })
+      $('storageTotal').textContent = '合计 ' + bytes(payload.totalBytes) +
+        (payload.running ? ' · 索引正在建立，暂不能清理' : '')
+      updateCleanupButton()
+    }).catch(function (error) {
+      host.innerHTML = '<div class="banner error">读取失败：' + esc(error.message) + '</div>'
+    })
+  }
+
+  function updateCleanupButton() {
+    var checked = document.querySelectorAll('#storageList input[type=checkbox]:checked')
+    $('cleanupBtn').disabled = !checked.length || !!(state.storage && state.storage.running)
+  }
+
+  function cleanupSelected() {
+    var checked = Array.prototype.slice.call(document.querySelectorAll('#storageList input[type=checkbox]:checked'))
+    var ids = checked.map(function (el) { return el.value })
+    if (!ids.length) { toast('先选择要删除的内容'); return }
+    var selected = (state.storage ? state.storage.items : []).filter(function (item) {
+      return ids.indexOf(item.id) !== -1
+    })
+    var total = selected.reduce(function (sum, item) { return sum + item.bytes }, 0)
+    state.pendingCleanup = ids
+    $('confirmText').textContent = '将删除：' +
+      selected.map(function (item) { return item.label }).join('、') +
+      '，预计释放 ' + bytes(total) + '。'
+    $('confirmCheck').checked = false
+    $('confirmDelete').disabled = true
+    $('confirmDialog').showModal()
+  }
+
+  function confirmCleanup() {
+    var ids = state.pendingCleanup || []
+    if (!ids.length || !$('confirmCheck').checked) return
+    api('/api/storage/cleanup', { method: 'POST', body: { ids: ids, confirm: true } }).then(function (result) {
+      $('confirmDialog').close()
+      state.pendingCleanup = null
+      toast('已删除 ' + result.removed + ' 个文件，释放 ' + bytes(result.freedBytes))
+      if (result.failed && result.failed.length) {
+        toast('有 ' + result.failed.length + ' 个文件删除失败：' + result.failed[0].error)
+      }
+      loadStorage()
+      refreshStatus(false)
+    }).catch(function (error) { toast('删除失败：' + error.message) })
+  }
+
   // ---------------------------------------------------------------- 事件
   $('filters').addEventListener('submit', function (event) {
     event.preventDefault()
@@ -548,6 +893,24 @@
       state.kind = tab.getAttribute('data-kind')
       renderSessions()
     })
+  })
+
+  $('settingsBtn').addEventListener('click', openSettings)
+  $('closeSettings').addEventListener('click', closeSettings)
+  $('settingsForm').addEventListener('submit', saveSettings)
+  $('resetSettings').addEventListener('click', resetSettings)
+  $('refreshStorage').addEventListener('click', loadStorage)
+  $('cleanupBtn').addEventListener('click', cleanupSelected)
+  $('setWorkDir').addEventListener('input', updateIndexPath)
+  $('storageList').addEventListener('change', updateCleanupButton)
+  $('confirmCheck').addEventListener('change', function () {
+    $('confirmDelete').disabled = !this.checked
+  })
+  $('confirmDelete').addEventListener('click', confirmCleanup)
+  $('confirmDialog').addEventListener('close', function () { state.pendingCleanup = null })
+  document.addEventListener('keydown', function (event) {
+    if (event.key !== 'Escape' || $('confirmDialog').open) return
+    if (!$('settings').classList.contains('hidden')) closeSettings()
   })
 
   refreshStatus(false)

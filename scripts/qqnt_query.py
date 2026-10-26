@@ -225,6 +225,21 @@ def cmd_build(p, root, account, refresh):
             pass
 
 
+def require_build_prerequisites(p):
+    """Fail fast with an actionable reason instead of a bare exit code 1."""
+    try:
+        import sqlcipher3  # noqa: F401 - presence check
+    except Exception as exc:  # noqa: BLE001 - a broken wheel also lands here
+        raise BadInput(
+            '无法加载 sqlcipher3（%s），不能解密数据库。给插件使用的 Python 安装：\n'
+            '    %s -m pip install sqlcipher3-wheels\n'
+            '如果系统 pip 受 PEP 668 限制，建议创建虚拟环境，并在网页“设置”里把 '
+            'Python 解释器指向它。' % (exc, sys.executable))
+    if not os.path.exists(p['key']):
+        raise BadInput('还没有数据库密钥。先在 DSH 会话里运行 qqnt_extract_key，'
+                       '成功后再建立索引。')
+
+
 def run_build(p, root, account, refresh):
     started = int(time.time())
     state = {'state': 'running', 'mode': 'full', 'processed': 0, 'total': 0,
@@ -237,6 +252,8 @@ def run_build(p, root, account, refresh):
         write_status(p, state)
 
     try:
+        q.LAST_ERROR = ''
+        require_build_prerequisites(p)
         uin, dbdir, datadir, _ = q.find_account(root, account)
         state['account'] = uin
         report()
@@ -361,9 +378,12 @@ def run_build(p, root, account, refresh):
         print(json.dumps({'ok': True, 'processed': processed,
                           'seconds': int(time.time()) - started}, ensure_ascii=False))
     except BaseException as exc:      # noqa: BLE001 - 任何失败都要落到状态文件
-        message = '%s: %s' % (exc.__class__.__name__, exc)
-        if isinstance(exc, SystemExit):
-            message = 'exited with code %s' % exc.code
+        if isinstance(exc, BadInput):
+            message = str(exc)
+        elif isinstance(exc, SystemExit):
+            message = q.LAST_ERROR or 'exited with code %s' % exc.code
+        else:
+            message = '%s: %s' % (exc.__class__.__name__, exc)
         write_status(p, dict(state, state='error', finishedAt=int(time.time()),
                              error=message))
         raise

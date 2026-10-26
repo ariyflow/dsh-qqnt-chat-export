@@ -2,6 +2,8 @@
     - id: qqnt-chat-export
       name: 'dsh-qqnt-chat-export'
       config:
+        # These are defaults. The web UI's Settings page writes overrides to
+        # settings.json (see README) and applies them without editing this file.
         # 64-bit Python 3 on PATH, or an absolute path to one. It needs the
         # sqlcipher3 package (`pip install sqlcipher3-wheels`).
         # Empty means "python" on Windows and "python3" on Linux.
@@ -18,6 +20,8 @@
         # the account with the largest message database.
         account: ''
         # Local browsing UI on http://127.0.0.1:46728. Set 0 to turn it off.
+        # The Settings page can change this at runtime (a new port is
+        # bind-tested before the old listener is closed).
         webPort: 46728
         # Loopback only. Do not widen this: the page shows every chat.
         webHost: '127.0.0.1'

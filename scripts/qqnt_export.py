@@ -70,7 +70,12 @@ PLACEHOLDER = {
 # --------------------------------------------------------------------------
 # 通用
 # --------------------------------------------------------------------------
+LAST_ERROR = ''            # most recent die() message; the query layer reports it
+
+
 def die(msg, code=1):
+    global LAST_ERROR
+    LAST_ERROR = msg
     print('错误: ' + msg, file=sys.stderr)
     sys.exit(code)
 
@@ -622,6 +627,7 @@ def try_key(db_path, key):
 
 
 def cmd_key(args):
+    sqlcipher_module()          # fail before a multi-minute memory scan
     uin, dbdir, datadir, _ = find_account(args.root, args.account)
     src = os.path.join(dbdir, 'nt_msg.db')
     keyfile = os.path.join(args.work, 'key.txt')

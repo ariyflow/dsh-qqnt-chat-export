@@ -37,6 +37,43 @@ function isLoopbackOrigin(value) {
   }
 }
 
+/** Mutating requests must come from this loopback page, not a cross-site form. */
+function isTrustedMutation(req) {
+  const origin = req.headers.origin
+  if (origin !== undefined && !isLoopbackOrigin(origin)) return false
+  // A custom header forces a CORS preflight, which this server never allows.
+  return req.headers['x-qqnt-action'] === '1'
+}
+
+/** Read a small JSON request body. */
+function readJsonBody(req, limit = 64 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let size = 0
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > limit) {
+        reject(Object.assign(new Error('请求体过大'), { status: 413 }))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => {
+      if (size === 0) {
+        resolve({})
+        return
+      }
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+      } catch {
+        reject(Object.assign(new Error('请求体不是合法 JSON'), { status: 400 }))
+      }
+    })
+    req.on('error', (error) => reject(Object.assign(error, { status: 400 })))
+  })
+}
+
 /** One python invocation returning parsed JSON from stdout. */
 function runJson(settings, command, args = {}, { signal } = {}) {
   return new Promise((resolve, reject) => {
@@ -162,32 +199,45 @@ function sweepExports(dir) {
  * @param {object} settings - resolved plugin settings (`python`, `workDir`, `tencentRoot`, `account`).
  * @param {number} port - listen port; 0 disables the server.
  * @param {string} host - bind address; loopback by default.
- * @param {{ onError?: (error: Error) => void }} options - notified when the listener cannot bind.
- * @returns {{close: () => Promise<void>, url: string, error?: Error}}
+ * @param {{ onError?: (error: Error) => void, handlers?: object }} options - notified when the listener cannot bind; handlers serve settings/storage.
+ * @returns {{close: () => Promise<void>, url: string, error?: Error, ready: Promise<string>}}
  */
 export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOST, options = {}) {
+  const handlers = options.handlers && typeof options.handlers === 'object' ? options.handlers : {}
+  const urlHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
   const state = {
-    url: `http://${host}:${port || DEFAULT_PORT}/`,
+    url: `http://${urlHost}:${port || DEFAULT_PORT}/`,
     error: undefined,
     server: undefined,
   }
-  if (!port) return { close: async () => {}, url: '', error: undefined }
+  let resolveReady
+  let rejectReady
+  const ready = new Promise((resolve, reject) => {
+    resolveReady = resolve
+    rejectReady = reject
+  })
+  ready.catch(() => {})       // callers that ignore ready must not crash the process
+  if (!port) return { close: async () => {}, url: '', error: undefined, ready: Promise.resolve('') }
 
   let pageHtml = ''
   try {
     pageHtml = readFileSync(PAGE, 'utf8')
   } catch (error) {
     state.error = new Error(`page.html is missing: ${error.message}`)
-    return { close: async () => {}, url: state.url, error: state.error }
+    rejectReady(state.error)
+    return { close: async () => {}, url: state.url, error: state.error, ready }
   }
 
   const server = createServer((req, res) => {
-    const requestHost = String(req.headers.host ?? '').split(':')[0]
+    const hostHeader = String(req.headers.host ?? '')
+    const requestHost = hostHeader.startsWith('[')
+      ? hostHeader.slice(1, hostHeader.indexOf(']'))
+      : hostHeader.split(':')[0]
     if (!LOOPBACK.has(requestHost)) {
       sendJson(res, 403, { error: 'loopback only' })
       return
     }
-    const requestUrl = new URL(req.url ?? '/', `http://${host}:${port}`)
+    const requestUrl = new URL(req.url ?? '/', state.url)
     const pathname = requestUrl.pathname
     const params = requestUrl.searchParams
 
@@ -202,6 +252,91 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
     }
     if (pathname === '/favicon.ico') {
       res.writeHead(204).end()
+      return
+    }
+    if (req.method === 'GET' && pathname === '/api/settings') {
+      if (typeof handlers.getSettings !== 'function') {
+        sendJson(res, 501, { error: 'this build has no settings API' })
+        return
+      }
+      try {
+        sendJson(res, 200, handlers.getSettings())
+      } catch (error) {
+        sendJson(res, 500, { error: error.message })
+      }
+      return
+    }
+    if ((req.method === 'PUT' || req.method === 'POST') && pathname === '/api/settings') {
+      if (!isTrustedMutation(req)) {
+        sendJson(res, 403, { error: 'cross-origin requests are refused' })
+        return
+      }
+      if (typeof handlers.updateSettings !== 'function') {
+        sendJson(res, 501, { error: 'this build has no settings API' })
+        return
+      }
+      readJsonBody(req)
+        .then((patch) => handlers.updateSettings(patch))
+        .then((result) => sendJson(res, 200, result))
+        .catch((error) => sendJson(res, error.status ?? 400, { error: error.message }))
+      return
+    }
+    if (req.method === 'POST' && pathname === '/api/settings/reset') {
+      if (!isTrustedMutation(req)) {
+        sendJson(res, 403, { error: 'cross-origin requests are refused' })
+        return
+      }
+      if (typeof handlers.resetSettings !== 'function') {
+        sendJson(res, 501, { error: 'this build has no settings API' })
+        return
+      }
+      Promise.resolve()
+        .then(() => handlers.resetSettings())
+        .then((result) => sendJson(res, 200, result))
+        .catch((error) => sendJson(res, error.status ?? 400, { error: error.message }))
+      return
+    }
+    if (req.method === 'GET' && pathname === '/api/storage') {
+      if (typeof handlers.getStorage !== 'function') {
+        sendJson(res, 501, { error: 'this build has no storage API' })
+        return
+      }
+      try {
+        sendJson(res, 200, handlers.getStorage())
+      } catch (error) {
+        sendJson(res, 500, { error: error.message })
+      }
+      return
+    }
+    if (req.method === 'POST' && pathname === '/api/storage/cleanup') {
+      if (!isTrustedMutation(req)) {
+        sendJson(res, 403, { error: 'cross-origin requests are refused' })
+        return
+      }
+      if (typeof handlers.cleanupStorage !== 'function') {
+        sendJson(res, 501, { error: 'this build has no storage API' })
+        return
+      }
+      readJsonBody(req)
+        .then((body) => {
+          if (body.confirm !== true) {
+            throw Object.assign(new Error('删除需要二次确认'), { status: 400 })
+          }
+          return handlers.cleanupStorage(body.ids)
+        })
+        .then((result) => sendJson(res, 200, result))
+        .catch((error) => sendJson(res, error.status ?? 400, { error: error.message }))
+      return
+    }
+    if (req.method === 'GET' && pathname === '/api/diagnostics') {
+      if (typeof handlers.getDiagnostics !== 'function') {
+        sendJson(res, 501, { error: 'this build has no diagnostics API' })
+        return
+      }
+      Promise.resolve()
+        .then(() => handlers.getDiagnostics())
+        .then((result) => sendJson(res, 200, result))
+        .catch((error) => sendJson(res, 500, { error: error.message }))
       return
     }
     if (req.method === 'GET' && pathname === '/api/status') {
@@ -332,11 +467,13 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
   server.on('error', (error) => {
     state.error = error
     console.warn(`[qqnt-chat-export] web UI on ${state.url} unavailable: ${error.message}`)
+    rejectReady(error)
     options.onError?.(error)
   })
   server.listen(port, host, () => {
     console.log(`[qqnt-chat-export] web UI listening on ${state.url}`)
     sweepExports(path.join(settings.workDir, 'exports'))
+    resolveReady(state.url)
   })
   state.server = server
 
@@ -345,6 +482,7 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
     get error() {
       return state.error
     },
+    ready,
     close: () => new Promise((resolve) => {
       if (!server.listening) {
         resolve()

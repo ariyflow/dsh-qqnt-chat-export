@@ -12,10 +12,20 @@
  * the same data through `scripts/qqnt_query.py`.
  */
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {
+  clearOverrides,
+  loadOverrides,
+  publicSettings,
+  resolveSettings,
+  saveOverrides,
+  settingsFile,
+  validatePatch,
+} from './settings.js'
+import { cleanupStorage, storageSnapshot } from './storage.js'
 import { startWebServer } from './web.js'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -26,43 +36,14 @@ export const inject = ['tools', 'systemPrompt']
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const CLI = path.join(HERE, 'scripts', 'qqnt_export.py')
 
-const DEFAULT_WORK_DIR = path.join(os.tmpdir(), 'qqnt-chat-export')
 const DEFAULT_FORMATS = ['txt', 'sqlite', 'csv']
 const KEY_TIMEOUT_MS = 10 * 60_000
 const EXPORT_TIMEOUT_MS = 15 * 60_000
-/** Local browsing UI port; 0 turns the server off. */
-const DEFAULT_WEB_PORT = 46728
 /** Prompt placement after the built-in `tools:sdk` section. */
 const PROMPT_ORDER = 5000
 
 /** One-line probe: Python version, pointer width, and whether sqlcipher3 resolves. */
 const PYTHON_PROBE = "import json,struct,sys,importlib.util as u;print(json.dumps({'version':sys.version.split()[0],'bits':struct.calcsize('P')*8,'sqlcipher3':u.find_spec('sqlcipher3') is not None}))"
-
-/** Expand a leading `~` because config values do not go through a shell. */
-function expandHome(value) {
-  if (value === '~') return os.homedir()
-  if (value.startsWith('~/') || value.startsWith('~\\')) return path.join(os.homedir(), value.slice(2))
-  return value
-}
-
-/** Read the row's config defensively; this bundle declares no Config schema. */
-function resolveSettings(config) {
-  const raw = config && typeof config === 'object' ? config : {}
-  const str = (value) => (typeof value === 'string' && value.trim() !== '' ? value.trim() : '')
-  const webPort = Number.parseInt(String(raw.webPort ?? ''), 10)
-  const pythonPath = str(raw.pythonPath)
-  const python = pythonPath === ''
-    ? (process.platform === 'win32' ? 'python' : 'python3')
-    : /[\\/]/.test(pythonPath) ? path.resolve(expandHome(pythonPath)) : pythonPath
-  return {
-    python,
-    workDir: str(raw.workDir) ? path.resolve(expandHome(str(raw.workDir))) : DEFAULT_WORK_DIR,
-    tencentRoot: str(raw.tencentRoot) ? path.resolve(expandHome(str(raw.tencentRoot))) : '',
-    account: str(raw.account),
-    webPort: Number.isFinite(webPort) && webPort >= 0 ? webPort : DEFAULT_WEB_PORT,
-    webHost: str(raw.webHost) || '127.0.0.1',
-  }
-}
 
 /**
  * The user's downloads directory, following the XDG user-dirs file on Linux.
@@ -453,6 +434,39 @@ function webGuidance(url) {
   return ` The same data, including private chats and keyword search across every chat, is browsable at ${url} in a browser tab; that page also downloads the current query as txt, csv, json, markdown, html, or sqlite.`
 }
 
+/** One-shot Python/sqlcipher3 probe used by the settings page. */
+async function probePython(current) {
+  const command = /\s/.test(current.python) ? `"${current.python}"` : current.python
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 10_000)
+  try {
+    const probe = await run(current.python, ['-X', 'utf8', '-c', PYTHON_PROBE], {
+      signal: controller.signal,
+    })
+    const info = JSON.parse(probe.output.trim().split('\n').pop() || '{}')
+    return {
+      ok: probe.code === 0,
+      python: current.python,
+      version: String(info.version ?? ''),
+      bits: Number(info.bits ?? 0),
+      sqlcipher3: info.sqlcipher3 === true,
+      install: `${command} -m pip install sqlcipher3-wheels`,
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      python: current.python,
+      version: '',
+      bits: 0,
+      sqlcipher3: false,
+      error: error instanceof Error ? error.message : String(error),
+      install: `${command} -m pip install sqlcipher3-wheels`,
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /**
  * Register the tools, their workflow guidance, and the local browsing UI.
  * Every registration is effect-scoped, so unloading the bundle removes the
@@ -463,25 +477,133 @@ function webGuidance(url) {
  *   `account`, `webPort`, `webHost`.
  */
 export function apply(ctx, config) {
-  const settings = resolveSettings(config)
+  const bundleConfig = config && typeof config === 'object' ? config : {}
+  let overrides = loadOverrides()
+  const settings = resolveSettings(bundleConfig, overrides)
+  const defaults = resolveSettings(bundleConfig, {})
   for (const build of [statusTool, keyTool, groupsTool, exportTool]) {
     ctx.tools.register(build(settings))
   }
 
   let webUrl = ''
-  const run = () => {
-    const server = startWebServer(settings, settings.webPort, settings.webHost, {
-      // A failed bind must not leave the model advertising a URL that is not there.
-      onError: () => { webUrl = '' },
-    })
-    if (!server.error && server.url) webUrl = server.url
-    return () => {
-      webUrl = ''
-      void server.close()
+  let webServer = null
+  let applying = false
+
+  const ensureDir = (dir) => {
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    if (process.platform !== 'win32') {
+      try {
+        chmodSync(dir, 0o700)
+      } catch {
+        // A filesystem without chmod support still works.
+      }
     }
   }
-  if (typeof ctx.effect === 'function') ctx.effect(run)
-  else run()
+
+  /** Start a listener on an explicit port (used for bind-testing a new one). */
+  const launch = async (port, host) => {
+    if (!port) return null
+    const server = startWebServer(settings, port, host, { handlers })
+    await server.ready
+    return server
+  }
+
+  const handlers = {
+    getSettings: () => publicSettings(settings, defaults, { url: webUrl, file: settingsFile() }),
+    getStorage: () => storageSnapshot(settings.workDir),
+    cleanupStorage: (ids) => cleanupStorage(settings.workDir, ids),
+    getDiagnostics: () => probePython(settings),
+    updateSettings: (patch) => commitSettings({ ...overrides, ...validatePatch(patch) }),
+    resetSettings: () => commitSettings({}),
+  }
+
+  /**
+   * Apply a full set of overrides. A changed port is bind-tested on the new
+   * port before the old listener is closed, so a typo or a busy port leaves
+   * the working UI untouched.
+   */
+  async function commitSettings(nextOverrides) {
+    if (applying) throw Object.assign(new Error('设置正在应用，请稍候'), { status: 409 })
+    applying = true
+    try {
+      const next = resolveSettings(bundleConfig, nextOverrides)
+      if (next.workDir === path.parse(next.workDir).root) {
+        throw Object.assign(new Error('工作目录不能是文件系统根目录'), { status: 400 })
+      }
+      try {
+        ensureDir(next.workDir)
+      } catch (error) {
+        throw Object.assign(error, { status: 400 })
+      }
+      const portChanged = next.webPort !== settings.webPort
+      let candidate = null
+      if (portChanged && next.webPort !== 0) {
+        try {
+          candidate = await launch(next.webPort, next.webHost)
+        } catch (error) {
+          throw Object.assign(error, { status: 409 })
+        }
+      }
+      try {
+        if (Object.keys(nextOverrides).length > 0) saveOverrides(nextOverrides)
+        else clearOverrides()
+      } catch (error) {
+        if (candidate) void candidate.close()
+        throw Object.assign(error, { status: 500 })
+      }
+
+      const previousServer = webServer
+      Object.assign(settings, next)
+      if (portChanged) {
+        webServer = candidate
+        webUrl = candidate ? candidate.url : ''
+        // Let the response to this very request finish before stopping the
+        // listener that is serving it.
+        if (previousServer) setImmediate(() => { void previousServer.close() })
+      }
+      return {
+        ...publicSettings(settings, defaults, { url: webUrl, file: settingsFile() }),
+        restart: portChanged,
+        previousUrl: previousServer ? previousServer.url : '',
+      }
+    } finally {
+      applying = false
+    }
+  }
+
+  const startWeb = () => {
+    if (!settings.webPort) {
+      webUrl = ''
+      return
+    }
+    const server = startWebServer(settings, settings.webPort, settings.webHost, {
+      // A failed bind must not leave the model advertising a URL that is not there.
+      onError: () => {
+        if (webServer === server) webUrl = ''
+      },
+      handlers,
+    })
+    webServer = server
+    server.ready.then(() => {
+      if (webServer === server) webUrl = server.url
+    }, () => {
+      if (webServer === server) webUrl = ''
+    })
+  }
+
+  if (typeof ctx.effect === 'function') {
+    ctx.effect(() => {
+      startWeb()
+      return () => {
+        const server = webServer
+        webServer = null
+        webUrl = ''
+        if (server) void server.close()
+      }
+    })
+  } else {
+    startWeb()
+  }
 
   ctx.systemPrompt.section({
     name: 'tool:qqnt_chat_export',
