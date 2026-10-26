@@ -852,7 +852,7 @@
     var line = $('startupKey')
     line.className = 'startup-line'
     if (state.keyJob && state.keyJob.state === 'running') {
-      line.textContent = '数据库密钥：正在提取…'
+      line.textContent = '数据库密钥：正在提取（通常 1~3 分钟，请耐心等待）…'
       updateKeyControls()
       return
     }
@@ -864,7 +864,7 @@
     }
     var envReady = !!(state.diagnostics && state.diagnostics.ok && state.diagnostics.sqlcipher3)
     var text = '数据库密钥：未配置。保持 QQ 登录，'
-    text += envReady ? '然后点「提取密钥」。' : '先完成环境配置，再点「提取密钥」。'
+    text += envReady ? '然后点「提取密钥」；首次约 1~3 分钟，请耐心等待。' : '先完成环境配置，再点「提取密钥」。'
     if (state.diagnostics && state.diagnostics.restricted) {
       text += ' Linux 还需要先执行：sudo sysctl -w kernel.yama.ptrace_scope=0'
     }
@@ -891,9 +891,9 @@
     var hint = $('keyHint')
     if (hint) {
       if (!envReady) hint.textContent = '先完成环境配置'
-      else if (running) hint.textContent = '正在提取，保持 QQ 登录'
+      else if (running) hint.textContent = '正在提取，通常 1~3 分钟，请耐心等待；保持 QQ 登录'
       else if (info.restricted) hint.textContent = 'Linux 需先执行 sudo sysctl -w kernel.yama.ptrace_scope=0'
-      else hint.textContent = '保持 QQ 登录；首次约 1~3 分钟'
+      else hint.textContent = '保持 QQ 登录；首次约 1~3 分钟，请耐心等待'
     }
   }
 
@@ -922,7 +922,7 @@
     }
     box.classList.remove('hidden')
     var text = status.state === 'running'
-      ? '正在提取密钥：' + (status.step || '扫描 QQ 进程内存…')
+      ? '正在提取密钥：' + (status.step || '扫描 QQ 进程内存…') + '（查找密钥耗时较长，通常 1~3 分钟，请耐心等待）'
       : status.state === 'done'
         ? '密钥已提取并保存到 key.txt（内容已隐藏）'
         : '提取失败：' + (status.error || '未知错误')
@@ -976,7 +976,8 @@
       return
     }
     var message = force ? '重新提取会覆盖现有 key.txt。\n' : ''
-    message += '将扫描已登录 QQ 进程的内存，首次约 1~3 分钟；请保持 QQ 登录。'
+    message += '将扫描已登录 QQ 进程的内存来查找数据库密钥：首次约 1~3 分钟，'
+    message += '内存较大时更久，请耐心等待。\n整个过程中请保持 QQ 登录，不要关闭 QQ。'
     if (state.diagnostics.restricted) {
       message += '\n\nLinux 需要先执行：sudo sysctl -w kernel.yama.ptrace_scope=0'
     }

@@ -44,7 +44,8 @@ const SETUP_SOURCES = {
   default: null,
   tsinghua: 'https://pypi.tuna.tsinghua.edu.cn/simple',
 }
-const KEY_TIMEOUT_MS = 10 * 60_000
+/** Key extraction is slow by nature; keep this in step with the web job's own limit. */
+const KEY_TIMEOUT_MS = 15 * 60_000
 const EXPORT_TIMEOUT_MS = 15 * 60_000
 /** Prompt placement after the built-in `tools:sdk` section. */
 const PROMPT_ORDER = 5000
@@ -75,18 +76,20 @@ function defaultDownloadDir() {
 
 /** SQLCipher writes one native error block per rejected candidate key. */
 const SQLCIPHER_NOISE = /ERROR CORE (?:sqlcipher_|sqlite3Codec:)/
-/** Cap on retained stdout; exporter progress lines are tiny. */
-const MAX_STDOUT_CHARS = 256 * 1024
-/** Retained stderr lines, newest kept. */
-const STDERR_LINE_LIMIT = 300
+/** Cap on retained output; exporter progress lines are tiny. */
+const MAX_OUTPUT_CHARS = 256 * 1024
 
 /**
  * Run one program and collect bounded, filtered output.
  *
  * Extracting a key validates tens of thousands of wrong candidates, and
  * SQLCipher writes a native error block per candidate to stderr — several
- * megabytes of output that says nothing about the run. Those blocks are counted
- * and folded away here; the exporter's own diagnostics are kept.
+ * megabytes of output that says nothing about the run. Those lines are counted
+ * and folded into one footer line here.
+ *
+ * stdout and stderr are kept in arrival order (the exporter prints its plan and
+ * progress on stdout, warnings on stderr), so the report reads like the console
+ * session instead of two blocks appended to each other.
  *
  * @returns {Promise<{code: number, output: string}>}
  */
@@ -101,52 +104,48 @@ function run(command, argv, { signal, cwd }) {
       env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
-    const stdout = []
-    let stdoutChars = 0
-    let stdoutTruncated = false
-    const stderrLines = []
+    const lines = []
+    let size = 0
+    let truncated = false
     let foldedNoise = 0
-    let droppedLines = 0
-    let pending = ''
+    const pending = { out: '', err: '' }
 
-    const keepStderrLine = (line) => {
-      const text = line.endsWith('\r') ? line.slice(0, -1) : line
+    const keepLine = (raw) => {
+      // \r of a CRLF pair and trailing spaces are not part of the message.
+      const text = raw.trimEnd()
       if (SQLCIPHER_NOISE.test(text)) {
         foldedNoise += 1
         return
       }
-      stderrLines.push(text)
-      if (stderrLines.length > STDERR_LINE_LIMIT) {
-        stderrLines.shift()
-        droppedLines += 1
+      if (size >= MAX_OUTPUT_CHARS) {
+        truncated = true
+        return
       }
+      lines.push(text)
+      size += text.length + 1
+    }
+
+    const consume = (chunk, stream) => {
+      let text = pending[stream] + chunk
+      let index = text.indexOf('\n')
+      while (index !== -1) {
+        keepLine(text.slice(0, index))
+        text = text.slice(index + 1)
+        index = text.indexOf('\n')
+      }
+      if (text.length > 8192) {
+        keepLine(text)
+        text = ''
+      }
+      pending[stream] = text
     }
 
     const onAbort = () => child.kill()
     signal?.addEventListener('abort', onAbort, { once: true })
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
-    child.stdout.on('data', (chunk) => {
-      if (stdoutChars >= MAX_STDOUT_CHARS) {
-        stdoutTruncated = true
-        return
-      }
-      stdout.push(chunk)
-      stdoutChars += chunk.length
-    })
-    child.stderr.on('data', (chunk) => {
-      pending += chunk
-      let index = pending.indexOf('\n')
-      while (index !== -1) {
-        keepStderrLine(pending.slice(0, index))
-        pending = pending.slice(index + 1)
-        index = pending.indexOf('\n')
-      }
-      if (pending.length > 8192) {
-        keepStderrLine(pending)
-        pending = ''
-      }
-    })
+    child.stdout.on('data', (chunk) => consume(chunk, 'out'))
+    child.stderr.on('data', (chunk) => consume(chunk, 'err'))
     child.on('error', (error) => {
       signal?.removeEventListener('abort', onAbort)
       reject(error.code === 'ENOENT'
@@ -155,15 +154,14 @@ function run(command, argv, { signal, cwd }) {
     })
     child.on('close', (code) => {
       signal?.removeEventListener('abort', onAbort)
-      if (pending !== '') keepStderrLine(pending)
-      const sections = []
-      const text = stdout.join('').trimEnd()
-      if (text !== '') sections.push(stdoutTruncated ? `${text}\n[输出过长，仅保留前 256 KB]` : text)
-      if (droppedLines > 0) sections.push(`[较早的 ${droppedLines} 行 stderr 已省略]`)
-      const kept = stderrLines.join('\n').trim()
-      if (kept !== '') sections.push(kept)
-      if (foldedNoise > 0) sections.push(`[已折叠 ${foldedNoise} 行 SQLCipher 逐候选项解密日志]`)
-      resolve({ code: code ?? -1, output: sections.join('\n') })
+      if (pending.out !== '') keepLine(pending.out)
+      if (pending.err !== '') keepLine(pending.err)
+      const body = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+      const notes = []
+      if (foldedNoise > 0) notes.push(`[已折叠 ${foldedNoise} 条 SQLCipher 逐候选项报错]`)
+      if (truncated) notes.push(`[输出过长，仅保留前 ${MAX_OUTPUT_CHARS / 1024} KB]`)
+      const output = [body, ...notes].filter((part) => part !== '').join('\n')
+      resolve({ code: code ?? -1, output })
     })
   })
 }
@@ -364,7 +362,7 @@ function statusTool(settings) {
 function keyTool(settings) {
   return {
     name: 'qqnt_extract_key',
-    description: 'Recover the local QQ message-database key from the running, logged-in QQ client and cache it for later calls. A first extraction takes one to three minutes.',
+    description: 'Recover the local QQ message-database key from the running, logged-in QQ client and cache it for later calls. Finding the key is slow: it scans QQ process memory and validates candidate keys, which usually takes one to three minutes. Tell the user it takes a while and to please wait before calling this tool, and never cancel it merely because it is slow.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -437,7 +435,7 @@ function groupsTool(settings) {
 /** Workflow and guardrails the tool definitions do not carry. */
 const GUIDANCE = `## QQ chat export
 
-The qqnt_* tools read the message database of the NTQQ client installed on this machine. Use them in order: qqnt_status, then qqnt_extract_key, then qqnt_list_groups, then qqnt_export_group. Key extraction only works while QQ is logged in; when it finds no key, ask the user to confirm QQ is signed in rather than retrying. Confirm the exact group number with the user before exporting, because the common off-by-one-digit guess exports nothing. Never move, edit, or delete files under the QQ data directory, and do not end the QQ process. Never install Python packages into the global/system interpreter; use a virtualenv, and the local web UI offers a one-click venv setup. On Linux the key is read from the qq main process memory: if the kernel's ptrace scope denies it, the tool prints the exact sysctl command to run; report that fix instead of retrying blindly.`
+The qqnt_* tools read the message database of the NTQQ client installed on this machine. Use them in order: qqnt_status, then qqnt_extract_key, then qqnt_list_groups, then qqnt_export_group. Finding the key is slow: before calling qqnt_extract_key, tell the user that searching for the key takes one to three minutes and to please wait patiently (查找密钥耗时较长，请耐心等待); the call returns only when the scan finishes, so do not retry or cancel it while it runs. Key extraction only works while QQ is logged in; when it finds no key, ask the user to confirm QQ is signed in rather than retrying. Confirm the exact group number with the user before exporting, because the common off-by-one-digit guess exports nothing. Never move, edit, or delete files under the QQ data directory, and do not end the QQ process. Never install Python packages into the global/system interpreter; use a virtualenv, and the local web UI offers a one-click venv setup. On Linux the key is read from the qq main process memory: if the kernel's ptrace scope denies it, the tool prints the exact sysctl command to run; report that fix instead of retrying blindly.`
 
 /** Appended only while the browsing UI is actually listening. */
 function webGuidance(url) {
@@ -823,8 +821,9 @@ export function apply(ctx, config) {
 
     ensureDir(settings.workDir)
     Object.assign(keyJob, {
-      state: 'running', step: '启动 QQ 进程扫描', log: [], error: '', force: !!force,
+      state: 'running', step: '启动 QQ 进程扫描', error: '', force: !!force,
       startedAt: Date.now(), finishedAt: 0, folded: 0, dropped: 0, key: false,
+      log: ['提示：查找密钥耗时较长（通常 1~3 分钟，内存较大时更久），请耐心等待；期间保持 QQ 登录，不要关闭 QQ。'],
     })
     keyJobAbort = new AbortController()
     const signal = keyJobAbort.signal
@@ -866,8 +865,8 @@ export function apply(ctx, config) {
         keyJob.log.shift()
         keyJob.dropped += 1
       }
-      if (text.includes('开始扫描进程内存')) keyJob.step = '扫描 QQ 进程内存'
-      else if (text.includes('候选密钥')) keyJob.step = '校验候选密钥'
+      if (text.includes('扫描 QQ 进程内存')) keyJob.step = '扫描 QQ 进程内存'
+      else if (text.includes('校验候选密钥')) keyJob.step = '校验候选密钥'
     }
     const consume = (chunk, source) => {
       let pending = source === 'out' ? outPending : errPending
@@ -923,7 +922,7 @@ export function apply(ctx, config) {
           `qqnt_export.py 退出码 ${code ?? '未知'}${keyJob.key ? '' : '，且没有生成 key.txt'}；请查看下方日志`
         )
       }
-      if (keyJob.folded > 0) addLine(`[已折叠 ${keyJob.folded} 行 SQLCipher 逐候选项日志]`)
+      if (keyJob.folded > 0) addLine(`[已折叠 ${keyJob.folded} 条 SQLCipher 逐候选项报错]`)
       if (keyJob.dropped > 0) addLine(`[较早的 ${keyJob.dropped} 行日志已省略]`)
       redact()
       keyJobAbort = null

@@ -91,6 +91,11 @@ def human(n):
         n /= 1024
 
 
+def fmt_count(n):
+    """数量加千分位（12,345），让候选数和进度一眼能读。"""
+    return '{:,}'.format(int(n))
+
+
 def ensure_workdir(path):
     """Create the work directory and keep its plaintext contents private.
 
@@ -636,8 +641,8 @@ def cmd_key(args):
     if os.path.exists(keyfile) and not args.force:
         key = open(keyfile, encoding='ascii', errors='replace').read().strip()
         if key and try_key(strip_db(src, args.work, quiet=True), key):
-            print('已有可用密钥（--force 可强制重新提取）: ' + key)
-            print('已保存到: ' + keyfile)
+            print('已有可用密钥，无需重新提取（--force 可强制重新扫描）。')
+            print('密钥文件: %s（内容不在输出中显示）' % keyfile)
             return
         warn('缓存的密钥无效，重新提取')
 
@@ -645,37 +650,53 @@ def cmd_key(args):
     if not pids:
         die('没有找到 %s 进程。请先启动 QQ 并完成登录，再运行本命令。'
             % qq_process_label())
-    print('%s 进程: %s' % (qq_process_label(), ', '.join(map(str, pids))))
-    print('注意：QQ 必须处于已登录状态，密钥才在内存里。')
+
+    print('=== 查找数据库密钥 ===')
+    print('密钥只存在于已登录 QQ 进程的内存里；本步骤要扫描进程内存，')
+    print('再逐个校验候选密钥，通常 1~3 分钟（内存较大时更久）。')
+    print('请保持 QQ 登录、不要关闭 QQ，并耐心等待下面的进度输出。')
+    print('')
 
     clear = strip_db(src, args.work)
     print('账号: %s' % uin)
+    print('QQ 进程: %d 个' % len(pids))
     print('数据库副本: %s (%s)' % (clear, human(os.path.getsize(clear))))
-    print('开始扫描进程内存（通常需要 1~3 分钟）...')
     if IS_LINUX:
         state = memory_access_state()
+        print('内存读取: %s' % state)
         if state.startswith('受限') or state.startswith('未知'):
             warn('内存读取权限：%s' % state)
 
+    print('')
+    print('扫描 QQ 进程内存…')
     t0 = time.time()
     cands = set()
     for pid in pids:
+        started = time.time()
         try:
             got = scan_process_memory(pid)
         except MemoryAccessDenied as exc:
             die(str(exc))
         cands |= got
-        print('  pid %-6d 累计候选 %d' % (pid, len(cands)), flush=True)
+        print('  pid %-6d 候选 %s 个（%.1f 秒）'
+              % (pid, fmt_count(len(got)), time.time() - started), flush=True)
+    print('  共 %s 个候选，扫描用时 %.0f 秒' % (fmt_count(len(cands)), time.time() - t0))
 
     ordered = sorted(c for c in cands if c.startswith(b'#'))
     ordered += [c for c in sorted(cands) if not c.startswith(b'#')]
-    print('候选密钥 %d 个，开始逐个校验（约 %.0f 秒）...'
-          % (len(ordered), len(ordered) * 3 / 1000))
+    print('')
+    print('校验候选密钥（每个候选都要解密一次，这一步最慢）…')
+    print('  候选总数: %s 个' % fmt_count(len(ordered)))
 
+    last_report = t0
     for i, raw in enumerate(ordered, 1):
         key = raw.decode('ascii')
         if try_key(clear, key):
-            print('\n*** 找到密钥: %s ***  (第 %d 个, 用时 %.0fs)' % (key, i, time.time() - t0))
+            elapsed = time.time() - t0
+            print('')
+            print('*** 找到密钥: %s ***' % key)
+            print('  第 %s 个候选命中（共 %s 个），总用时 %.0f 秒'
+                  % (fmt_count(i), fmt_count(len(ordered)), elapsed))
             with open(keyfile, 'w', encoding='ascii') as f:
                 f.write(key)
             if not IS_WINDOWS:
@@ -683,10 +704,15 @@ def cmd_key(args):
                     os.chmod(keyfile, 0o600)
                 except OSError:
                     pass
-            print('已保存到: ' + keyfile)
+            print('  已保存到: ' + keyfile)
             return
-        if i % 5000 == 0:
-            print('  已试 %d/%d' % (i, len(ordered)), flush=True)
+        now = time.time()
+        if now - last_report >= 10 and i < len(ordered):
+            last_report = now
+            rate = i / max(now - t0, 0.001)
+            print('  已校验 %s / %s（%d%%），已用 %.0f 秒，预计还需约 %.0f 秒'
+                  % (fmt_count(i), fmt_count(len(ordered)),
+                     100 * i // len(ordered), now - t0, (len(ordered) - i) / rate), flush=True)
 
     die('没有找到有效密钥。请确认: 1) QQ 已登录 2) 数据目录正确 3) QQ 版本为 NT 架构')
 
