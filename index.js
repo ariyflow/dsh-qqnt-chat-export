@@ -12,18 +12,20 @@
  * the same data through `scripts/qqnt_query.py`.
  */
 import { spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   clearOverrides,
+  defaultVenvDir,
   loadOverrides,
   publicSettings,
   resolveSettings,
   saveOverrides,
   settingsFile,
   validatePatch,
+  venvPython,
 } from './settings.js'
 import { cleanupStorage, storageSnapshot } from './storage.js'
 import { startWebServer } from './web.js'
@@ -84,6 +86,9 @@ const STDERR_LINE_LIMIT = 300
  * @returns {Promise<{code: number, output: string}>}
  */
 function run(command, argv, { signal, cwd }) {
+  if (signal?.aborted) {
+    return Promise.reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+  }
   return new Promise((resolve, reject) => {
     const child = spawn(command, argv, {
       cwd,
@@ -427,11 +432,11 @@ function groupsTool(settings) {
 /** Workflow and guardrails the tool definitions do not carry. */
 const GUIDANCE = `## QQ chat export
 
-The qqnt_* tools read the message database of the NTQQ client installed on this machine. Use them in order: qqnt_status, then qqnt_extract_key, then qqnt_list_groups, then qqnt_export_group. Key extraction only works while QQ is logged in; when it finds no key, ask the user to confirm QQ is signed in rather than retrying. Confirm the exact group number with the user before exporting, because the common off-by-one-digit guess exports nothing. Never move, edit, or delete files under the QQ data directory, and do not end the QQ process. On Linux the key is read from the qq main process memory: if the kernel's ptrace scope denies it, the tool prints the exact sysctl command to run; report that fix instead of retrying blindly.`
+The qqnt_* tools read the message database of the NTQQ client installed on this machine. Use them in order: qqnt_status, then qqnt_extract_key, then qqnt_list_groups, then qqnt_export_group. Key extraction only works while QQ is logged in; when it finds no key, ask the user to confirm QQ is signed in rather than retrying. Confirm the exact group number with the user before exporting, because the common off-by-one-digit guess exports nothing. Never move, edit, or delete files under the QQ data directory, and do not end the QQ process. Never install Python packages into the global/system interpreter; use a virtualenv, and the local web UI offers a one-click venv setup. On Linux the key is read from the qq main process memory: if the kernel's ptrace scope denies it, the tool prints the exact sysctl command to run; report that fix instead of retrying blindly.`
 
 /** Appended only while the browsing UI is actually listening. */
 function webGuidance(url) {
-  return ` The same data, including private chats and keyword search across every chat, is browsable at ${url} in a browser tab; that page also downloads the current query as txt, csv, json, markdown, html, or sqlite.`
+  return ` The same data, including private chats and keyword search across every chat, is browsable at ${url} in a browser tab; that page also downloads the current query as txt, csv, json, markdown, html, or sqlite. The page opens with a startup checklist that names this URL, checks Python/sqlcipher3 and the cached key, and offers a one-click setup that creates a private virtualenv and installs sqlcipher3-wheels into it. Never install Python packages into the global/system interpreter; use that one-click setup or another virtualenv and point the Python interpreter setting at it.`
 }
 
 /** One-shot Python/sqlcipher3 probe used by the settings page. */
@@ -467,6 +472,24 @@ async function probePython(current) {
   }
 }
 
+/** Linux ptrace status so the startup checklist can show the exact blocker. */
+function ptraceInfo() {
+  if (process.platform !== 'linux') return { platform: process.platform, ptraceScope: null, restricted: false }
+  let scope = null
+  try {
+    const parsed = Number.parseInt(readFileSync('/proc/sys/kernel/yama/ptrace_scope', 'utf8').trim(), 10)
+    if (Number.isFinite(parsed)) scope = parsed
+  } catch {
+    // No yama on this kernel.
+  }
+  const root = typeof process.geteuid === 'function' && process.geteuid() === 0
+  return {
+    platform: 'linux',
+    ptraceScope: scope,
+    restricted: !root && scope !== 0,
+  }
+}
+
 /**
  * Register the tools, their workflow guidance, and the local browsing UI.
  * Every registration is effect-scoped, so unloading the bundle removes the
@@ -488,6 +511,19 @@ export function apply(ctx, config) {
   let webUrl = ''
   let webServer = null
   let applying = false
+  let setupAbort = null
+  const setup = {
+    state: 'idle', step: '', log: [], error: '',
+    startedAt: 0, finishedAt: 0, venv: '', python: '',
+  }
+
+  const setupLog = (line) => {
+    const text = String(line).replace(/\r/g, '').trimEnd()
+    if (text === '') return
+    setup.log.push(text.length > 500 ? `${text.slice(0, 500)}…` : text)
+    if (setup.log.length > 200) setup.log.splice(0, setup.log.length - 200)
+  }
+  const setupSnapshot = () => ({ ...setup, log: setup.log.slice(-160) })
 
   const ensureDir = (dir) => {
     mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -512,7 +548,22 @@ export function apply(ctx, config) {
     getSettings: () => publicSettings(settings, defaults, { url: webUrl, file: settingsFile() }),
     getStorage: () => storageSnapshot(settings.workDir),
     cleanupStorage: (ids) => cleanupStorage(settings.workDir, ids),
-    getDiagnostics: () => probePython(settings),
+    getDiagnostics: async () => {
+      const storage = storageSnapshot(settings.workDir)
+      return {
+        ...(await probePython(settings)),
+        ...ptraceInfo(),
+        venv: { dir: defaultVenvDir(), python: venvPython() },
+        key: storage.key,
+        index: storage.index,
+      }
+    },
+    getSetup: () => setupSnapshot(),
+    startSetup: () => {
+      if (setup.state === 'running') return setupSnapshot()
+      void runSetup()
+      return setupSnapshot()
+    },
     updateSettings: (patch) => commitSettings({ ...overrides, ...validatePatch(patch) }),
     resetSettings: () => commitSettings({}),
   }
@@ -571,6 +622,138 @@ export function apply(ctx, config) {
     }
   }
 
+  async function hasSqlcipher(command, signal) {
+    const probe = await runSetupCommand(command, ['-c', 'import sqlcipher3'], {
+      signal, timeoutMs: 15_000,
+    })
+    return probe.code === 0
+  }
+
+  /** Setup commands get their own timeout so a broken interpreter cannot hang the job. */
+  async function runSetupCommand(command, argv, { signal, timeoutMs = 120_000 } = {}) {
+    const controller = new AbortController()
+    if (signal?.aborted) controller.abort()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    const forwardAbort = () => controller.abort()
+    signal?.addEventListener('abort', forwardAbort, { once: true })
+    try {
+      return await run(command, argv, { signal: controller.signal })
+    } finally {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', forwardAbort)
+    }
+  }
+
+  /**
+   * The interpreter used only to create the private virtualenv. A virtualenv
+   * that we are about to replace is never used as its own base interpreter.
+   */
+  async function findBasePython(venvDir, signal) {
+    const candidates = []
+    const seen = new Set()
+    const root = path.resolve(venvDir)
+    const rootLower = root.toLowerCase()
+    const add = (command, args = []) => {
+      if (!command) return
+      const key = `${command} ${args.join(' ')}`
+      if (seen.has(key)) return
+      seen.add(key)
+      if (/[\\/]/.test(command)) {
+        const resolved = path.resolve(command).toLowerCase()
+        if (resolved.startsWith(`${rootLower}${path.sep}`) || resolved === rootLower) return
+      }
+      candidates.push({ command, args })
+    }
+    add(settings.python)
+    if (process.platform === 'win32') {
+      add('python')
+      add('py', ['-3'])
+    } else {
+      add('python3')
+      add('python')
+    }
+    for (const candidate of candidates) {
+      const probe = await runSetupCommand(candidate.command, [
+        ...candidate.args, '-c', 'import sys; print(sys.version.split()[0])',
+      ], { signal, timeoutMs: 15_000 })
+      if (probe.code !== 0) continue
+      const version = probe.output.trim().split('\n').pop()
+      if (version) return { ...candidate, version }
+    }
+    throw new Error('找不到可用的 Python 3。请先安装 Python 3（Debian/Ubuntu 还需要 python3-venv）后重试。')
+  }
+
+  const appendSetupOutput = (output) => {
+    for (const line of String(output).split('\n')) setupLog(line)
+  }
+
+  /**
+   * One-click setup: create a private virtualenv and install sqlcipher3-wheels
+   * into it. System Python is never modified, and the page shows the full log.
+   */
+  async function runSetup() {
+    setupAbort = new AbortController()
+    const signal = setupAbort.signal
+    const venvDir = defaultVenvDir()
+    const target = venvPython(venvDir)
+    Object.assign(setup, {
+      state: 'running', step: '准备', log: [], error: '',
+      startedAt: Date.now(), finishedAt: 0, venv: venvDir, python: target,
+    })
+    try {
+      setupLog(`虚拟环境目录：${venvDir}`)
+      ensureDir(path.dirname(venvDir))
+      if (existsSync(target) && await hasSqlcipher(target, signal)) {
+        setupLog('虚拟环境里已经有 sqlcipher3，直接切换')
+      } else {
+        const base = await findBasePython(venvDir, signal)
+        setup.step = '创建虚拟环境'
+        setupLog(`使用 Python ${base.version}：${[base.command, ...base.args].join(' ').trim()}`)
+        if (existsSync(venvDir)) {
+          setupLog('删除不完整的旧虚拟环境')
+          rmSync(venvDir, { recursive: true, force: true })
+        }
+        const create = await runSetupCommand(base.command, [
+          ...base.args, '-m', 'venv', venvDir,
+        ], { signal, timeoutMs: 120_000 })
+        appendSetupOutput(create.output)
+        if (create.code !== 0) {
+          if (signal.aborted) throw new Error('配置已取消')
+          throw new Error('创建虚拟环境失败。Debian/Ubuntu 可能需要先安装 python3-venv：sudo apt install python3-venv')
+        }
+        setup.step = '安装 sqlcipher3'
+        setupLog('只安装到上面的虚拟环境，不修改系统 Python')
+        setupLog('正在下载并安装 sqlcipher3-wheels（取决于网络，可能需要几分钟）…')
+        const install = await runSetupCommand(target, [
+          '-m', 'pip', 'install', '--disable-pip-version-check', '--no-input', 'sqlcipher3-wheels',
+        ], { signal, timeoutMs: 15 * 60_000 })
+        appendSetupOutput(install.output)
+        if (install.code !== 0) {
+          if (signal.aborted) throw new Error('配置已取消')
+          throw new Error('在虚拟环境里安装 sqlcipher3-wheels 失败；请检查网络或代理后重试')
+        }
+      }
+      setup.step = '验证'
+      if (!(await hasSqlcipher(target, signal))) {
+        throw new Error('虚拟环境创建成功，但 sqlcipher3 无法导入')
+      }
+      setupLog('sqlcipher3 验证通过，切换插件使用的 Python')
+      await commitSettings({ ...overrides, pythonPath: target })
+      setup.state = 'done'
+      setup.step = '完成'
+      setup.finishedAt = Date.now()
+      setupLog(`已切换到 ${target}`)
+    } catch (error) {
+      setup.state = 'error'
+      setup.step = '失败'
+      setup.finishedAt = Date.now()
+      setup.error = error instanceof Error ? error.message : String(error)
+      setupLog(`失败：${setup.error}`)
+    } finally {
+      setupAbort = null
+    }
+  }
+
   const startWeb = () => {
     if (!settings.webPort) {
       webUrl = ''
@@ -585,7 +768,10 @@ export function apply(ctx, config) {
     })
     webServer = server
     server.ready.then(() => {
-      if (webServer === server) webUrl = server.url
+      if (webServer === server) {
+        webUrl = server.url
+        console.log(`[qqnt-chat-export] open ${webUrl} for the startup checklist and one-click environment setup`)
+      }
     }, () => {
       if (webServer === server) webUrl = ''
     })
@@ -595,6 +781,7 @@ export function apply(ctx, config) {
     ctx.effect(() => {
       startWeb()
       return () => {
+        setupAbort?.abort()
         const server = webServer
         webServer = null
         webUrl = ''

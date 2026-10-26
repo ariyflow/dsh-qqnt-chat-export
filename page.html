@@ -61,6 +61,29 @@
   .bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 6px; }
   .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
 
+  .startup {
+    margin: 10px 18px 0; padding: 10px 14px; border: 1px solid var(--accent);
+    background: var(--accent-soft); border-radius: 8px;
+    display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap;
+  }
+  .startup .startup-main { flex: 1; min-width: 260px; display: grid; gap: 3px; }
+  .startup .startup-line { font-size: 13px; }
+  .startup .startup-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .startup code { background: var(--bg); border-color: var(--line); }
+  .startup .mini { padding: 1px 8px; font-size: 12px; }
+  .startup .ok { color: var(--out); }
+  .startup .bad { color: var(--danger); }
+
+  .setup-box {
+    margin: 10px 0 0; border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px; background: var(--panel);
+  }
+  .setup-status { font-size: 13px; margin-bottom: 6px; }
+  .setup-log {
+    max-height: 180px; overflow: auto; margin: 0; font-size: 12px;
+    white-space: pre-wrap; color: var(--muted); font-family: ui-monospace, monospace;
+  }
+
   main { flex: 1; display: flex; min-height: 0; }
   aside {
     width: 300px; border-right: 1px solid var(--line); display: flex;
@@ -184,6 +207,22 @@
   </div>
 </header>
 
+<div class="startup hidden" id="startup">
+  <div class="startup-main">
+    <strong>QQ 聊天记录导出已启动</strong>
+    <div class="startup-line">默认访问地址：<code id="startupUrl"></code>
+      <button class="ghost mini" type="button" id="copyStartupUrl">复制</button>
+    </div>
+    <div class="startup-line" id="startupEnv">正在检查 Python / sqlcipher3…</div>
+    <div class="startup-line" id="startupKey"></div>
+  </div>
+  <div class="startup-actions">
+    <button class="primary hidden" type="button" id="startupSetup">一键配置环境</button>
+    <button class="ghost" type="button" id="startupSettings">设置</button>
+    <button class="ghost" type="button" id="startupDismiss">关闭提示</button>
+  </div>
+</div>
+
 <div class="banner hidden" id="banner">
   <div class="grow"><div id="bannerText"></div><div class="bar"><i id="bannerBar"></i></div></div>
   <button class="primary hidden" id="bannerAction">建立索引</button>
@@ -240,6 +279,10 @@
     <form class="card" id="settingsForm">
       <h3>运行参数</h3>
       <div class="runtime-line" id="runtimeLine">正在检测 Python 与 sqlcipher3…</div>
+      <div class="setup-box hidden" id="setupBox">
+        <div class="setup-status" id="setupStatus"></div>
+        <pre class="setup-log" id="setupLog"></pre>
+      </div>
       <p class="hint">保存后立即生效。修改端口会重启网页服务，需要用新地址重新打开；其他参数会影响后续的查询与导出。</p>
 
       <label class="field">
@@ -333,7 +376,12 @@
     poll: 0,
     settings: null,
     storage: null,
-    pendingCleanup: null
+    pendingCleanup: null,
+    startupChecked: false,
+    startupStartedAt: 0,
+    startupKey: true,
+    diagnostics: null,
+    setupPoll: 0
   }
 
   var $ = function (id) { return document.getElementById(id) }
@@ -471,6 +519,7 @@
   function refreshStatus(quiet) {
     return api('/api/status').then(function (status) {
       paintStatus(status)
+      maybeShowStartup(status)
       if (state.building) return
       if (state.indexReady && state.sessions.length === 0) loadSessions()
       if (state.indexReady && !state.autoLoaded) {
@@ -486,6 +535,7 @@
     }).catch(function (error) {
       if (!quiet) toast(error.message)
       $('meta').textContent = '无法读取状态：' + error.message
+      showStartupFallback()
     })
   }
 
@@ -678,15 +728,211 @@
     window.location.href = '/api/export?' + query
   }
 
+  // ---------------------------------------------------------------- 启动提示与一键配置
+  function copyText(text, okMessage) {
+    if (!navigator.clipboard) { toast('浏览器不允许写剪贴板，请手动复制'); return }
+    navigator.clipboard.writeText(text).then(
+      function () { toast(okMessage || '已复制') },
+      function () { toast('复制失败，请手动复制') }
+    )
+  }
+
+  function updateStartupStatus(status) {
+    state.startupKey = status.key !== false
+    if (!$('startup').classList.contains('hidden')) renderStartupKey()
+  }
+
+  function maybeShowStartup(status) {
+    if (state.startupChecked) {
+      if (status.startedAt && !state.startupStartedAt) state.startupStartedAt = status.startedAt
+      updateStartupStatus(status)
+      return
+    }
+    state.startupChecked = true
+    state.startupStartedAt = status.startedAt || 0
+    var marker = ''
+    try { marker = sessionStorage.getItem('qqnt-startup-seen') || '' } catch (e) {}
+    updateStartupStatus(status)
+    if (state.startupStartedAt && marker === String(state.startupStartedAt)) return
+    $('startup').classList.remove('hidden')
+    $('startupUrl').textContent = location.origin + '/'
+    $('startupEnv').textContent = '正在检查 Python / sqlcipher3…'
+    $('startupEnv').className = 'startup-line'
+    $('startupSetup').classList.add('hidden')
+    api('/api/diagnostics').then(function (info) {
+      state.diagnostics = info
+      if (typeof info.key === 'boolean') state.startupKey = info.key
+      renderStartupEnv(info)
+      renderStartupKey()
+      syncSetup()
+    }).catch(function (error) {
+      $('startupEnv').className = 'startup-line bad'
+      $('startupEnv').textContent = '环境检查失败：' + error.message
+      $('startupSetup').classList.remove('hidden')
+    })
+  }
+
+  /**
+   * `/api/status` needs the Python helper. If that helper is missing or slow,
+   * the startup prompt must still tell the user the URL and offer setup.
+   */
+  function showStartupFallback() {
+    if (state.startupChecked) return
+    state.startupChecked = true
+    state.startupStartedAt = 0
+    state.startupKey = false
+    $('startup').classList.remove('hidden')
+    $('startupUrl').textContent = location.origin + '/'
+    $('startupEnv').className = 'startup-line'
+    $('startupEnv').textContent = '正在检查 Python / sqlcipher3…'
+    $('startupSetup').classList.remove('hidden')
+    $('startupKey').className = 'startup-line bad'
+    $('startupKey').textContent = '数据库密钥：状态读取失败（可能是 Python 解释器不可用）；请先完成环境配置。'
+    api('/api/diagnostics').then(function (info) {
+      state.diagnostics = info
+      if (typeof info.key === 'boolean') state.startupKey = info.key
+      renderStartupEnv(info)
+      renderStartupKey()
+      syncSetup()
+    }).catch(function (error) {
+      $('startupEnv').className = 'startup-line bad'
+      $('startupEnv').textContent = '环境检查失败：' + error.message
+    })
+  }
+
+  function renderStartupEnv(info) {
+    var line = $('startupEnv')
+    var button = $('startupSetup')
+    line.className = 'startup-line'
+    if (!info.ok || info.error) {
+      line.classList.add('bad')
+      line.textContent = '环境：Python 检测失败' + (info.error ? '（' + info.error + '）' : '')
+      button.classList.remove('hidden')
+      return
+    }
+    if (info.sqlcipher3) {
+      line.classList.add('ok')
+      line.textContent = '环境：Python ' + info.version + ' (' + info.bits + '-bit) · sqlcipher3 已安装'
+      button.classList.add('hidden')
+      return
+    }
+    line.classList.add('bad')
+    line.textContent = '环境：Python ' + info.version + ' (' + info.bits + '-bit) · sqlcipher3 未安装，可一键安装到独立虚拟环境'
+    button.classList.remove('hidden')
+  }
+
+  function renderStartupKey() {
+    var line = $('startupKey')
+    line.className = 'startup-line'
+    if (state.startupKey) {
+      line.classList.add('ok')
+      line.textContent = '数据库密钥：已配置'
+      return
+    }
+    var text = '数据库密钥：未配置。保持 QQ 登录，在对话里运行 qqnt_extract_key。'
+    if (state.diagnostics && state.diagnostics.restricted) {
+      text += ' Linux 还需要先执行：sudo sysctl -w kernel.yama.ptrace_scope=0'
+    }
+    line.classList.add('bad')
+    line.textContent = text
+  }
+
+  function dismissStartup() {
+    $('startup').classList.add('hidden')
+    try {
+      if (state.startupStartedAt) sessionStorage.setItem('qqnt-startup-seen', String(state.startupStartedAt))
+    } catch (e) {
+      // Private mode without storage; the banner simply appears next reload.
+    }
+  }
+
+  function renderSetup(status) {
+    var box = $('setupBox')
+    if (!status || status.state === 'idle') {
+      box.classList.add('hidden')
+      return
+    }
+    box.classList.remove('hidden')
+    var text = status.state === 'running'
+      ? '正在配置环境：' + (status.step || '…')
+      : status.state === 'done'
+        ? '环境已配置到虚拟环境：' + (status.python || '')
+        : '配置失败：' + (status.error || '未知错误')
+    if (status.state === 'running' && status.startedAt) {
+      text += '（已用 ' + Math.max(0, Math.round((Date.now() - status.startedAt) / 1000)) + ' 秒）'
+    }
+    $('setupStatus').textContent = text
+    $('setupLog').textContent = (status.log || []).join('\n')
+    $('setupLog').scrollTop = $('setupLog').scrollHeight
+  }
+
+  function pollSetup() {
+    if (state.setupPoll) return
+    var attempt = 0
+    var tick = function () {
+      state.setupPoll = 0
+      api('/api/setup').then(function (status) {
+        renderSetup(status)
+        if (status.state === 'running' && attempt < 900) {
+          attempt += 1
+          state.setupPoll = setTimeout(tick, 1000)
+        } else if (status.state === 'done') {
+          toast('环境已配置到独立虚拟环境')
+          loadSettings()
+          refreshStatus(false)
+        }
+      }).catch(function (error) {
+        toast('读取配置进度失败：' + error.message)
+      })
+    }
+    tick()
+  }
+
+  function syncSetup() {
+    api('/api/setup').then(function (status) {
+      renderSetup(status)
+      if (status.state === 'running') pollSetup()
+    }).catch(function () {})
+  }
+
+  function startSetup() {
+    var venv = state.diagnostics && state.diagnostics.venv
+      ? state.diagnostics.venv.dir
+      : '独立虚拟环境'
+    if (!confirm('将在下面的目录创建独立虚拟环境并安装 sqlcipher3-wheels：\n' + venv +
+      '\n\n不会修改系统 Python。继续？')) return
+    api('/api/setup/venv', { method: 'POST', body: { confirm: true } }).then(function (status) {
+      if ($('settings').classList.contains('hidden')) openSettings()
+      renderSetup(status)
+      pollSetup()
+    }).catch(function (error) { toast('启动配置失败：' + error.message) })
+  }
+
   // ---------------------------------------------------------------- 设置与清理
+  function appendSetupButton(container) {
+    var button = document.createElement('button')
+    button.className = 'primary copy'
+    button.type = 'button'
+    button.textContent = '一键配置环境'
+    button.onclick = startSetup
+    container.appendChild(document.createTextNode(' '))
+    container.appendChild(button)
+  }
+
   function loadDiagnostics() {
     var line = $('runtimeLine')
     line.className = 'runtime-line'
     line.textContent = '正在检测 Python 与 sqlcipher3…'
     api('/api/diagnostics').then(function (info) {
+      state.diagnostics = info
+      if (!$('startup').classList.contains('hidden')) {
+        renderStartupEnv(info)
+        renderStartupKey()
+      }
       if (!info.ok || info.error) {
         line.classList.add('bad')
         line.textContent = 'Python 检测失败：' + (info.error || ('退出码异常，解释器 ' + info.python))
+        appendSetupButton(line)
         return
       }
       if (!info.sqlcipher3) {
@@ -695,15 +941,8 @@
           '<strong>sqlcipher3 未安装</strong>：运行 <code>' + esc(info.install) + '</code> 后重试。' +
           ' <button class="ghost copy" type="button" id="copyInstall">复制命令</button>'
         var copy = $('copyInstall')
-        if (copy) {
-          copy.onclick = function () {
-            if (!navigator.clipboard) { toast('浏览器不允许写剪贴板，请手动复制'); return }
-            navigator.clipboard.writeText(info.install).then(
-              function () { toast('命令已复制') },
-              function () { toast('复制失败，请手动复制') }
-            )
-          }
-        }
+        if (copy) copy.onclick = function () { copyText(info.install, '命令已复制') }
+        appendSetupButton(line)
       } else {
         line.textContent = 'Python ' + info.version + ' (' + info.bits + '-bit) · sqlcipher3 已安装'
       }
@@ -737,6 +976,7 @@
       updateIndexPath()
       loadDiagnostics()
       loadStorage()
+      syncSetup()
     }).catch(function (error) { toast('读取设置失败：' + error.message) })
   }
 
@@ -896,6 +1136,15 @@
   })
 
   $('settingsBtn').addEventListener('click', openSettings)
+  $('startupSettings').addEventListener('click', openSettings)
+  $('startupSetup').addEventListener('click', function () {
+    openSettings()
+    startSetup()
+  })
+  $('startupDismiss').addEventListener('click', dismissStartup)
+  $('copyStartupUrl').addEventListener('click', function () {
+    copyText(location.origin + '/', '访问地址已复制')
+  })
   $('closeSettings').addEventListener('click', closeSettings)
   $('settingsForm').addEventListener('submit', saveSettings)
   $('resetSettings').addEventListener('click', resetSettings)
@@ -914,6 +1163,9 @@
   })
 
   refreshStatus(false)
+  // `/api/status` spawns the Python helper; show the address/setup prompt even
+  // if that helper is missing or slow.
+  setTimeout(showStartupFallback, 1500)
 })()
 </script>
 </body>

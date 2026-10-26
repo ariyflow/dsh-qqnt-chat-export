@@ -25,6 +25,7 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
 - 关键词、发送者、起止日期组合查询，跨会话搜索，命中处高亮；
 - 把**当前查询结果**导出为 `.txt` / `.csv` / `.json` / `.md` / `.html` / `.sqlite`；
 - 「从 QQ 同步」重新复制数据库并重建索引；
+- **启动提示**：网页打开后显示一次启动横幅，告知默认访问地址，并检查 Python / sqlcipher3 / 密钥；缺依赖时可一键创建独立虚拟环境并安装；
 - **设置**：端口、工作目录 / 索引位置、Python 解释器、QQ 数据根目录、QQ 号，以及 Python/sqlcipher3 体检；
 - **存储与清理**：分类列出插件生成的明文文件及大小，二次确认后删除，不碰 QQ 原始数据。
 
@@ -35,28 +36,34 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
   - Windows 数据目录：`%USERPROFILE%\Documents\Tencent Files\<QQ号>\nt_qq\`
   - Linux 数据目录：`~/.config/QQ/nt_qq_<hash>\`
     （Flatpak 为 `~/.var/app/com.qq.QQ/config/QQ/`，Snap 为 `~/snap/qq/current/.config/QQ/`）
-- 64 位 Python 3，且装有 `sqlcipher3`（必须是插件实际使用的那个解释器；网页设置里可直接看到检测结果）
+- 64 位 Python 3；`sqlcipher3` **装在这个插件自己的虚拟环境里** 即可。网页启动横幅提供一键配置，不需要也不建议装进系统 Python。
 
 > Windows 与 Linux 共用同一套导出/查询脚本：Windows 走 `ctypes` + `ReadProcessMemory`，
 > Linux 走 `/proc/<pid>/mem`；两边的默认数据目录、默认 Python 解释器和进程名分别适配，
 > Windows 原有的行为和配置默认值保持不变。
 
+**推荐**：打开网页，用启动横幅或「设置」里的「一键配置环境」。它会在
+`~/.local/share/dsh-qqnt-chat-export/venv`（Windows 为 `%LOCALAPPDATA%\dsh-qqnt-chat-export\venv`）
+创建独立虚拟环境并安装 `sqlcipher3-wheels`，然后自动切换插件使用的解释器。
+
+手动创建时也只装进虚拟环境：
+
 ```powershell
 # Windows
-python -m pip install sqlcipher3-wheels
-# 国内网络慢时：
-python -m pip install --index-url https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com sqlcipher3-wheels
+python -m venv "$env:LOCALAPPDATA\dsh-qqnt-chat-export\venv"
+& "$env:LOCALAPPDATA\dsh-qqnt-chat-export\venv\Scripts\python.exe" -m pip install sqlcipher3-wheels
+# 然后把网页「设置」里的 Python 解释器填成上面的 Scripts\python.exe
 ```
 
 ```bash
-# Linux（系统 pip 可用时）
-python3 -m pip install sqlcipher3-wheels
-
-# Debian/Ubuntu 等启用了 PEP 668（externally-managed-environment）时，建议用虚拟环境：
+# Linux
 python3 -m venv ~/.venvs/qqnt
 ~/.venvs/qqnt/bin/pip install sqlcipher3-wheels
 # 然后把网页「设置」里的 Python 解释器填成 ~/.venvs/qqnt/bin/python
 ```
+
+不要用 `sudo pip` 或 `--break-system-packages` 把它装进系统 Python；Debian/Ubuntu 如果连
+`python3 -m venv` 都失败，先 `sudo apt install python3-venv`。
 
 ### Linux 取密钥的权限（重要）
 
@@ -103,13 +110,27 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 
 **第一次**（QQ 保持登录，别关）：
 
-1. `qqnt_status` 确认环境（Linux 上还会显示 `内存读取` 是否受限）；
-2. 打开网页的「设置」，确认 Python/sqlcipher3 检测为通过；缺依赖时按提示安装，或把 Python 解释器指向已经装好的虚拟环境；
+1. 打开网页（默认 `http://127.0.0.1:46728/`，改过端口则以实际为准）。启动横幅会显示默认访问地址，并检查 Python / sqlcipher3 / 密钥；
+2. 环境缺失时点「一键配置环境」，等待虚拟环境创建和依赖安装完成；也可以先 `qqnt_status` 看命令行体检结果；
 3. `qqnt_extract_key` 提取密钥 —— **首次约 3~7 分钟**，扫描进程内存后逐个用真库校验，成功后密钥缓存在工作目录；
 4. 回到网页，点「建立索引」，约 1 分钟；
 5. 之后随便查、随便导。
 
 **以后**：QQ 有新消息时点「从 QQ 同步」即可（重新复制数据库 + 重建索引，约 1~2 分钟）。
+
+## 启动提示与一键配置
+
+插件启动网页服务后，页面打开时会显示一次启动横幅（按网页服务启动时间区分，关闭提示后同一次启动不再打扰）。同一个地址也会写进 DSH 的系统提示和启动日志，Agent 可以直接告诉你；
+
+- **默认访问地址**：显示当前实际访问 URL，并提供复制按钮；模型侧也会拿到同一个 URL，可直接问 agent。
+- **环境检查**：显示 Python 版本、`sqlcipher3` 是否可用。缺失时提供「一键配置环境」：
+  - 在 `~/.local/share/dsh-qqnt-chat-export/venv`（Windows `%LOCALAPPDATA%\dsh-qqnt-chat-export\venv`）创建**独立虚拟环境**；
+  - 只在这个虚拟环境里执行 `pip install sqlcipher3-wheels`，**不修改系统 Python**；
+  - 完成后自动把设置里的 Python 解释器切过去并持久化；
+  - 页面实时显示步骤、耗时和日志；已有可用虚拟环境时直接复用。
+- **密钥检查**：未配置时提示保持 QQ 登录并运行 `qqnt_extract_key`；Linux 上如果 `kernel.yama.ptrace_scope` 受限，会直接显示需要执行的 `sudo sysctl -w kernel.yama.ptrace_scope=0`。
+
+一键配置只负责 Python 依赖，不会自动提取密钥（密钥依赖已登录的 QQ 进程和 ptrace 权限）。网络不可用或系统缺少 `venv` 时，设置页会显示完整失败日志；Debian/Ubuntu 可先 `sudo apt install python3-venv`。
 
 ## 设置与清理
 
@@ -122,7 +143,7 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 |---|---|
 | 网页端口 | 修改端口会重启网页服务，成功后需要打开新地址；新端口被占用会保留原端口和原设置。`0` 表示关闭网页，关闭后需要编辑上面的 `settings.json`（或删除它恢复默认）才能重新打开 |
 | 工作目录 / 索引位置 | `key.txt`、解密副本和 `index.sqlite` 都放在这里；换目录后需要重新建立索引 |
-| Python 解释器 | 留空使用平台默认值；可填装有 `sqlcipher3` 的虚拟环境绝对路径；设置页会实时显示检测结果 |
+| Python 解释器 | 留空使用平台默认值；可填装有 `sqlcipher3` 的虚拟环境绝对路径；设置页会实时显示检测结果，「一键配置环境」会自动创建独立虚拟环境并切换 |
 | QQ 数据根目录 | 留空自动识别；非标准安装或迁移数据时手动指定 |
 | QQ 号 | 多账号时指定；留空选择 `nt_msg.db` 最大的账号 |
 
@@ -154,6 +175,7 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 
 - `workDir` 里会出现 `key.txt`（**明文密钥**）、`nt_msg.db`（约 1 GB 的解密副本）、`index.sqlite`（**全部消息的明文副本**）。用完建议整个删掉，把 `key.txt` 给别人等于把整个 QQ 数据库给别人。Linux 上 `workDir` 会自动设为 `0700`、`key.txt` 为 `0600`，但这不能替代用完即删；网页「设置 → 存储与清理」可以按类别删除这些文件。
 - 设置文件只保存路径和端口，不含聊天内容或密钥；POSIX 上权限为 `0600`。设置页的写操作要求同源请求和自定义请求头，避免其他网页触发端口/目录修改或清理。
+- 「一键配置环境」会从 PyPI 下载 `sqlcipher3-wheels` 并安装到插件私有虚拟环境，需要网络；它不会修改系统 Python。安装来源与 pip 配置一致，可自行设置代理/镜像。
 - 网页服务**只绑 `127.0.0.1`**，并拒绝非本机的 `Host` 和跨站 `POST`，但仍然建议只在本机使用。
 - 对所有 QQ 数据**只读**：不修改 Windows 的 `Documents\Tencent Files` 或 Linux 的 `~/.config/QQ` 下任何文件，不结束 QQ 进程。
 - 媒体文件**不复制**：`[图片]` `[视频]` `[语音]` `[文件]` 只是占位符，原文件仍在 `nt_qq\nt_data\`（Windows）或 `nt_qq_<hash>/nt_data/`（Linux）。
@@ -169,6 +191,9 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 - 设置里把端口改成 `0` 会关闭网页；在浏览器里无法再打开设置页，需要编辑 `~/.config/dsh-qqnt-chat-export/settings.json`（把 `webPort` 改成有效端口或删除该文件）并重启插件/DSH。
 - 清理正在下载的临时导出文件可能让该次下载提前结束；需要完整文件时等下载完成再清理。
 - 索引构建进行中不能清理；等状态变为完成或失败后再操作。
+- 一键配置需要网络；系统缺少 `venv` 时请先安装 `python3-venv`（Debian/Ubuntu），或手动创建虚拟环境后在设置里指定解释器。
+- 启动横幅只在打开网页时显示；关闭后同一次网页服务启动不再出现，重启插件或换端口后会再次显示。
+- 密钥提取仍需要在对话里运行 `qqnt_extract_key`，网页不会自动读取 QQ 进程内存。
 - Linux 的账号目录名是 `nt_qq_<hash>`；工具会从明文 MMKV / 登录标记还原 QQ 号，极少数情况下还原失败，会把哈希显示为账号名（不影响导出，也可以把哈希传给 `account`）。
 - Linux 若把 QQ 装在非标准位置或使用非官方打包，请用 `tencentRoot` 显式指定数据根目录。
 - 不支持 macOS。

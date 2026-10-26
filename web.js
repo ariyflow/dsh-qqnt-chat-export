@@ -209,6 +209,7 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
     url: `http://${urlHost}:${port || DEFAULT_PORT}/`,
     error: undefined,
     server: undefined,
+    startedAt: Date.now(),
   }
   let resolveReady
   let rejectReady
@@ -339,6 +340,38 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
         .catch((error) => sendJson(res, 500, { error: error.message }))
       return
     }
+    if (req.method === 'GET' && pathname === '/api/setup') {
+      if (typeof handlers.getSetup !== 'function') {
+        sendJson(res, 501, { error: 'this build has no setup API' })
+        return
+      }
+      try {
+        sendJson(res, 200, handlers.getSetup())
+      } catch (error) {
+        sendJson(res, 500, { error: error.message })
+      }
+      return
+    }
+    if (req.method === 'POST' && pathname === '/api/setup/venv') {
+      if (!isTrustedMutation(req)) {
+        sendJson(res, 403, { error: 'cross-origin requests are refused' })
+        return
+      }
+      if (typeof handlers.startSetup !== 'function') {
+        sendJson(res, 501, { error: 'this build has no setup API' })
+        return
+      }
+      readJsonBody(req)
+        .then((body) => {
+          if (body.confirm !== true) {
+            throw Object.assign(new Error('一键配置需要确认'), { status: 400 })
+          }
+          return handlers.startSetup()
+        })
+        .then((result) => sendJson(res, 202, result))
+        .catch((error) => sendJson(res, error.status ?? 400, { error: error.message }))
+      return
+    }
     if (req.method === 'GET' && pathname === '/api/status') {
       const exports = path.join(settings.workDir, 'exports')
       runJson(settings, 'status')
@@ -347,6 +380,7 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
           port,
           host,
           exportDir: exports,
+          startedAt: state.startedAt,
           version: 1,
         }))
         .catch((error) => sendJson(res, 500, { error: error.message }))

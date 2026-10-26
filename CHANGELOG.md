@@ -1,5 +1,19 @@
 # 更新记录
 
+## 0.5.0
+
+- 网页启动提示：页面打开后显示一次启动横幅（按网页服务启动时间区分），包含
+  - 默认访问地址和复制按钮；
+  - Python / sqlcipher3 检测状态；
+  - 数据库密钥是否已配置，以及 Linux 上 `ptrace` 受限时的 `sysctl` 提示；
+  - 「一键配置环境」和「设置」入口。
+- 一键环境配置：
+  - 自动创建独立虚拟环境（Linux `~/.local/share/dsh-qqnt-chat-export/venv`，Windows `%LOCALAPPDATA%\dsh-qqnt-chat-export\venv`）；
+  - 只在虚拟环境里执行 `pip install sqlcipher3-wheels`，**不安装到全局 Python**；
+  - 安装完成后自动把设置里的 Python 解释器切换过去并持久化；
+  - 页面轮询显示步骤、耗时和完整日志；已有可用虚拟环境时直接复用。
+- `settings.js` / `storage.js` 保持打包；版本升到 0.5.0。
+
 ## 0.4.0
 
 - 新增网页「设置」页面：

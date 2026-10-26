@@ -31,6 +31,26 @@ export function defaultPython() {
   return process.platform === 'win32' ? 'python' : 'python3'
 }
 
+/** Where the one-click environment setup creates its private virtualenv. */
+export function defaultVenvDir() {
+  if (process.env.DSH_QQNT_VENV_DIR) return path.resolve(process.env.DSH_QQNT_VENV_DIR)
+  if (process.platform === 'win32') {
+    const base = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local')
+    return path.join(base, APP_DIR, 'venv')
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', APP_DIR, 'venv')
+  }
+  const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share')
+  return path.join(base, APP_DIR, 'venv')
+}
+
+export function venvPython(dir = defaultVenvDir()) {
+  return process.platform === 'win32'
+    ? path.join(dir, 'Scripts', 'python.exe')
+    : path.join(dir, 'bin', 'python')
+}
+
 /** Where the settings-page overrides live. */
 export function settingsFile() {
   if (process.env.DSH_QQNT_SETTINGS_FILE) return path.resolve(process.env.DSH_QQNT_SETTINGS_FILE)
@@ -187,5 +207,6 @@ export function publicSettings(settings, defaults, { url = '', file = settingsFi
     file,
     url,
     platform: process.platform,
+    venv: { dir: defaultVenvDir(), python: venvPython() },
   }
 }
