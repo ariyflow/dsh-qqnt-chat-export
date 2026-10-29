@@ -1434,6 +1434,8 @@
       } else if (task.state === 'done') {
         stateText.textContent = num(task.rows) + ' 条 · ' + bytes(task.bytes) +
           (task.media && task.media.files ? ' · 媒体 ' + task.media.files + ' 个' : '')
+      } else if (task.state === 'cancelled') {
+        stateText.textContent = '已取消'
       } else {
         stateText.textContent = '失败'
       }
@@ -1447,6 +1449,19 @@
         link.className = 'ghost'
         link.textContent = '下载'
         row.appendChild(link)
+      }
+      if (task.state === 'running') {
+        var stop = document.createElement('button')
+        stop.className = 'ghost'
+        stop.textContent = '取消'
+        stop.onclick = function () {
+          api('/api/export/queue/' + encodeURIComponent(task.id) + '/cancel',
+            { method: 'POST' }).then(function () {
+            toast('已取消导出')
+            pollTasks()
+          }).catch(function (error) { toast(error.message) })
+        }
+        row.appendChild(stop)
       }
       if (task.state === 'error' && task.error) {
         var err = document.createElement('div')

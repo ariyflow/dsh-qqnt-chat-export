@@ -161,6 +161,33 @@ test('only three exports run at once', { skip: POSIX_ONLY }, async () => {
   }
 })
 
+test('a running export can be cancelled and frees its slot', {
+  skip: POSIX_ONLY,
+}, async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  const python = await fakePython(dir, 'hang')
+  const queue = createExportQueue({ settings: { python, workDir: work }, queryCli: 'x.py' })
+  try {
+    const task = queue.enqueue({}, { label: '慢任务', format: 'txt' })
+    assert.ok(task)
+    const cancelled = queue.cancel(task.id)
+    assert.ok(cancelled)
+    assert.equal(cancelled.state, 'cancelled')
+    assert.equal(queue.list().running, 0)
+    assert.equal(queue.file(task.id), null, 'a cancelled task has no download')
+    assert.equal(queue.cancel(task.id), null, 'cancelling twice is a no-op')
+    // The slot must be reusable right away.
+    for (let index = 0; index < MAX_CONCURRENT; index += 1) {
+      assert.ok(queue.enqueue({}, { label: `again ${index}`, format: 'txt' }))
+    }
+  } finally {
+    queue.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('the HTTP route queues, reports and serves a finished export', {
   skip: POSIX_ONLY,
 }, async () => {
@@ -370,6 +397,47 @@ test('the HTTP route refuses a malformed batch selection', { skip: POSIX_ONLY },
     })
     assert.equal(response.status, 400)
     assert.match((await response.json()).error, /kind/)
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the HTTP route cancels a running export', { skip: POSIX_ONLY }, async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  const python = await fakePython(dir, 'hang')
+  const { server, base } = await startServer({ python, workDir: work })
+  try {
+    const queued = await fetch(`${base}/api/export/queue`, {
+      method: 'POST', headers: actionHeaders,
+      body: JSON.stringify({ format: 'txt', label: '慢任务' }),
+    })
+    assert.equal(queued.status, 202)
+    const { id } = await queued.json()
+
+    const refused = await fetch(`${base}/api/export/queue/${id}/cancel`, { method: 'POST' })
+    assert.equal(refused.status, 403, 'cancelling is a mutation')
+
+    const cancelled = await fetch(`${base}/api/export/queue/${id}/cancel`, {
+      method: 'POST', headers: actionHeaders,
+    })
+    assert.equal(cancelled.status, 200)
+    assert.equal((await cancelled.json()).task.state, 'cancelled')
+
+    const again = await fetch(`${base}/api/export/queue/${id}/cancel`, {
+      method: 'POST', headers: actionHeaders,
+    })
+    assert.equal(again.status, 409)
+
+    const missing = await fetch(`${base}/api/export/queue/nope/cancel`, {
+      method: 'POST', headers: actionHeaders,
+    })
+    assert.equal(missing.status, 404)
+
+    const list = await (await fetch(`${base}/api/export/queue`)).json()
+    assert.equal(list.running, 0)
   } finally {
     await server.close()
     await rm(dir, { recursive: true, force: true })

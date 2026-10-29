@@ -7,7 +7,7 @@
  * them after an hour, so a page reload keeps its download links until then.
  */
 import { spawn } from 'node:child_process'
-import { existsSync, statSync } from 'node:fs'
+import { existsSync, statSync, unlinkSync } from 'node:fs'
 import path from 'node:path'
 
 /** Concurrent helper processes. Each one parses the encrypted database. */
@@ -26,6 +26,7 @@ export const TASK_TIMEOUT_MS = 30 * 60 * 1000
 export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCURRENT }) {
   const tasks = []
   const children = new Map()
+  const timers = new Map()
   let counter = 0
 
   const running = () => tasks.filter((task) => task.state === 'running').length
@@ -50,6 +51,7 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
 
   function finish(task, { payload, error } = {}) {
     children.delete(task.id)
+    timers.delete(task.id)
     task.finishedAt = Date.now()
     if (error) {
       task.state = 'error'
@@ -87,7 +89,7 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
     const stderr = []
     let settled = false
     const timer = setTimeout(() => {
-      if (settled) return
+      if (settled || task.state === 'cancelled') return
       try {
         child.kill()
       } catch {
@@ -96,13 +98,14 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
       finish(task, { error: '导出超过 30 分钟，已停止；数据量太大可以改用命令行导出' })
       settled = true
     }, TASK_TIMEOUT_MS)
+    timers.set(task.id, timer)
 
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
     child.stdout.on('data', (chunk) => stdout.push(chunk))
     child.stderr.on('data', (chunk) => stderr.push(chunk))
     child.on('error', (error) => {
-      if (settled) return
+      if (settled || task.state === 'cancelled') return
       settled = true
       clearTimeout(timer)
       finish(task, {
@@ -112,7 +115,7 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
       })
     })
     child.on('close', (code) => {
-      if (settled) return
+      if (settled || task.state === 'cancelled') return
       settled = true
       clearTimeout(timer)
       const out = stdout.join('').trim()
@@ -169,6 +172,37 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
     return task ? { ...task } : null
   }
 
+  /**
+   * Stop a running export. Returns the cancelled task, or `null` when the id
+   * is unknown or the task already finished (the HTTP layer turns that into
+   * 404/409). Killing the child frees its slot immediately.
+   */
+  function cancel(id) {
+    const task = tasks.find((item) => item.id === id)
+    if (!task || task.state !== 'running') return null
+    const child = children.get(id)
+    const timer = timers.get(id)
+    if (timer) {
+      clearTimeout(timer)
+      timers.delete(id)
+    }
+    children.delete(id)
+    task.state = 'cancelled'
+    task.finishedAt = Date.now()
+    task.error = '已取消'
+    try {
+      child?.kill()
+    } catch {
+      // Already exited.
+    }
+    try {
+      if (task.path && existsSync(task.path)) unlinkSync(task.path)
+    } catch {
+      // Windows may still hold the partial file; the sweep removes it later.
+    }
+    return { ...task }
+  }
+
   /** The finished file, or `null` when the task is missing or not ready. */
   function file(id) {
     const task = tasks.find((item) => item.id === id)
@@ -198,5 +232,5 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
     children.clear()
   }
 
-  return { enqueue, list: snapshot, get, file, close }
+  return { enqueue, list: snapshot, get, cancel, file, close }
 }

@@ -748,6 +748,25 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       sendJson(res, 200, queue.list())
       return
     }
+    const cancelMatch = /^\/api\/export\/queue\/([0-9a-z]+)\/cancel$/.exec(pathname)
+    if (req.method === 'POST' && cancelMatch) {
+      if (!isTrustedMutation(req)) {
+        sendJson(res, 403, { error: 'cross-origin requests are refused' })
+        return
+      }
+      const id = cancelMatch[1]
+      if (!queue.get(id)) {
+        sendJson(res, 404, { error: '没有这个导出任务' })
+        return
+      }
+      const cancelled = queue.cancel(id)
+      if (!cancelled) {
+        sendJson(res, 409, { error: '这个任务已经结束' })
+        return
+      }
+      sendJson(res, 200, { task: cancelled })
+      return
+    }
     if (req.method === 'GET' && pathname.startsWith('/api/export/queue/')) {
       const rest = pathname.slice('/api/export/queue/'.length)
       const match = /^([0-9a-z]+)(\/file)?$/.exec(rest)
