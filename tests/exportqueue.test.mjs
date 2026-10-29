@@ -427,6 +427,51 @@ test('a password export travels in the environment and comes back encrypted', {
   }
 })
 
+test('CSV columns and Markdown front-matter reach the helper', {
+  skip: POSIX_ONLY,
+}, async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  const python = await fakePython(dir, 'echo')
+  const { server, base } = await startServer({ python, workDir: work })
+  try {
+    let response = await fetch(`${base}/api/export/queue`, {
+      method: 'POST', headers: actionHeaders,
+      body: JSON.stringify({
+        chatKind: 'group', chatId: '1', format: 'csv',
+        columns: ['time', 'sender', 'text'],
+      }),
+    })
+    assert.equal(response.status, 202)
+    const csvTask = (await response.json()).task
+    const csvDone = await waitFor(async () => {
+      const list = await (await fetch(`${base}/api/export/queue`)).json()
+      return list.tasks.find((row) => row.id === csvTask.id && row.state === 'done')
+    })
+    const csvArgs = JSON.parse(await readFile(`${csvDone.path}.args.json`, 'utf8'))
+    assert.deepEqual(csvArgs.columns, ['time', 'sender', 'text'])
+
+    response = await fetch(`${base}/api/export/queue`, {
+      method: 'POST', headers: actionHeaders,
+      body: JSON.stringify({
+        chatKind: 'group', chatId: '1', format: 'md', frontMatter: true,
+      }),
+    })
+    assert.equal(response.status, 202)
+    const mdTask = (await response.json()).task
+    const mdDone = await waitFor(async () => {
+      const list = await (await fetch(`${base}/api/export/queue`)).json()
+      return list.tasks.find((row) => row.id === mdTask.id && row.state === 'done')
+    })
+    const mdArgs = JSON.parse(await readFile(`${mdDone.path}.args.json`, 'utf8'))
+    assert.equal(mdArgs.frontMatter, true)
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('the HTTP route refuses a malformed batch selection', { skip: POSIX_ONLY }, async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')

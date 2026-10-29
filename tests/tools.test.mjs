@@ -175,6 +175,33 @@ test('export tool validates the password length', { skip: !hasPython() && 'pytho
   }
 })
 
+test('export tool writes the chosen CSV columns and Markdown front-matter', {
+  skip: !hasPython() && 'python is not installed',
+}, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const outDir = path.join(work, 'out')
+    const csv = await exportChatTool(settings).execute(
+      { chatKind: 'group', chatId: 'g1', format: 'csv', outDir,
+        columns: ['time', 'sender', 'text'] },
+      { signal: signal() })
+    assert.equal(csv.ok, true, csv.output)
+    const lines = readFileSync(csv.outPath, 'utf8').replace(/^\uFEFF/, '').split(/\r?\n/)
+    assert.equal(lines[0], '时间,发送者,内容')
+    assert.match(lines[1], /^[^,]+,甲,群里第一条消息$/)
+
+    const md = await exportChatTool(settings).execute(
+      { chatKind: 'group', chatId: 'g1', format: 'md', outDir, frontMatter: true },
+      { signal: signal() })
+    assert.equal(md.ok, true, md.output)
+    const body = readFileSync(md.outPath, 'utf8')
+    assert.ok(body.startsWith('---\nchat: "测试群"\naccount: ""\n'), body.slice(0, 80))
+    assert.match(body, /exportedAt: "/)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
 test('index tools explain how to build a missing index', { skip: !hasPython() && 'python is not installed' }, async () => {
   const work = await mkdtemp(path.join(os.tmpdir(), 'qqnt-tools-empty-'))
   const settings = { python: PYTHON, workDir: path.join(work, 'work'), webPort: 46728 }

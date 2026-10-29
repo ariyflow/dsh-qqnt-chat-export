@@ -1391,6 +1391,29 @@ def cmd_messages(p, args):
 # --------------------------------------------------------------------------
 # 导出
 # --------------------------------------------------------------------------
+CSV_COLUMNS = {'time': '时间', 'sender': '发送者', 'qq': 'QQ号',
+               'direction': '方向', 'kinds': '类型', 'text': '内容'}
+DEFAULT_CSV_COLUMNS = ['time', 'sender', 'qq', 'direction', 'kinds', 'text']
+
+
+def csv_columns(args):
+    """Validate/complete the CSV column selection (only CSV uses it)."""
+    raw = args.get('columns')
+    if raw is None:
+        return list(DEFAULT_CSV_COLUMNS)
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raise BadInput('columns 必须是非空数组，可用: ' + ', '.join(CSV_COLUMNS))
+    out = []
+    for name in raw:
+        key = str(name)
+        if key not in CSV_COLUMNS:
+            raise BadInput('不支持的列: %s（可用: %s）'
+                           % (key, ', '.join(CSV_COLUMNS)))
+        if key not in out:
+            out.append(key)
+    return out
+
+
 def html_escape(text):
     return (text.replace('&', '&amp;').replace('<', '&lt;')
             .replace('>', '&gt;').replace('"', '&quot;'))
@@ -1508,6 +1531,7 @@ def export_writer(conn, args, label, redactor=None, media=None):
     head = ('# %s\n# 账号 %s   导出时间 %s\n'
             % (label, account, datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
     state = {'rows': 0}
+    csv_cols = csv_columns(args) if fmt == 'csv' else DEFAULT_CSV_COLUMNS
 
     def record(row):
         item = row_json(row)
@@ -1548,12 +1572,13 @@ def export_writer(conn, args, label, redactor=None, media=None):
             import csv
             with atomic_out(out) as tmp, open(tmp, 'w', encoding='utf-8-sig', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(['时间', '发送者', 'QQ号', '方向', '类型', '内容'])
+                writer.writerow([CSV_COLUMNS[name] for name in csv_cols])
                 for row in cur:
                     item = record(row)
-                    writer.writerow([q.csv_cell(item['time']), q.csv_cell(item['sender']),
-                                     q.csv_cell(item['qq']), '我' if item['out'] else '对方',
-                                     q.csv_cell(item['kinds']), q.csv_cell(item['text'])])
+                    values = {'time': item['time'], 'sender': item['sender'],
+                              'qq': item['qq'], 'direction': '我' if item['out'] else '对方',
+                              'kinds': item['kinds'], 'text': item['text']}
+                    writer.writerow([q.csv_cell(values[name]) for name in csv_cols])
                     count += 1
         elif fmt == 'json':
             with atomic_out(out) as tmp, open(tmp, 'w', encoding='utf-8', newline='\n') as f:
@@ -1571,7 +1596,17 @@ def export_writer(conn, args, label, redactor=None, media=None):
                     count += 1
                 f.write(']}\n')
         elif fmt == 'md':
+            front = bool(args.get('frontMatter'))
             with atomic_out(out) as tmp, open(tmp, 'w', encoding='utf-8', newline='\n') as f:
+                if front:
+                    # JSON string literals are also valid YAML scalars, so a
+                    # chat name containing quotes or colons needs no escaping.
+                    f.write('---\n')
+                    f.write('chat: %s\n' % json.dumps(label, ensure_ascii=False))
+                    f.write('account: %s\n' % json.dumps(account, ensure_ascii=False))
+                    f.write('exportedAt: %s\n'
+                            % json.dumps(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+                    f.write('---\n\n')
                 f.write('# %s\n\n| 时间 | 发送者 | 内容 |\n|---|---|---|\n'
                         % md_cell(label.replace('\n', ' ')))
                 for row in cur:

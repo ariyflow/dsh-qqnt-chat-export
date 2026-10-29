@@ -372,6 +372,14 @@
       <input type="password" id="zipPassword" placeholder="ZIP 密码（可选）"
              autocomplete="new-password" style="width:130px"
              title="设置后导出为 AES-256 加密 ZIP（7-Zip / WinRAR / Bandizip 可打开）">
+      <select id="csvCols" class="hidden" title="CSV 只写选中的列">
+        <option value="time,sender,qq,direction,kinds,text">CSV 全部列</option>
+        <option value="time,sender,text">CSV 时间/发送者/内容</option>
+        <option value="time,sender,text,kinds">CSV 时间/发送者/类型/内容</option>
+      </select>
+      <label class="check hidden" id="frontMatterWrap" title="Markdown 开头加 YAML 元信息（会话、账号、导出时间）">
+        <input type="checkbox" id="frontMatter"> MD 元信息
+      </label>
       <button class="ghost" type="button" id="statsBtn" title="本机统计：时间分布、发言人、活跃会话">统计</button>
       <button class="primary" type="button" id="download">下载</button>
     </form>
@@ -380,6 +388,7 @@
       <div class="stats-head">
         <strong>统计</strong>
         <span class="stats-scope" id="statsScope"></span>
+        <button class="ghost" type="button" id="statsCsv">导出 CSV</button>
         <button class="ghost" type="button" id="statsClose">关闭</button>
       </div>
       <div class="stats-body" id="statsBody"></div>
@@ -539,6 +548,7 @@
     selection: {},
     keywordHistory: [],
     lastSyncCheck: 0,
+    statsData: null,
     kind: 'all',
     sessionKind: '',
     chatId: '',
@@ -1273,6 +1283,7 @@
   }
 
   function renderStats(data) {
+    state.statsData = data
     $('statsPanel').classList.remove('hidden')
     $('statsScope').textContent = (state.chatId
       ? '会话：' + (state.chatName || state.chatId)
@@ -1327,6 +1338,43 @@
       '</div>'
   }
 
+  /** Save the aggregates as CSV; purely client-side, no extra request. */
+  function downloadStatsCsv() {
+    var data = state.statsData
+    if (!data) { toast('先打开统计'); return }
+    var rows = [['类目', '名称', '数量']]
+    rows.push(['总计', '消息', data.total])
+    rows.push(['总计', '会话', data.chats])
+    rows.push(['总计', '发言人', data.senders])
+    ;(data.monthly || []).forEach(function (row) {
+      rows.push(['每月', row.month, row.count])
+    })
+    ;(data.hourly || []).forEach(function (count, hour) {
+      rows.push(['小时', String(hour).padStart(2, '0') + ':00', count])
+    })
+    ;(data.topSenders || []).forEach(function (row) {
+      rows.push(['发言人', row.name + (row.qq ? ' (' + row.qq + ')' : ''), row.count])
+    })
+    ;(data.topChats || []).forEach(function (row) {
+      rows.push(['会话', row.name, row.count])
+    })
+    var csv = rows.map(function (row) {
+      return row.map(function (cell) {
+        return '"' + String(cell).replace(/"/g, '""') + '"'
+      }).join(',')
+    }).join('\r\n')
+    var blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' })
+    var url = URL.createObjectURL(blob)
+    var link = document.createElement('a')
+    link.href = url
+    var stamp = new Date().toISOString().slice(0, 10)
+    link.download = 'qqnt-stats-' + stamp + '.csv'
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    setTimeout(function () { URL.revokeObjectURL(url) }, 1000)
+  }
+
   function openStats() {
     var filters = state.filters || currentFilters()
     var params = new URLSearchParams()
@@ -1339,6 +1387,21 @@
   }
 
   // ---------------------------------------------------------------- 下载
+  /** CSV/Markdown-only options, kept out of the way until that format is picked. */
+  function exportExtras() {
+    var format = $('format').value
+    var extra = {}
+    if (format === 'csv') extra.columns = $('csvCols').value.split(',')
+    if (format === 'md') extra.frontMatter = $('frontMatter').checked
+    return extra
+  }
+
+  function syncFormatOptions() {
+    var format = $('format').value
+    $('csvCols').classList.toggle('hidden', format !== 'csv')
+    $('frontMatterWrap').classList.toggle('hidden', format !== 'md')
+  }
+
   function download() {
     if (!state.indexReady) { toast('先建立索引'); return }
     if (!state.total) { toast('当前没有可导出的消息'); return }
@@ -1368,7 +1431,7 @@
     var redact = $('redact').value
     api('/api/export/queue', {
       method: 'POST',
-      body: Object.assign({}, filters, {
+      body: Object.assign({}, filters, exportExtras(), {
         format: format, label: label, redact: redact, media: withMedia, embed: embed,
         split: split ? 'day' : '', password: password
       })
@@ -1395,12 +1458,12 @@
     if (password && $('embed').checked) { toast('内嵌图片不能和密码 ZIP 同时使用'); return }
     api('/api/export/queue', {
       method: 'POST',
-      body: {
+      body: Object.assign({}, exportExtras(), {
         chats: chats, format: format, label: '批量导出 ' + chats.length + ' 个会话',
         redact: $('redact').value, media: $('media').checked,
         embed: $('embed').checked, split: $('split').checked ? 'day' : '',
         password: password
-      }
+      })
     }).then(function () {
       $('zipPassword').value = ''
       toast('已加入导出队列：' + chats.length + ' 个会话（' +
@@ -2086,8 +2149,10 @@
     updateScope()
     loadMessages(true)
   })
+  $('format').addEventListener('change', syncFormatOptions)
   $('download').addEventListener('click', download)
   $('statsBtn').addEventListener('click', openStats)
+  $('statsCsv').addEventListener('click', downloadStatsCsv)
   $('statsClose').addEventListener('click', function () {
     $('statsPanel').classList.add('hidden')
   })
@@ -2153,6 +2218,7 @@
   })
 
   updateScope()
+  syncFormatOptions()
   loadHistory()
   pollTasks()
   refreshStatus(false)

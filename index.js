@@ -504,6 +504,16 @@ export function exportChatTool(settings) {
           type: 'string', minLength: 4, maxLength: 128,
           description: 'Protect the resulting ZIP with AES-256 (4-128 characters). Needs pyzipper in the plugin venv; the one-click setup installs it.',
         },
+        columns: {
+          type: 'array',
+          items: { type: 'string', enum: ['time', 'sender', 'qq', 'direction', 'kinds', 'text'] },
+          minItems: 1,
+          description: 'CSV only: which columns to write. Defaults to all six.',
+        },
+        frontMatter: {
+          type: 'boolean',
+          description: 'Markdown only: start the file with a YAML front-matter block (chat, account, exportedAt).',
+        },
       },
     },
     output: { schema: outputSchema({ outPath: { type: 'string' } }), render: renderReport },
@@ -563,6 +573,10 @@ export function exportChatTool(settings) {
       if (media) payloadArgs.media = true
       if (split) payloadArgs.split = 'day'
       if (embed) payloadArgs.embed = true
+      if (format === 'csv' && Array.isArray(args.columns) && args.columns.length > 0) {
+        payloadArgs.columns = args.columns.map(String)
+      }
+      if (format === 'md' && args.frontMatter === true) payloadArgs.frontMatter = true
       const { code, payload } = await runQueryJson(
         settings, ['export', '--json', JSON.stringify(payloadArgs)], exec,
         password ? { QQNT_EXPORT_PASSWORD: password } : undefined)

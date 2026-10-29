@@ -570,6 +570,51 @@ class IncrementalBuildTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn('密码长度', json.loads(proc.stdout)['error'])
 
+    def test_csv_exports_selected_columns(self):
+        self.run_cli('build')
+        out = os.path.join(self.work, 'exports', 'columns.csv')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        result = self.run_cli('export', '--json', json.dumps({
+            'format': 'csv', 'out': out, 'label': '全部',
+            'columns': ['time', 'sender', 'text']}))
+        self.assertEqual(result['rows'], 3)
+        with open(out, encoding='utf-8-sig', newline='') as f:
+            import csv
+            rows = list(csv.reader(f))
+        self.assertEqual(rows[0], ['时间', '发送者', '内容'])
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(rows[1][2], '第一条消息')
+
+        proc = subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
+             '--root', self.root, '--account', '12345', '--work', self.work,
+             'export', '--json', json.dumps({
+                 'format': 'csv', 'out': out, 'columns': ['time', 'bogus']})],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn('不支持的列', json.loads(proc.stdout)['error'])
+
+    def test_markdown_front_matter_is_opt_in(self):
+        self.run_cli('build')
+        out = os.path.join(self.work, 'exports', 'front.md')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        self.run_cli('export', '--json', json.dumps({
+            'format': 'md', 'out': out, 'label': 'g1',
+            'chatKind': 'group', 'chatId': 'g1', 'frontMatter': True}))
+        with open(out, encoding='utf-8') as f:
+            body = f.read()
+        self.assertTrue(body.startswith('---\nchat: "g1"\naccount: "12345"\n'))
+        self.assertIn('exportedAt: "', body)
+        self.assertIn('# g1', body)
+
+        plain = os.path.join(self.work, 'exports', 'plain.md')
+        self.run_cli('export', '--json', json.dumps({
+            'format': 'md', 'out': plain, 'label': 'g1',
+            'chatKind': 'group', 'chatId': 'g1'}))
+        with open(plain, encoding='utf-8') as f:
+            self.assertFalse(f.read().startswith('---'))
+
     def test_split_rejects_an_unknown_unit(self):
         self.run_cli('build')
         out = os.path.join(self.work, 'exports', 'split-bad.zip')

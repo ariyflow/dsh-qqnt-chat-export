@@ -736,11 +736,16 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
             : (chats.length > 0 || media || split || password ? 'zip' : innerFormat)
           const label = String(body.label || (chats.length > 1
             ? `批量导出 ${chats.length} 个会话` : 'QQ聊天记录')).slice(0, 120)
+          const columns = Array.isArray(body.columns)
+            ? body.columns.map((name) => String(name).trim()).filter(Boolean)
+            : null
           const args = filtersFromBody(body)
           if (chats.length > 0) args.chats = chats
           if (media || embed) args.media = true
           if (embed) args.embed = true
           if (split) args.split = 'day'
+          if (columns && columns.length > 0) args.columns = columns
+          if (body.frontMatter === true) args.frontMatter = true
           const queued = queue.enqueue(args, {
             label, format: container, innerFormat, password,
           })
