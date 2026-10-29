@@ -6,8 +6,9 @@
 - **脱敏分享**：新增 `--redact names|qq|all`（网页是「脱敏」下拉）。`names` 把发送者昵称换成 `成员1/2…`、会话名换成 `群聊N/私聊N`；`qq` 清空 QQ 号和群号（含清单与 ZIP 内文件名中的账号信息）；`all` 两者都做。TXT/CSV/JSON/MD/HTML/SQLite 与 `manifest.json` 同步生效。正文不重写——消息里提到的昵称属于对话内容，自动打码只会破坏归档，README 已写清这个边界。
 - **媒体导出（默认关闭）**：`--media` 解析消息段里的图片/文件/语音/视频，按 `nt_data` 的实际规则定位并复制：图片优先用元素自带的绝对路径（`45812`），否则按 md5 在 `Pic/<月>/Ori` 再 `Thumb` 里找；语音 `Ptt/<月>/Ori/<md5>.amr`；视频 `Video/<月>/Ori`（没有原片时退回缩略图并标记）；文件按 `45503` 的 uuid 找 `File/Ori/<前缀>_<uuid>/`。本机没下载过的媒体只记入清单（`missing`），不会让导出失败；表情（`Emoji/`，本机 1.2 GB）跳过。上限单文件 100 MB、单次 1 GB，超限记入 `skipped`。脱敏时媒体文件名不再使用原始文件名（可能含真名）。实测规则与覆盖率见 `docs/media-notes.md`。
 - **自包含 HTML**：`--embed-media` 把图片转成 base64 data URI 内嵌进单个 `.html`，可直接发给别人；只支持单个会话、`html` 格式，单图 10 MB、单次 200 MB；非图片媒体（文件/语音/视频）跳过并计数。普通 `--media` + HTML 则输出 ZIP（HTML 相对引用 `media/…`）。
+- **增量同步改为每会话水位**：原来用「每类消息的全局 `max(msg_id)`」当水位，但真实数据里 `msg_id` 不是全局单调的（同一账号不同会话能差 1.6e17），新消息经常低于全局水位，数量校验失败后退回全量重建（32 万条约 8 秒，且随数据量线性变慢）。现在 `index_snapshot()` 读 `(chat_kind, chat_id) → max(msg_id)`，`plan_incremental()` 把水位放进临时表、用 `LEFT JOIN` 只取各会话水位以上的行；计数校验仍保留——源库删除/回溯/换账号导致对不上时照旧全量。真机 32 万条上 `build --refresh` 从约 8 秒降到 **1.7 秒**（`mode: incremental`），无变化时 `added: 0`。顺带修掉空 `chat_id` 行让计数永远对不上的问题（`source_counts` 不再统计索引器本来就会跳过的行）。
 - 网页：导出区新增「含媒体」「内嵌图片」开关与「脱敏」下拉；含媒体或批量导出会自动变成 ZIP（内嵌 HTML 例外，仍是单个 `.html`）；任务面板显示「媒体 N 个」。
-- 测试：Python 89 个（新增媒体定位/复制/内嵌 17 个，批量 ZIP、脱敏、媒体与内嵌端到端 11 个），Node 38 个（新增批量 2、媒体 1、内嵌 HTML 1；队列 10 个）；`node --check`、`py_compile`、`git diff --check`、`npm pack --dry-run` 全绿。
+- 测试：Python 90 个（新增媒体定位/复制/内嵌 17 个，批量 ZIP、脱敏、媒体与内嵌端到端 11 个、每会话水位 1 个），Node 38 个（新增批量 2、媒体 1、内嵌 HTML 1；队列 10 个）；`node --check`、`py_compile`、`git diff --check`、`npm pack --dry-run` 全绿。
 - 版本升到 0.9.0。
 
 ## 0.8.0

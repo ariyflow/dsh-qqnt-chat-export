@@ -187,6 +187,29 @@ class IncrementalBuildTests(unittest.TestCase):
         self.assertNotIn('第二条消息', {row['text'] for row in rows})
         self.assertEqual(self.count('第二条'), 0)
 
+    def test_per_chat_watermarks_accept_a_new_chat_with_a_low_id(self):
+        self.run_cli('build')
+        # g9 pushes the global maximum to 9.
+        self.add('group_msg_table', 9, 1700004000, '高号会话', 'g9')
+        self.publish()
+        self.run_cli('build', '--refresh')
+        self.assertEqual(self.status()['mode'], 'incremental')
+        # g8 starts at 5: below the global mark, but above its own (absent -> 0).
+        self.add('group_msg_table', 5, 1700004100, '低号新会话', 'g8')
+        self.publish()
+        self.run_cli('build', '--refresh')
+        self.assertEqual(self.status()['mode'], 'incremental')
+        self.assertEqual(self.status()['added'], 1)
+        self.assertEqual(self.count('低号新会话'), 1)
+        # A new message in a chat whose mark is above the global maximum still
+        # appends once it passes that chat's own mark.
+        self.add('group_msg_table', 10, 1700004200, '老会话新消息', 'g1')
+        self.publish()
+        self.run_cli('build', '--refresh')
+        self.assertEqual(self.status()['mode'], 'incremental')
+        self.assertEqual(self.status()['added'], 1)
+        self.assertEqual(self.count('老会话新消息'), 1)
+
     def test_search_mode_switch_forces_a_full_rebuild(self):
         self.run_cli('build')
         self.assertEqual(self.meta().get('search'), 'fts')

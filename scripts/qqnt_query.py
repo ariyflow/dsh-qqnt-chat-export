@@ -642,7 +642,14 @@ def require_build_prerequisites(p):
 
 
 def index_snapshot(path):
-    """Read account, per-kind counts, and msg_id watermarks from an index."""
+    """Read account, per-kind counts, and per-chat msg_id watermarks.
+
+    A single watermark per kind cannot work on real data: `msg_id` is not
+    globally monotonic (one busy group sits ~1.6e17 above another chat), so
+    every sync would see "new" rows below the global mark and fall back to a
+    full rebuild. Per-chat marks are what the source can actually be compared
+    against.
+    """
     if not os.path.exists(path):
         return None
     try:
@@ -653,8 +660,9 @@ def index_snapshot(path):
             for kind in (GROUP_KIND, PRIVATE_KIND):
                 counts[kind] = conn.execute(
                     'SELECT count(*) FROM messages WHERE chat_kind=?', (kind,)).fetchone()[0]
-                marks[kind] = int(conn.execute(
-                    'SELECT max(msg_id) FROM messages WHERE chat_kind=?', (kind,)).fetchone()[0] or 0)
+            for kind, chat_id, mark in conn.execute(
+                    'SELECT chat_kind, chat_id, max(msg_id) FROM messages GROUP BY 1, 2'):
+                marks[(kind, str(chat_id))] = int(mark or 0)
             return {'meta': meta, 'counts': counts, 'marks': marks}
         finally:
             conn.close()
@@ -662,13 +670,28 @@ def index_snapshot(path):
         return None
 
 
+MARKS_TABLE = 'qqnt_marks'
+
+
+def load_marks(src, marks):
+    """Put per-chat watermarks in a temp table the source queries can join."""
+    src.execute('CREATE TEMP TABLE IF NOT EXISTS %s('
+                'chat_kind TEXT, chat_id TEXT, max_id INTEGER, '
+                'PRIMARY KEY(chat_kind, chat_id))' % MARKS_TABLE)
+    src.execute('DELETE FROM temp.%s' % MARKS_TABLE)
+    src.executemany(
+        'INSERT INTO temp.%s VALUES (?,?,?)' % MARKS_TABLE,
+        [(kind, str(chat_id), int(mark or 0))
+         for (kind, chat_id), mark in marks.items()])
+
+
 def plan_incremental(p, src, uin, source_counts, search='fts'):
     """Append-only sync, or None to request a full rebuild.
 
-    Only rows above the stored msg_id watermark are read. The per-kind count
+    Only rows above their chat's watermark are read. The per-kind count
     equality check refuses the plan when the source gained or lost rows below
-    the watermark (deletion, backfill, account switch), so those cases fall
-    back to a full parse instead of silently keeping stale messages.
+    a watermark (deletion, backfill, account switch), so those cases fall back
+    to a full parse instead of silently keeping stale messages.
     """
     snap = index_snapshot(p['index'])
     if not snap:
@@ -680,17 +703,20 @@ def plan_incremental(p, src, uin, source_counts, search='fts'):
     # Changing the keyword strategy cannot be done by appending rows.
     if str(snap['meta'].get('search') or ('fts' if snap['meta'].get('fts') == '1' else 'like')) != search:
         return None
+    load_marks(src, snap['marks'])
     new_counts, total_new = {}, 0
     for kind, table in ((GROUP_KIND, 'group_msg_table'), (PRIVATE_KIND, 'c2c_msg_table')):
-        mark = snap['marks'].get(kind, 0)
         added = src.execute(
-            'SELECT count(*) FROM %s WHERE [40001] > ?' % table, (mark,)).fetchone()[0]
+            'SELECT count(*) FROM %s s LEFT JOIN temp.%s w '
+            'ON w.chat_kind=? AND w.chat_id=s.[40021] '
+            'WHERE s.[40001] > coalesce(w.max_id, 0)' % (table, MARKS_TABLE),
+            (kind,)).fetchone()[0]
         if source_counts.get(kind, 0) != snap['counts'].get(kind, 0) + added:
             return None
         new_counts[kind] = added
         total_new += added
     return {
-        'marks': snap['marks'], 'new_counts': new_counts, 'total_new': total_new,
+        'new_counts': new_counts, 'total_new': total_new,
         'old_total': sum(snap['counts'].values()),
         'new_total': sum(snap['counts'].values()) + total_new,
     }
@@ -754,7 +780,11 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
         src = q.open_encrypted(p['db'], key)
         source_counts = {}
         for kind, table in ((GROUP_KIND, 'group_msg_table'), (PRIVATE_KIND, 'c2c_msg_table')):
-            source_counts[kind] = src.execute('SELECT count(*) FROM %s' % table).fetchone()[0]
+            # Rows without a chat id are skipped by the indexer; counting them
+            # here would make the incremental count check fail forever.
+            source_counts[kind] = src.execute(
+                "SELECT count(*) FROM %s WHERE coalesce(cast([40021] AS TEXT), '') <> ''"
+                % table).fetchone()[0]
         source_total = sum(source_counts.values())
 
         plan = None
@@ -824,12 +854,14 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
 
         for kind, table in ((GROUP_KIND, 'group_msg_table'),
                             (PRIVATE_KIND, 'c2c_msg_table')):
-            sql = ('SELECT [40001],[40050],[40020],[40033],[40013],[40011],[40012],'
-                   '[40800],[40021] FROM %s' % table)
+            sql = ('SELECT s.[40001],s.[40050],s.[40020],s.[40033],s.[40013],'
+                   's.[40011],s.[40012],s.[40800],s.[40021] FROM %s s' % table)
             params = ()
             if plan:
-                sql += ' WHERE [40001] > ?'
-                params = (plan['marks'].get(kind, 0),)
+                sql += (' LEFT JOIN temp.%s w ON w.chat_kind=? '
+                        'AND w.chat_id=s.[40021] '
+                        'WHERE s.[40001] > coalesce(w.max_id, 0)' % MARKS_TABLE)
+                params = (kind,)
             cur = src.execute(sql, params)
             batch, fts_batch = [], []
             while True:
