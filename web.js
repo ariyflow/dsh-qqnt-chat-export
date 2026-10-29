@@ -125,6 +125,10 @@ function runJson(settings, command, args = {}, { signal } = {}) {
     if (command === 'messages' || command === 'export') {
       argv.push('--json', JSON.stringify(args))
     }
+    if (command === 'select') {
+      argv.push('--account', String(args.account || ''))
+      argv.push('--keep', String(settings.keepAccountIndexes ?? 2))
+    }
     const child = spawn(settings.python, argv, {
       windowsHide: true,
       env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
@@ -278,27 +282,55 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
    * each poll would compete with that build for the same disk.
    */
   let statusCache
-  const indexFile = path.join(settings.workDir, 'index.sqlite')
-  const dbFile = path.join(settings.workDir, 'nt_msg.db')
-  const keyFile = path.join(settings.workDir, 'key.txt')
+  // Functions, not constants: the settings page can change `workDir` without
+  // restarting the listener (only a port change restarts it).
+  const indexFile = () => path.join(settings.workDir, 'index.sqlite')
+  const dbFile = () => path.join(settings.workDir, 'nt_msg.db')
+  const keyFile = () => path.join(settings.workDir, 'key.txt')
+
+  /**
+   * Whether a build is likely running. Three sources because the helper needs
+   * a moment to create its lock file, and a recent spawn covers that gap.
+   */
+  const buildInProgress = () => {
+    if (Date.now() - lastBuildSpawnAt < 10_000) return true
+    try {
+      const status = JSON.parse(readFileSync(path.join(settings.workDir, 'build-status.json'), 'utf8'))
+      if (status.state === 'running') return true
+    } catch {
+      // No status file yet.
+    }
+    try {
+      if (Date.now() - statSync(path.join(settings.workDir, 'build.lock')).mtimeMs < 15 * 60 * 1000) return true
+    } catch {
+      // No lock file.
+    }
+    return false
+  }
 
   /** Status from the helper, reused while a build runs or the index is unchanged. */
   const currentStatus = async () => {
-    const index = fileInfo(indexFile)
+    const index = fileInfo(indexFile())
     const build = readBuildState(settings.workDir)
     const cached = statusCache
     const usable = cached && (build.state === 'running'
-      || (Date.now() - cached.at < 5000 && cached.indexMtime === index.mtime))
+      || (Date.now() - cached.at < 5000 && cached.path === index.path
+        && cached.indexMtime === index.mtime))
     if (!usable) {
-      statusCache = { at: Date.now(), indexMtime: index.mtime, value: await runJson(settings, 'status') }
+      statusCache = {
+        at: Date.now(), path: index.path, indexMtime: index.mtime,
+        value: await runJson(settings, 'status'),
+      }
     }
     const value = statusCache.value
     return {
       ...value,
-      db: fileInfo(dbFile),
+      db: fileInfo(dbFile()),
       index: { ...(value.index || {}), ...index },
-      key: existsSync(keyFile),
+      key: existsSync(keyFile()),
       build,
+      workDir: settings.workDir,
+      workDirLegacy: settings.workDirLegacy === true,
     }
   }
 
@@ -398,6 +430,21 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       } catch (error) {
         sendJson(res, 500, { error: error.message })
       }
+      return
+    }
+    if (req.method === 'POST' && pathname === '/api/workdir/migrate') {
+      if (!isTrustedMutation(req)) {
+        sendJson(res, 403, { error: 'cross-origin requests are refused' })
+        return
+      }
+      if (typeof handlers.migrateWorkDir !== 'function') {
+        sendJson(res, 501, { error: 'this build has no migration API' })
+        return
+      }
+      Promise.resolve()
+        .then(() => handlers.migrateWorkDir())
+        .then((result) => sendJson(res, 200, result))
+        .catch((error) => sendJson(res, error.status ?? 500, { error: error.message }))
       return
     }
     if (req.method === 'POST' && pathname === '/api/storage/cleanup') {
@@ -572,6 +619,38 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
         .catch((error) => sendJson(res, error.status ?? 500, { error: error.message }))
       return
     }
+    if (req.method === 'POST' && pathname === '/api/index/select') {
+      if (!isTrustedMutation(req)) {
+        sendJson(res, 403, { error: 'cross-origin requests are refused' })
+        return
+      }
+      if (typeof handlers.canStartBuild === 'function' && !handlers.canStartBuild()) {
+        sendJson(res, 409, { error: '密钥提取或环境配置进行中，请等它结束。' })
+        return
+      }
+      if (buildInProgress()) {
+        sendJson(res, 409, { error: '已有一次索引构建正在进行，请等它结束。' })
+        return
+      }
+      readJsonBody(req)
+        .then((body) => {
+          const account = String(body.account ?? '').trim()
+          if (!/^[0-9A-Za-z_-]+$/.test(account)) {
+            throw Object.assign(new Error('账号格式不正确'), { status: 400 })
+          }
+          return runJson(settings, 'select', { account })
+        })
+        .then((result) => {
+          // The live index just changed; the next /api/status must re-read it.
+          statusCache = undefined
+          sendJson(res, 200, result)
+        })
+        .catch((error) => {
+          const conflict = error.status === 400 && /构建/.test(error.message)
+          sendJson(res, conflict ? 409 : (error.status ?? 500), { error: error.message })
+        })
+      return
+    }
     if (req.method === 'POST' && pathname === '/api/index/build') {
       // A page on another origin must not be able to start a 1 GB rebuild.
       const origin = req.headers.origin
@@ -586,23 +665,7 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       // Report a running build instead of answering 202 for a spawn that the
       // helper's own lock will immediately refuse. Three sources because the
       // helper needs a moment to create its lock file.
-      const lockFile = path.join(settings.workDir, 'build.lock')
-      let running = Date.now() - lastBuildSpawnAt < 10_000
-      if (!running) {
-        try {
-          running = JSON.parse(readFileSync(path.join(settings.workDir, 'build-status.json'), 'utf8')).state === 'running'
-        } catch {
-          // No status file yet.
-        }
-      }
-      if (!running) {
-        try {
-          running = Date.now() - statSync(lockFile).mtimeMs < 15 * 60 * 1000
-        } catch {
-          // No lock file.
-        }
-      }
-      if (running) {
+      if (buildInProgress()) {
         sendJson(res, 409, { error: '已有一次索引构建正在进行，请等它结束。' })
         return
       }
@@ -612,6 +675,8 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       if (settings.account) argv.push('--account', String(settings.account))
       argv.push('build')
       if (refresh) argv.push('--refresh')
+      argv.push('--keep', String(settings.keepAccountIndexes ?? 2))
+      argv.push('--search', settings.searchIndex === 'like' ? 'like' : 'fts')
       // Only claim the spawn gap once the child exists; a failed spawn must not
       // make `/api/status` think a build is running for the next ten seconds.
       spawnBuild(settings, argv).then((result) => {

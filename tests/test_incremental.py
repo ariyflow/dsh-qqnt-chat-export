@@ -167,6 +167,27 @@ class IncrementalBuildTests(unittest.TestCase):
         self.assertNotIn('第二条消息', {row['text'] for row in rows})
         self.assertEqual(self.count('第二条'), 0)
 
+    def test_search_mode_switch_forces_a_full_rebuild(self):
+        self.run_cli('build')
+        self.assertEqual(self.meta().get('search'), 'fts')
+
+        # LIKE stores no keyword table; the mode cannot change by appending.
+        self.run_cli('build', '--refresh', '--search', 'like')
+        self.assertEqual(self.status()['mode'], 'full')
+        self.assertEqual(self.meta().get('search'), 'like')
+        self.assertEqual(self.meta().get('fts'), '0')
+        self.assertEqual(self.count('第一条'), 1)
+        self.assertEqual(self.count('条消息'), 2)
+
+        # Switching back is a rebuild too, and restores the keyword index.
+        self.run_cli('build', '--refresh', '--search', 'fts')
+        self.assertEqual(self.status()['mode'], 'full')
+        self.assertEqual(self.meta().get('search'), 'fts')
+
+        # Same mode again: back to an incremental append.
+        self.run_cli('build', '--refresh', '--search', 'fts')
+        self.assertEqual(self.status()['mode'], 'incremental')
+
     def test_keyword_search_falls_back_without_fts5(self):
         """The build must stay usable when SQLCipher has no FTS5/trigram."""
         import qqnt_query as qqq

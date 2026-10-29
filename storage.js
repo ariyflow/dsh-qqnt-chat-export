@@ -6,9 +6,13 @@
  * request cannot turn into a recursive delete of an arbitrary path.
  */
 import { existsSync, lstatSync, readFileSync, readdirSync, unlinkSync } from 'node:fs'
+import { cp, mkdir, readdir, rm } from 'node:fs/promises'
 import path from 'node:path'
 
 const LOCK_MAX_AGE_MS = 15 * 60 * 1000
+/** Parked indexes for other accounts: index.<uin>.sqlite (+ sidecars). */
+const CACHE_RE = /^index\.[0-9A-Za-z_-]+\.sqlite(?:-(?:wal|shm))?$/
+export const ACCOUNT_CACHE_ID = 'indexCache'
 
 export const STORAGE_ITEMS = [
   {
@@ -66,6 +70,32 @@ function infoFor(target, name) {
   }
 }
 
+/** Parked account indexes, scanned rather than allow-listed by name. */
+function cacheNames(workDir) {
+  try {
+    return readdirSync(workDir).filter((name) => CACHE_RE.test(name)).sort()
+  } catch {
+    return []
+  }
+}
+
+function cacheItem(workDir) {
+  const files = cacheNames(workDir)
+    .map((name) => {
+      const match = /^index\.([0-9A-Za-z_-]+)\.sqlite/.exec(name)
+      return { ...infoFor(safeInside(workDir, name), name), account: match ? match[1] : '' }
+    })
+    .filter((file) => file.exists)
+  if (files.length === 0) return null
+  return {
+    id: ACCOUNT_CACHE_ID,
+    label: '账号索引缓存',
+    detail: 'index.<账号>.sqlite；切回该账号时可直接增量更新（保留数量见设置）',
+    bytes: files.reduce((sum, file) => sum + (file.exists ? file.bytes : 0), 0),
+    files,
+  }
+}
+
 function directoryFiles(root, name) {
   const dir = safeInside(root, name)
   try {
@@ -116,6 +146,13 @@ export function storageSnapshot(workDir) {
       files: files.filter((file) => file.exists),
     }
   }).filter((item) => item.files.length > 0)
+  // Scanned rather than allow-listed: the account names are not known ahead
+  // of time, and the live `index.sqlite` deliberately never matches.
+  const cache = cacheItem(workDir)
+  if (cache) {
+    totalBytes += cache.bytes
+    items.push(cache)
+  }
   return {
     workDir,
     exists: existsSync(workDir),
@@ -137,10 +174,11 @@ export function cleanupStorage(workDir, ids) {
     throw Object.assign(new Error('没有选择要删除的内容'), { status: 400 })
   }
   const wanted = new Set(ids)
-  const items = STORAGE_ITEMS.filter((item) => wanted.has(item.id))
-  if (items.length !== wanted.size) {
-    throw Object.assign(new Error('包含未知的清理项'), { status: 400 })
+  const known = new Set([...STORAGE_ITEMS.map((item) => item.id), ACCOUNT_CACHE_ID])
+  for (const id of wanted) {
+    if (!known.has(id)) throw Object.assign(new Error('包含未知的清理项'), { status: 400 })
   }
+  const items = STORAGE_ITEMS.filter((item) => wanted.has(item.id))
   if (buildRunning(workDir)) {
     throw Object.assign(new Error('索引正在建立，等它结束后再清理'), { status: 409 })
   }
@@ -161,6 +199,12 @@ export function cleanupStorage(workDir, ids) {
     } catch (error) {
       if (error.code !== 'ENOENT') failed.push({ name, error: error.message })
     }
+  }
+
+  if (wanted.has(ACCOUNT_CACHE_ID)) {
+    // Re-scan instead of trusting a name from the request: only files that
+    // currently match the pattern can be deleted.
+    for (const name of cacheNames(workDir)) removeFile(safeInside(workDir, name), name)
   }
 
   for (const item of items) {
@@ -187,3 +231,73 @@ export function cleanupStorage(workDir, ids) {
 }
 
 export { buildRunning }
+
+/** Whether `child` is `parent` itself or sits underneath it. */
+function inside(parent, child) {
+  const rel = path.relative(path.resolve(parent), path.resolve(child))
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+}
+
+/**
+ * Copy a work directory to a new location, leaving the source intact.
+ *
+ * `removeSource` defaults to false: the caller commits the new `workDir` first
+ * and only then deletes the source entries, so a failed settings write never
+ * loses the key. Existing files in the target are reported as `skipped`
+ * instead of overwritten.
+ */
+export async function migrateWorkDir(from, to, { removeSource = false } = {}) {
+  const source = path.resolve(from)
+  const target = path.resolve(to)
+  if (source === target) {
+    throw Object.assign(new Error('工作目录已经在目标位置'), { status: 400 })
+  }
+  if (inside(source, target) || inside(target, source)) {
+    throw Object.assign(new Error('新旧工作目录不能互相包含'), { status: 400 })
+  }
+  if (!existsSync(source)) {
+    throw Object.assign(new Error(`旧工作目录不存在：${source}`), { status: 400 })
+  }
+  await mkdir(target, { recursive: true, mode: 0o700 })
+  const entries = await readdir(source, { withFileTypes: true })
+  const copied = []
+  const skipped = []
+  try {
+    for (const entry of entries) {
+      // The lock belongs to the old directory; a build cannot be running here
+      // (the caller checks first), and copying a lock file would block the new
+      // directory forever.
+      if (entry.name === 'build.lock') continue
+      const src = path.join(source, entry.name)
+      const dst = path.join(target, entry.name)
+      if (existsSync(dst)) {
+        skipped.push(entry.name)
+        continue
+      }
+      await cp(src, dst, { recursive: true, force: false, errorOnExist: true })
+      copied.push(entry.name)
+    }
+    if (existsSync(path.join(source, 'key.txt')) && !existsSync(path.join(target, 'key.txt'))) {
+      throw new Error('key.txt 没有复制成功')
+    }
+  } catch (error) {
+    for (const name of copied) await rm(path.join(target, name), { recursive: true, force: true })
+    throw Object.assign(error, { status: 500 })
+  }
+  if (removeSource) await removeWorkDirEntries(source, copied)
+  return { from: source, to: target, copied, skipped }
+}
+
+/** Best-effort deletion of the entries a migration copied (source cleanup). */
+export async function removeWorkDirEntries(dir, names) {
+  const removed = []
+  for (const name of names) {
+    try {
+      await rm(path.join(dir, name), { recursive: true, force: true })
+      removed.push(name)
+    } catch {
+      // Leaving a stale source copy is harmless; the target is authoritative.
+    }
+  }
+  return removed
+}

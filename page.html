@@ -241,6 +241,7 @@
 <div class="banner hidden" id="banner">
   <div class="grow"><div id="bannerText"></div><div class="bar"><i id="bannerBar"></i></div></div>
   <button class="primary hidden" id="bannerAction">建立索引</button>
+  <button class="ghost hidden" id="bannerSecondary">继续使用</button>
 </div>
 
 <main>
@@ -334,6 +335,19 @@
         <input type="text" id="setAccount" spellcheck="false" placeholder="自动选择最大的库">
         <small>多账号时指定；留空选择 nt_msg.db 最大的账号。</small>
       </label>
+      <label class="field">
+        <span>保留账号索引数</span>
+        <input type="number" id="setKeepIndexes" min="0" max="5" step="1" value="2">
+        <small>切换 QQ 账号时把其它账号的索引缓存为 <code>index.&lt;账号&gt;.sqlite</code>，切回时直接增量更新。0 表示只保留当前账号；每个索引约 0.65 MB / 1000 条消息。</small>
+      </label>
+      <label class="field">
+        <span>搜索索引</span>
+        <select id="setSearchIndex">
+          <option value="fts">FTS（关键词秒搜，占磁盘较多）</option>
+          <option value="like">LIKE（省磁盘，关键词搜索需要扫描）</option>
+        </select>
+        <small>修改后需要重建索引才会生效。</small>
+      </label>
 
       <div class="settings-actions">
         <button class="primary" type="submit">保存设置</button>
@@ -418,6 +432,7 @@
     loading: false,
     downloadFrame: null,
     settings: null,
+    workDir: '',
     storage: null,
     pendingCleanup: null,
     startupChecked: false,
@@ -527,7 +542,11 @@
     var text = $('bannerText')
     var bar = $('bannerBar')
     var action = $('bannerAction')
+    var secondary = $('bannerSecondary')
+    state.workDir = status.workDir || state.workDir
     action.classList.add('hidden')
+    secondary.classList.add('hidden')
+    secondary.onclick = null
     banner.classList.remove('error')
 
     if (build.state === 'running') {
@@ -577,15 +596,93 @@
     if (indexedAccount && currentAccount && indexedAccount !== currentAccount) {
       banner.classList.remove('hidden')
       banner.classList.add('error')
-      text.textContent = '索引属于账号 ' + indexedAccount + '，当前 QQ 账号是 ' + currentAccount +
-        '，需要重新同步（不会改动 QQ 数据）。'
-      action.textContent = '重新同步'
+      var accounts = (status.index && status.index.accounts) || []
+      var hasCache = accounts.some(function (item) {
+        return !item.current && item.account === currentAccount
+      })
+      text.textContent = hasCache
+        ? '索引属于账号 ' + indexedAccount + '，当前 QQ 账号是 ' + currentAccount +
+          '。该账号的索引已缓存，可直接切换，不需要重建（不会改动 QQ 数据）。'
+        : '索引属于账号 ' + indexedAccount + '，当前 QQ 账号是 ' + currentAccount +
+          '，需要重新同步（不会改动 QQ 数据）。'
+      action.textContent = hasCache ? '切换到该账号的索引' : '重新同步'
       action.classList.remove('hidden')
-      action.onclick = function () { startBuild(true) }
+      action.onclick = hasCache
+        ? function () { selectAccountIndex(currentAccount) }
+        : function () { startBuild(true) }
+      return
+    }
+    if (status.workDirLegacy) {
+      banner.classList.remove('hidden')
+      text.textContent = '工作目录在临时盘（' + (status.workDir || '临时目录') +
+        '），重启或清理临时文件后密钥和索引可能丢失。建议迁移到持久目录。'
+      action.textContent = '迁移到持久目录'
+      action.classList.remove('hidden')
+      action.onclick = migrateWorkDir
+      secondary.textContent = '继续使用'
+      secondary.classList.remove('hidden')
+      secondary.onclick = keepLegacyWorkDir
       return
     }
     banner.classList.add('hidden')
     action.onclick = null
+  }
+
+  /** Switch to an account whose index is parked in workDir (no rebuild). */
+  function selectAccountIndex(account) {
+    var action = $('bannerAction')
+    action.disabled = true
+    api('/api/index/select', { method: 'POST', body: { account: account } }).then(function (result) {
+      action.disabled = false
+      if (!result.switched && !result.current) {
+        toast(result.error || '没有可用的缓存索引，需要重新同步。')
+        return
+      }
+      toast('已切换到账号 ' + account + ' 的索引')
+      state.sessions = []
+      state.chatId = ''
+      state.chatName = ''
+      state.autoLoaded = false
+      refreshStatus(false)
+    }).catch(function (error) {
+      action.disabled = false
+      toast('切换失败：' + error.message)
+    })
+  }
+
+  /** Move key/index/etc. out of the temp directory into the persistent one. */
+  function migrateWorkDir() {
+    if (!confirm('把密钥、索引等迁移到持久目录？大索引可能需要几十秒，期间请不要关闭网页。')) return
+    var action = $('bannerAction')
+    action.disabled = true
+    $('bannerText').textContent = '正在迁移工作目录…'
+    api('/api/workdir/migrate', { method: 'POST' }).then(function (result) {
+      action.disabled = false
+      toast('已迁移 ' + result.copied.length + ' 项到 ' + result.workDir)
+      state.autoLoaded = false
+      loadSettings()
+      return refreshStatus(false)
+    }).catch(function (error) {
+      action.disabled = false
+      toast('迁移失败（旧目录未改动）：' + error.message)
+      refreshStatus(false)
+    })
+  }
+
+  /** Keep the old temp directory by writing it as an explicit setting. */
+  function keepLegacyWorkDir() {
+    if (!state.workDir) {
+      toast('暂时读不到工作目录，请稍后再试')
+      return
+    }
+    api('/api/settings', {
+      method: 'PUT',
+      body: { workDir: state.workDir, legacyWorkDirDismissed: true }
+    }).then(function (result) {
+      state.settings = result
+      toast('已保留当前工作目录，之后不再提示迁移')
+      refreshStatus(false)
+    }).catch(function (error) { toast('保存失败：' + error.message) })
   }
 
   function scheduleBuildPoll() {
@@ -1258,6 +1355,8 @@
       $('setPythonPath').value = s.pythonPath || ''
       $('setTencentRoot').value = s.tencentRoot || ''
       $('setAccount').value = s.account || ''
+      $('setKeepIndexes').value = String(s.keepAccountIndexes)
+      $('setSearchIndex').value = s.searchIndex || 'fts'
       $('setPythonPath').placeholder = payload.defaults.python || ''
       $('setWorkDir').placeholder = payload.defaults.workDir || ''
       $('setTencentRoot').placeholder = payload.defaults.tencentRoot || '自动识别'
@@ -1295,13 +1394,20 @@
       toast('端口必须是 0~65535 的整数')
       return
     }
+    var keep = Number($('setKeepIndexes').value)
+    if (!Number.isInteger(keep) || keep < 0 || keep > 5) {
+      toast('保留账号索引数必须是 0~5 的整数')
+      return
+    }
     var patch = {
       webPort: port,
       workDir: $('setWorkDir').value.trim(),
       installer: $('setInstaller').value,
       pythonPath: $('setPythonPath').value.trim(),
       tencentRoot: $('setTencentRoot').value.trim(),
-      account: $('setAccount').value.trim()
+      account: $('setAccount').value.trim(),
+      keepAccountIndexes: keep,
+      searchIndex: $('setSearchIndex').value
     }
     api('/api/settings', { method: 'PUT', body: patch }).then(function (result) {
       state.settings = result
@@ -1348,10 +1454,13 @@
       payload.items.forEach(function (item) {
         var row = document.createElement('label')
         row.className = 'storage-row'
+        var accounts = (item.files || []).map(function (file) { return file.account })
+          .filter(function (value, index, list) { return value && list.indexOf(value) === index })
+        var detail = item.detail + (accounts.length ? '（账号 ' + accounts.join('、') + '）' : '')
         row.innerHTML =
           '<input type="checkbox" value="' + esc(item.id) + '">' +
           '<span class="s-main"><strong>' + esc(item.label) + '</strong>' +
-          '<small>' + esc(item.detail) + '</small></span>' +
+          '<small>' + esc(detail) + '</small></span>' +
           '<span class="s-size">' + bytes(item.bytes) + '</span>'
         host.appendChild(row)
       })

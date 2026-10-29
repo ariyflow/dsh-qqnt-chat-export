@@ -6,7 +6,7 @@
  * it outside `workDir` means changing the work directory does not strand the
  * settings file.
  */
-import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -15,11 +15,18 @@ export const DEFAULT_WEB_HOST = '127.0.0.1'
 export const SETTINGS_KEYS = [
   'pythonPath', 'workDir', 'tencentRoot', 'account', 'webPort',
   'installer', 'uvPath', 'pythonVersion',
+  'keepAccountIndexes', 'searchIndex', 'legacyWorkDirDismissed',
 ]
 /** `auto` prefers uv when it is installed and falls back to venv + pip. */
 export const INSTALLERS = ['auto', 'uv', 'pip']
 /** Python version uv should fetch for the private environment. */
 export const DEFAULT_PYTHON_VERSION = '3.12'
+/** How many other accounts' indexes stay cached next to `index.sqlite`. */
+export const DEFAULT_KEEP_ACCOUNT_INDEXES = 2
+export const MAX_KEEP_ACCOUNT_INDEXES = 5
+/** `fts` uses the trigram full-text index; `like` saves disk and scans. */
+export const SEARCH_INDEXES = ['fts', 'like']
+export const DEFAULT_SEARCH_INDEX = 'fts'
 const APP_DIR = 'dsh-qqnt-chat-export'
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
 
@@ -30,8 +37,39 @@ export function expandHome(value) {
   return value
 }
 
+/**
+ * The permanent default. The system temp directory was the 0.6 default, but on
+ * Linux /tmp is often tmpfs: a reboot silently dropped the key and the index.
+ */
+export function persistentWorkDir() {
+  if (process.platform === 'win32') {
+    const base = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local')
+    return path.join(base, APP_DIR, 'work')
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', APP_DIR, 'work')
+  }
+  const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share')
+  return path.join(base, APP_DIR, 'work')
+}
+
 export function defaultWorkDir() {
+  return persistentWorkDir()
+}
+
+/** The pre-0.7 default, kept so an upgrade can continue using its data. */
+export function legacyWorkDir() {
   return path.join(os.tmpdir(), 'qqnt-chat-export')
+}
+
+/** Whether a directory holds data this bundle wrote (not an empty dir). */
+export function looksLikeWorkDir(dir) {
+  try {
+    return ['key.txt', 'index.sqlite', 'nt_msg.db']
+      .some((name) => existsSync(path.join(dir, name)))
+  } catch {
+    return false
+  }
 }
 
 export function defaultPython() {
@@ -104,6 +142,38 @@ export function resolveSettings(config, overrides = {}) {
   const uvPathRaw = str(raw.uvPath)
   const versionRaw = str(raw.pythonVersion)
   const pythonVersion = /^3\.\d{1,2}$/.test(versionRaw) ? versionRaw : DEFAULT_PYTHON_VERSION
+  // `Number` rather than `parseInt` so "2x" and 2.5 are rejected, and a
+  // hand-edited null/"" falls back to the default instead of 0.
+  const keepRaw = raw.keepAccountIndexes === '' || raw.keepAccountIndexes == null
+    ? Number.NaN
+    : Number(raw.keepAccountIndexes)
+  const keepAccountIndexes = Number.isInteger(keepRaw) && keepRaw >= 0 && keepRaw <= MAX_KEEP_ACCOUNT_INDEXES
+    ? keepRaw
+    : DEFAULT_KEEP_ACCOUNT_INDEXES
+  const searchRaw = str(raw.searchIndex)
+  const searchIndex = SEARCH_INDEXES.includes(searchRaw) ? searchRaw : DEFAULT_SEARCH_INDEX
+
+  // Explicit configuration wins. Otherwise an upgrade that still has data in
+  // the old temp directory keeps using it (flagged for the migration banner);
+  // a fresh install gets the persistent default.
+  // Older versions saved the resolved temp path into settings.json on every
+  // save, so an explicit `workDir` equal to the old default still needs the
+  // migration hint - unless the user already chose "keep using it".
+  const legacyDismissed = raw.legacyWorkDirDismissed === true
+  let workDir = workDirRaw ? path.resolve(expandHome(workDirRaw)) : ''
+  let workDirLegacy = false
+  if (workDir === '') {
+    const persistent = persistentWorkDir()
+    const legacy = legacyWorkDir()
+    if (!existsSync(persistent) && looksLikeWorkDir(legacy)) {
+      workDir = legacy
+      workDirLegacy = !legacyDismissed
+    } else {
+      workDir = persistent
+    }
+  } else {
+    workDirLegacy = !legacyDismissed && path.resolve(workDir) === path.resolve(legacyWorkDir())
+  }
 
   return {
     python: resolvePython(pythonPath),
@@ -111,11 +181,14 @@ export function resolveSettings(config, overrides = {}) {
     uv: uvPathRaw ? resolvePython(uvPathRaw) : 'uv',
     installer,
     pythonVersion,
-    workDir: workDirRaw ? path.resolve(expandHome(workDirRaw)) : defaultWorkDir(),
+    workDir,
+    workDirLegacy,
     tencentRoot: tencentRootRaw ? path.resolve(expandHome(tencentRootRaw)) : '',
     account: str(raw.account),
     webPort: Number.isFinite(port) && port >= 0 ? port : DEFAULT_WEB_PORT,
     webHost: LOOPBACK.has(host) ? bindHost : DEFAULT_WEB_HOST,
+    keepAccountIndexes,
+    searchIndex,
   }
 }
 
@@ -209,6 +282,28 @@ export function validatePatch(patch) {
     }
     out.webPort = port
   }
+  if (Object.prototype.hasOwnProperty.call(patch, 'keepAccountIndexes')) {
+    const keep = Number(patch.keepAccountIndexes)
+    if (!Number.isInteger(keep) || keep < 0 || keep > MAX_KEEP_ACCOUNT_INDEXES) {
+      throw Object.assign(
+        new Error(`保留账号索引数必须是 0~${MAX_KEEP_ACCOUNT_INDEXES} 的整数`), { status: 400 })
+    }
+    out.keepAccountIndexes = keep
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'searchIndex')) {
+    const value = String(patch.searchIndex).trim()
+    if (!SEARCH_INDEXES.includes(value)) {
+      throw Object.assign(
+        new Error(`searchIndex 只能是 ${SEARCH_INDEXES.join(' / ')}`), { status: 400 })
+    }
+    out.searchIndex = value
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'legacyWorkDirDismissed')) {
+    if (typeof patch.legacyWorkDirDismissed !== 'boolean') {
+      throw Object.assign(new Error('legacyWorkDirDismissed 必须是布尔值'), { status: 400 })
+    }
+    out.legacyWorkDirDismissed = patch.legacyWorkDirDismissed
+  }
   return out
 }
 
@@ -226,6 +321,10 @@ export function publicSettings(settings, defaults, { url = '', file = settingsFi
       installer: settings.installer,
       uv: settings.uv,
       pythonVersion: settings.pythonVersion,
+      keepAccountIndexes: settings.keepAccountIndexes,
+      searchIndex: settings.searchIndex,
+      workDirLegacy: settings.workDirLegacy === true,
+      legacyWorkDir: legacyWorkDir(),
     },
     defaults: {
       pythonPath: defaults.pythonPath,
@@ -238,6 +337,9 @@ export function publicSettings(settings, defaults, { url = '', file = settingsFi
       installer: defaults.installer,
       uv: defaults.uv,
       pythonVersion: defaults.pythonVersion,
+      keepAccountIndexes: defaults.keepAccountIndexes,
+      searchIndex: defaults.searchIndex,
+      workDirLegacy: defaults.workDirLegacy === true,
     },
     file,
     url,

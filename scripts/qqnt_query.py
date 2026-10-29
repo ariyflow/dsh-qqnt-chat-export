@@ -27,6 +27,7 @@ import contextlib
 import datetime
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -82,6 +83,14 @@ CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT);
 FTS_DDL = ("CREATE VIRTUAL TABLE message_fts USING fts5("
            "text, content='', tokenize='trigram')")
 MIN_FTS_CHARS = 3              # a trigram cannot answer a shorter query
+
+# Other accounts' indexes parked next to `index.sqlite`. Only characters that
+# are safe on every filesystem survive `safe_account()`; Linux can report an
+# account as an opaque hash, which is fine as a file name once filtered.
+CACHE_RE = re.compile(r'^index\.([0-9A-Za-z_-]+)\.sqlite$')
+DEFAULT_KEEP_ACCOUNTS = 2
+MAX_KEEP_ACCOUNTS = 5
+SIDECARS = ('-wal', '-shm')
 
 
 # --------------------------------------------------------------------------
@@ -179,6 +188,174 @@ def index_counts(path):
 
 
 # --------------------------------------------------------------------------
+# 账号索引缓存
+# --------------------------------------------------------------------------
+def safe_account(uin):
+    """A file-name-safe account name; empty/garbage input becomes `unknown`."""
+    cleaned = re.sub(r'[^0-9A-Za-z_-]', '_', str(uin or '')).strip('_-')
+    return cleaned or 'unknown'
+
+
+def cached_index(p, uin):
+    return os.path.join(p['work'], 'index.%s.sqlite' % safe_account(uin))
+
+
+def read_meta(path):
+    """The meta table of an index, or None when it is missing/unreadable."""
+    try:
+        conn = sqlite3.connect(readonly_uri(path), uri=True)
+        try:
+            return dict(conn.execute('SELECT k, v FROM meta').fetchall())
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        return None
+
+
+def current_account(p):
+    """Which account `index.sqlite` holds; '' when absent or unreadable."""
+    if not os.path.exists(p['index']):
+        return ''
+    meta = read_meta(p['index'])
+    return str((meta or {}).get('account') or '')
+
+
+def _remove_db(path):
+    for suffix in ('',) + SIDECARS:
+        try:
+            os.remove(path + suffix)
+        except OSError:
+            pass
+
+
+def _move_db(src, dst):
+    """Move a database and its sidecars; the main file goes last so an
+    interrupted move never leaves a readable file pointing at missing WAL."""
+    for suffix in SIDECARS:
+        try:
+            os.replace(src + suffix, dst + suffix)
+        except OSError:
+            pass
+    os.replace(src, dst)
+
+
+def park_current(p, keep):
+    """Move `index.sqlite` into the cache; return the account it held.
+
+    `keep == 0` means "current only", so the old index is deleted instead of
+    parked. An index without a readable account cannot be named; it is left
+    alone and `''` is returned.
+    """
+    if not os.path.exists(p['index']):
+        return ''
+    account = current_account(p)
+    if not account:
+        return ''
+    if int(keep) <= 0:
+        _remove_db(p['index'])
+        return account
+    target = cached_index(p, account)
+    _move_db(p['index'], target)
+    try:
+        os.utime(target, None)      # LRU marker: the cache was just refreshed
+    except OSError:
+        pass
+    return account
+
+
+def restore_cached(p, uin, keep):
+    """Switch `index.sqlite` to a parked index for `uin`, if there is one."""
+    account = str(uin or '')
+    target = cached_index(p, account)
+    if current_account(p) == account:
+        # Already live: never park or move anything (a repeated build on the
+        # same account must stay incremental).
+        return {'switched': False, 'account': account,
+                'cached': os.path.exists(target), 'current': True}
+    if not os.path.exists(target):
+        return {'switched': False, 'account': account, 'cached': False, 'current': False}
+    meta = read_meta(target)
+    if meta is None or str(meta.get('version') or '') != INDEX_VERSION:
+        # A torn or pre-0.7 cache cannot be trusted. Drop it, keep the current
+        # index untouched, and let the caller fall back to a full rebuild.
+        _remove_db(target)
+        return {'switched': False, 'account': account, 'cached': False, 'current': False,
+                'error': '缓存索引已损坏或版本过旧，已删除（将重建）'}
+    parked = park_current(p, keep)
+    try:
+        _move_db(target, p['index'])
+    except OSError as exc:
+        # Put the old account's index back so index.sqlite is never missing.
+        back = cached_index(p, parked) if parked else ''
+        if back and os.path.exists(back) and not os.path.exists(p['index']):
+            try:
+                _move_db(back, p['index'])
+            except OSError:
+                pass
+        return {'switched': False, 'account': account, 'cached': True, 'current': False,
+                'error': '切换索引失败（%s）：可能被其它程序占用，先关闭查询窗口再试。' % exc}
+    return {'switched': True, 'account': account, 'cached': True, 'current': False}
+
+
+def prune_cached(p, keep):
+    """Keep the `keep` most recently used caches; return what was deleted."""
+    try:
+        names = os.listdir(p['work'])
+    except OSError:
+        return []
+    caches = []
+    for name in names:
+        match = CACHE_RE.match(name)
+        if not match:
+            continue
+        path = os.path.join(p['work'], name)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        caches.append({'account': match.group(1), 'path': path,
+                       'size': st.st_size, 'mtime': int(st.st_mtime)})
+    caches.sort(key=lambda item: item['mtime'], reverse=True)
+    removed = []
+    for item in caches[max(0, int(keep)):]:
+        _remove_db(item['path'])
+        removed.append(item)
+    return removed
+
+
+def index_accounts(p):
+    """Current index plus parked caches, for `status` and the storage page.
+
+    Caches are described from the file name and `stat()` only — opening every
+    parked index would make `status` scale with the cache count.
+    """
+    out = []
+    if os.path.exists(p['index']):
+        try:
+            st = os.stat(p['index'])
+            out.append({'account': current_account(p), 'path': p['index'],
+                        'size': st.st_size, 'mtime': int(st.st_mtime), 'current': True})
+        except OSError:
+            pass
+    try:
+        names = os.listdir(p['work'])
+    except OSError:
+        names = []
+    for name in names:
+        match = CACHE_RE.match(name)
+        if not match:
+            continue
+        path = os.path.join(p['work'], name)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        out.append({'account': match.group(1), 'path': path, 'size': st.st_size,
+                    'mtime': int(st.st_mtime), 'current': False})
+    return out
+
+
+# --------------------------------------------------------------------------
 # 名称表
 # --------------------------------------------------------------------------
 def load_names(p, key):
@@ -267,23 +444,30 @@ def start_heartbeat(lock, interval=60):
     return stop
 
 
-def cmd_build(p, root, account, refresh):
+def release_lock(lock):
+    """Remove the build lock only if this process still owns it."""
+    if not lock:
+        return
+    # Another process may have taken over a lock we could not refresh;
+    # deleting it unconditionally would break that build.
+    try:
+        with open(lock, encoding='ascii') as fh:
+            owned = fh.read().strip() == str(os.getpid())
+        if owned:
+            os.remove(lock)
+    except OSError:
+        pass
+
+
+def cmd_build(p, root, account, refresh, keep=DEFAULT_KEEP_ACCOUNTS, search='fts'):
     q.ensure_workdir(p['work'])
     lock = acquire_lock(p)
     stop_heartbeat = start_heartbeat(lock)
     try:
-        run_build(p, root, account, refresh, lock)
+        run_build(p, root, account, refresh, lock, keep, search)
     finally:
         stop_heartbeat.set()
-        # Another process may have taken over a lock we could not refresh;
-        # deleting it unconditionally would break that build.
-        try:
-            with open(lock, encoding='ascii') as fh:
-                owned = fh.read().strip() == str(os.getpid())
-            if owned:
-                os.remove(lock)
-        except OSError:
-            pass
+        release_lock(lock)
 
 
 def require_build_prerequisites(p):
@@ -322,7 +506,7 @@ def index_snapshot(path):
         return None
 
 
-def plan_incremental(p, src, uin, source_counts):
+def plan_incremental(p, src, uin, source_counts, search='fts'):
     """Append-only sync, or None to request a full rebuild.
 
     Only rows above the stored msg_id watermark are read. The per-kind count
@@ -336,6 +520,9 @@ def plan_incremental(p, src, uin, source_counts):
     if str(snap['meta'].get('account') or '') != str(uin):
         return None
     if str(snap['meta'].get('version') or '') != INDEX_VERSION:
+        return None
+    # Changing the keyword strategy cannot be done by appending rows.
+    if str(snap['meta'].get('search') or ('fts' if snap['meta'].get('fts') == '1' else 'like')) != search:
         return None
     new_counts, total_new = {}, 0
     for kind, table in ((GROUP_KIND, 'group_msg_table'), (PRIVATE_KIND, 'c2c_msg_table')):
@@ -353,7 +540,9 @@ def plan_incremental(p, src, uin, source_counts):
     }
 
 
-def run_build(p, root, account, refresh, lock=None):
+def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, search='fts'):
+    keep = clamp_keep(keep)
+    search = 'like' if str(search).strip().lower() == 'like' else 'fts'
     started = int(time.time())
     state = {'state': 'running', 'mode': 'full', 'processed': 0, 'total': 0,
              'startedAt': started, 'finishedAt': 0, 'error': '',
@@ -373,11 +562,28 @@ def run_build(p, root, account, refresh, lock=None):
         state['account'] = uin
         report()
 
-        # Resolve the key before copying a ~1 GB database: a key stamped for
-        # another account should fail in milliseconds, not after a long copy.
+        # Resolve the key first: a key stamped for another account should fail
+        # in milliseconds, before the index is switched or a ~1 GB database is
+        # copied.
         key = read_key(p, uin)
+
+        # Switching back to an account with a parked index turns the rebuild
+        # below into an incremental append. Parking the previous account's
+        # index first also keeps it as a cache instead of overwriting it.
+        previous = current_account(p)
+        restored = restore_cached(p, uin, keep)
+        if restored.get('error'):
+            print('warn: %s' % restored['error'], file=sys.stderr)
+        if restored.get('switched'):
+            report(step='载入缓存索引（%s）' % uin)
+        elif previous not in ('', str(uin)):
+            park_current(p, keep)
+        switched = bool(restored.get('switched')) or previous not in ('', str(uin))
+
         src_msg = os.path.join(dbdir, 'nt_msg.db')
-        if refresh or not os.path.exists(p['db']):
+        # The shared copy belongs to whichever account was built last, so a
+        # switch (including a restored cache) must refresh it.
+        if refresh or switched or not os.path.exists(p['db']):
             report(step='复制并剥离数据库副本')
             copy_db(src_msg, p['db'])
         for name, slot in (('group_info.db', 'group'), ('profile_info.db', 'profile')):
@@ -394,8 +600,8 @@ def run_build(p, root, account, refresh, lock=None):
         source_total = sum(source_counts.values())
 
         plan = None
-        if refresh and os.path.exists(p['index']):
-            plan = plan_incremental(p, src, uin, source_counts)
+        if (refresh or switched) and os.path.exists(p['index']):
+            plan = plan_incremental(p, src, uin, source_counts, search)
         mode = 'incremental' if plan else 'full'
         if plan and plan['total_new'] == 0:
             # Nothing new: keep the existing index, only refresh its builtAt.
@@ -410,6 +616,7 @@ def run_build(p, root, account, refresh, lock=None):
             except sqlite3.Error:
                 pass
             src.close()
+            prune_cached(p, keep)
             write_status(p, {
                 'state': 'done', 'mode': 'incremental', 'processed': 0,
                 'total': plan['new_total'],
@@ -436,7 +643,7 @@ def run_build(p, root, account, refresh, lock=None):
         idx.execute('PRAGMA synchronous=OFF')
         if not plan:
             idx.executescript(SCHEMA)
-            fts = create_fts(idx)
+            fts = create_fts(idx) if search == 'fts' else False
         else:
             # A copied index keeps its own keyword table; an index built on a
             # SQLite without FTS5 simply has none.
@@ -533,6 +740,7 @@ def run_build(p, root, account, refresh, lock=None):
                 'datadir': datadir, 'total': str(total_after),
                 'chats': str(idx.execute('SELECT count(*) FROM chats').fetchone()[0]),
                 'fts': '1' if fts else '0',
+                'search': search,
                 'version': INDEX_VERSION}
         idx.executemany('INSERT OR REPLACE INTO meta VALUES (?,?)', list(meta.items()))
         idx.commit()
@@ -545,6 +753,7 @@ def run_build(p, root, account, refresh, lock=None):
             except OSError:
                 pass
         os.replace(tmp, p['index'])
+        prune_cached(p, keep)
 
         write_status(p, {
             'state': 'done', 'mode': mode, 'processed': processed,
@@ -909,10 +1118,34 @@ def cmd_status(p, root=None, account=None):
         'work': p['work'],
         'account': str(current or ''),
         'db': file_info(p['db']),
-        'index': dict(file_info(p['index']), **counts),
+        'index': dict(file_info(p['index']), accounts=index_accounts(p), **counts),
         'build': build,
         'key': os.path.exists(p['key']),
     }, ensure_ascii=False))
+
+
+def clamp_keep(value):
+    try:
+        keep = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_KEEP_ACCOUNTS
+    return max(0, min(MAX_KEEP_ACCOUNTS, keep))
+
+
+def cmd_select(p, uin, keep=DEFAULT_KEEP_ACCOUNTS):
+    """Switch `index.sqlite` to a parked index; never rebuilds anything."""
+    account = str(uin or '').strip()
+    if not account:
+        raise BadInput('缺少 account 参数')
+    q.ensure_workdir(p['work'])
+    lock = acquire_lock(p)
+    try:
+        keep = clamp_keep(keep)
+        result = restore_cached(p, account, keep)
+        result['pruned'] = prune_cached(p, keep)
+        print(json.dumps(result, ensure_ascii=False))
+    finally:
+        release_lock(lock)
 
 
 # --------------------------------------------------------------------------
@@ -938,6 +1171,17 @@ def main(argv=None):
     s.add_argument('--json', default='{}')
     s = sub.add_parser('build')
     s.add_argument('--refresh', action='store_true')
+    s.add_argument('--keep', type=int, default=DEFAULT_KEEP_ACCOUNTS,
+                   help='how many other accounts\' indexes to cache (0~%d)'
+                        % MAX_KEEP_ACCOUNTS)
+    s.add_argument('--search', choices=('fts', 'like'), default='fts',
+                   help='keyword index: fts (trigram) or like (no index)')
+    s = sub.add_parser('select')
+    # SUPPRESS keeps a global `--account` that appeared before `select`; a
+    # plain default=None would overwrite it with None.
+    s.add_argument('--account', default=argparse.SUPPRESS,
+                   help='账号；缺省用 --account 全局参数')
+    s.add_argument('--keep', type=int, default=DEFAULT_KEEP_ACCOUNTS)
 
     args = parser.parse_args(argv)
     p = paths(args.work)
@@ -947,7 +1191,9 @@ def main(argv=None):
 
     try:
         if args.cmd == 'build':
-            cmd_build(p, root, args.account, args.refresh)
+            cmd_build(p, root, args.account, args.refresh, clamp_keep(args.keep), args.search)
+        elif args.cmd == 'select':
+            cmd_select(p, args.account, args.keep)
         elif args.cmd == 'status':
             cmd_status(p, root, args.account)
         elif args.cmd == 'sessions':

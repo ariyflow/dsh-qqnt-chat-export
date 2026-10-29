@@ -8,13 +8,15 @@ import test from 'node:test'
 import {
   clearOverrides,
   DEFAULT_WEB_PORT,
+  defaultWorkDir,
   expandHome,
+  legacyWorkDir,
   loadOverrides,
   resolveSettings,
   saveOverrides,
   validatePatch,
 } from '../settings.js'
-import { cleanupStorage, storageSnapshot } from '../storage.js'
+import { cleanupStorage, migrateWorkDir, removeWorkDirEntries, storageSnapshot } from '../storage.js'
 import { startWebServer } from '../web.js'
 
 const actionHeaders = { 'content-type': 'application/json', 'x-qqnt-action': '1' }
@@ -27,11 +29,30 @@ test('settings defaults keep the UI on loopback', () => {
   const settings = resolveSettings({}, {})
   assert.equal(settings.webPort, DEFAULT_WEB_PORT)
   assert.equal(settings.webHost, '127.0.0.1')
-  assert.ok(settings.workDir.endsWith('qqnt-chat-export'))
+  assert.ok([defaultWorkDir(), legacyWorkDir()].includes(settings.workDir))
   assert.equal(settings.python, process.platform === 'win32' ? 'python' : 'python3')
   assert.equal(settings.installer, 'auto')
   assert.equal(settings.uv, 'uv')
   assert.equal(settings.pythonVersion, '3.12')
+  assert.equal(settings.keepAccountIndexes, 2)
+  assert.equal(settings.searchIndex, 'fts')
+})
+
+test('account index retention and search mode validate', () => {
+  assert.deepEqual(
+    validatePatch({ keepAccountIndexes: 0, searchIndex: 'like' }),
+    { keepAccountIndexes: 0, searchIndex: 'like' })
+  assert.deepEqual(validatePatch({ keepAccountIndexes: '3' }), { keepAccountIndexes: 3 })
+  assert.throws(() => validatePatch({ keepAccountIndexes: 6 }), /0~5/)
+  assert.throws(() => validatePatch({ keepAccountIndexes: -1 }), /0~5/)
+  assert.throws(() => validatePatch({ keepAccountIndexes: 1.5 }), /0~5/)
+  assert.throws(() => validatePatch({ searchIndex: 'prefix' }), /searchIndex/)
+  assert.equal(resolveSettings({}, { keepAccountIndexes: 4 }).keepAccountIndexes, 4)
+  assert.equal(resolveSettings({}, { searchIndex: 'like' }).searchIndex, 'like')
+  // Hand-edited garbage falls back to the defaults rather than 0.
+  assert.equal(resolveSettings({}, { keepAccountIndexes: '2x' }).keepAccountIndexes, 2)
+  assert.equal(resolveSettings({}, { keepAccountIndexes: -3 }).keepAccountIndexes, 2)
+  assert.equal(resolveSettings({}, { searchIndex: 'nope' }).searchIndex, 'fts')
 })
 
 test('uv install settings validate like the other fields', () => {
@@ -44,6 +65,102 @@ test('uv install settings validate like the other fields', () => {
   assert.deepEqual(resolveSettings({}, { installer: 'pip' }).installer, 'pip')
   // An unknown value from a hand-edited file falls back to auto.
   assert.deepEqual(resolveSettings({}, { installer: 'nope' }).installer, 'auto')
+})
+
+test('an upgraded install keeps the legacy temp work directory', {
+  skip: process.platform === 'darwin' ? 'persistent path ignores the test env' : false,
+}, async () => {
+  const dir = await tempDir()
+  const saved = {
+    TMPDIR: process.env.TMPDIR,
+    TEMP: process.env.TEMP,
+    TMP: process.env.TMP,
+    XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+    LOCALAPPDATA: process.env.LOCALAPPDATA,
+  }
+  const restore = () => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+  try {
+    const tmp = path.join(dir, 'tmp')
+    await mkdir(tmp, { recursive: true })
+    process.env.TMPDIR = tmp
+    process.env.TEMP = tmp
+    process.env.TMP = tmp
+    process.env.XDG_DATA_HOME = path.join(dir, 'data')
+    process.env.LOCALAPPDATA = path.join(dir, 'data')
+
+    const fresh = resolveSettings({}, {})
+    assert.equal(fresh.workDir, defaultWorkDir())
+    assert.equal(fresh.workDirLegacy, false)
+
+    const legacy = legacyWorkDir()
+    await mkdir(legacy, { recursive: true })
+    await writeFile(path.join(legacy, 'key.txt'), 'secret')
+    const upgraded = resolveSettings({}, {})
+    assert.equal(upgraded.workDir, legacy)
+    assert.equal(upgraded.workDirLegacy, true)
+
+    // An explicit setting always wins; the old temp path is still flagged so
+    // users whose settings.json already contains it see the migration hint.
+    const explicit = resolveSettings({}, { workDir: path.join(dir, 'explicit') })
+    assert.equal(explicit.workDir, path.join(dir, 'explicit'))
+    assert.equal(explicit.workDirLegacy, false)
+    assert.equal(resolveSettings({}, { workDir: legacy }).workDirLegacy, true)
+    assert.equal(resolveSettings({}, {
+      workDir: legacy, legacyWorkDirDismissed: true,
+    }).workDirLegacy, false)
+
+    assert.deepEqual(validatePatch({ legacyWorkDirDismissed: true }),
+      { legacyWorkDirDismissed: true })
+    assert.throws(() => validatePatch({ legacyWorkDirDismissed: 'yes' }), /布尔值/)
+
+    // Once the persistent directory exists it wins over the old temp one.
+    await mkdir(defaultWorkDir(), { recursive: true })
+    assert.equal(resolveSettings({}, {}).workDir, defaultWorkDir())
+  } finally {
+    restore()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('work dir migration copies first, then the caller cleans up', async () => {
+  const dir = await tempDir()
+  const from = path.join(dir, 'old')
+  const to = path.join(dir, 'new')
+  try {
+    await mkdir(path.join(from, 'exports'), { recursive: true })
+    await writeFile(path.join(from, 'key.txt'), 'secret')
+    await writeFile(path.join(from, 'index.sqlite'), 'idx')
+    await writeFile(path.join(from, 'build.lock'), '999')
+    await writeFile(path.join(from, 'exports', 'a.txt'), 'x')
+
+    const result = await migrateWorkDir(from, to)
+    assert.deepEqual(result.copied.sort(), ['exports', 'index.sqlite', 'key.txt'])
+    assert.equal(existsSync(path.join(from, 'key.txt')), true, 'source survives until commit')
+    assert.equal(existsSync(path.join(to, 'key.txt')), true)
+    assert.equal(existsSync(path.join(to, 'build.lock')), false)
+
+    // A second run must not overwrite what the target already has.
+    await writeFile(path.join(to, 'index.sqlite'), 'newer')
+    const again = await migrateWorkDir(from, to)
+    assert.ok(again.skipped.includes('index.sqlite'))
+    assert.equal(await readFile(path.join(to, 'index.sqlite'), 'utf8'), 'newer')
+
+    await removeWorkDirEntries(from, result.copied)
+    assert.equal(existsSync(path.join(from, 'key.txt')), false)
+    assert.equal(existsSync(path.join(from, 'exports')), false)
+    assert.equal(existsSync(path.join(from, 'build.lock')), true)
+
+    // Nested paths and the same path are refused instead of copying twice.
+    await assert.rejects(migrateWorkDir(to, path.join(to, 'inner')), /互相包含/)
+    await assert.rejects(migrateWorkDir(to, to), /目标位置/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('a non-loopback webHost is forced back to loopback', () => {
@@ -101,6 +218,36 @@ test('storage cleanup only removes allow-listed files', async () => {
     assert.equal(existsSync(path.join(dir, 'key.txt')), false)
     assert.equal(existsSync(path.join(dir, 'exports', 'a.txt')), false)
     assert.equal(existsSync(path.join(dir, 'keep.me')), true)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('parked account indexes are listed and removable, live index is kept', async () => {
+  const dir = await tempDir()
+  try {
+    await writeFile(path.join(dir, 'index.sqlite'), 'live')
+    await writeFile(path.join(dir, 'index.12345.sqlite'), 'cached')
+    await writeFile(path.join(dir, 'index.12345.sqlite-wal'), 'wal')
+    await writeFile(path.join(dir, 'not-index.sqlite'), 'keep')
+
+    let snapshot = storageSnapshot(dir)
+    const cache = snapshot.items.find((item) => item.id === 'indexCache')
+    assert.ok(cache)
+    assert.equal(cache.bytes, 9)
+    assert.deepEqual(cache.files.map((file) => file.account), ['12345', '12345'])
+    // The live index stays in its own category and is never part of the cache.
+    assert.ok(snapshot.items.find((item) => item.id === 'index').files
+      .every((file) => file.name === 'index.sqlite'))
+
+    const result = cleanupStorage(dir, ['indexCache'])
+    assert.equal(result.removed, 2)
+    assert.equal(existsSync(path.join(dir, 'index.sqlite')), true)
+    assert.equal(existsSync(path.join(dir, 'index.12345.sqlite')), false)
+    assert.equal(existsSync(path.join(dir, 'index.12345.sqlite-wal')), false)
+    assert.equal(existsSync(path.join(dir, 'not-index.sqlite')), true)
+    snapshot = storageSnapshot(dir)
+    assert.equal(snapshot.items.some((item) => item.id === 'indexCache'), false)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -260,6 +407,85 @@ test('status reuses the helper report while a build runs', {
     assert.equal(third.build.processed, 7)
     assert.equal(third.index.exists, false)
     assert.equal(await spawns(), 1, 'polling during a build must not spawn the helper')
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('index select validates input and reports the helper JSON', {
+  skip: process.platform === 'win32' ? 'needs python3 on PATH' : false,
+}, async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  const { server, base } = await startServer(
+    { python: 'python3', workDir: work, keepAccountIndexes: 3 }, {})
+  try {
+    let response = await fetch(`${base}/api/index/select`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ account: '12345' }),
+    })
+    assert.equal(response.status, 403)
+
+    response = await fetch(`${base}/api/index/select`, {
+      method: 'POST', headers: actionHeaders, body: JSON.stringify({ account: '../etc' }),
+    })
+    assert.equal(response.status, 400)
+
+    // A running build must not be raced by a switch.
+    await writeFile(path.join(work, 'build-status.json'), JSON.stringify({ state: 'running' }))
+    response = await fetch(`${base}/api/index/select`, {
+      method: 'POST', headers: actionHeaders, body: JSON.stringify({ account: '12345' }),
+    })
+    assert.equal(response.status, 409)
+    await rm(path.join(work, 'build-status.json'))
+
+    response = await fetch(`${base}/api/index/select`, {
+      method: 'POST', headers: actionHeaders, body: JSON.stringify({ account: '12345' }),
+    })
+    assert.equal(response.status, 200)
+    const body = await response.json()
+    assert.equal(body.account, '12345')
+    assert.equal(body.switched, false)
+    assert.equal(body.cached, false)
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('work dir migration is a guarded mutation', {
+  skip: process.platform === 'win32' ? 'needs python3 on PATH' : false,
+}, async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  let calls = 0
+  const { server, base } = await startServer(
+    { python: 'python3', workDir: work, workDirLegacy: true }, {
+      migrateWorkDir: async () => {
+        calls += 1
+        return { copied: ['key.txt'], skipped: [], from: work, to: '/persistent' }
+      },
+    })
+  try {
+    let response = await fetch(`${base}/api/workdir/migrate`, { method: 'POST' })
+    assert.equal(response.status, 403)
+    assert.equal(calls, 0)
+
+    response = await fetch(`${base}/api/workdir/migrate`, { method: 'POST', headers: actionHeaders })
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), {
+      copied: ['key.txt'], skipped: [], from: work, to: '/persistent',
+    })
+    assert.equal(calls, 1)
+
+    // The page learns about the legacy directory from /api/status.
+    const status = await (await fetch(`${base}/api/status`)).json()
+    assert.equal(status.workDirLegacy, true)
+    assert.equal(status.workDir, work)
   } finally {
     await server.close()
     await rm(dir, { recursive: true, force: true })

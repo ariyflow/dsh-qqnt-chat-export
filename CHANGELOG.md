@@ -1,5 +1,21 @@
 # 更新记录
 
+## 0.7.0
+
+- 多账号索引缓存：切换 QQ 账号时，上一个账号的 `index.sqlite` 会改名为 `index.<账号>.sqlite` 停放，切回该账号时先恢复缓存再走增量同步，不再整库重建。当前索引始终是 `index.sqlite`，查询层和导出路径完全不变；切换只是一次同目录 `os.replace`。
+- 新增设置项 `keepAccountIndexes`（`0~5`，默认 `2`）：保留几份其它账号的索引，按文件 mtime 做 LRU，构建结束后自动清理超出部分；`0` 等价旧行为，只保留当前账号。
+- 新增 `qqnt_query.py select --account <uin> --keep <n>`：不停机切换索引。`/api/index/select` 提供网页入口，构建/密钥/环境任务进行中返回 409；缓存损坏或版本过旧时删除缓存并保留当前索引，不会出现「两份都不是 index.sqlite」。
+- 账号不一致横幅升级：如果当前 QQ 账号的索引在缓存里，直接给「切换到该账号的索引」按钮，不再只能重新同步。
+- 默认工作目录改到持久位置：Windows `%LOCALAPPDATA%\dsh-qqnt-chat-export\work`，Linux `~/.local/share/dsh-qqnt-chat-export/work`（遵循 `XDG_DATA_HOME`），macOS `~/Library/Application Support/...`。`/tmp` 在大内存机器上常是 tmpfs，重启即丢密钥和索引。
+- 老用户兼容：显式 `workDir` 优先，但取值等于旧临时目录时同样会提示迁移（0.6 每次保存设置都会把解析后的 `/tmp` 路径写进 `settings.json`，否则多数老用户看不到提示）；否则持久目录不存在、旧目录里还有 `key.txt`/`index.sqlite`/`nt_msg.db` 之一时继续用旧目录并提示。横幅提供「迁移到持久目录」/「继续使用」，后者写入 `legacyWorkDirDismissed: true` 不再打扰。迁移先复制再改设置，成功后删除旧文件；失败保留旧目录。
+- 设置页新增「保留账号索引数」和「搜索索引」（`fts` / `like`，重建后生效）。`build --search like` 不建 `message_fts`，边库体积约降到 1/3.5；`meta.search` 记录模式，改模式会自动全量重建。
+- `status` 的 `index.accounts` 列出当前索引与各缓存账号（账号、大小、mtime、是否当前），只读文件名和 `stat()`，不会逐个打开缓存。
+- 「存储与清理」新增动态扫描的「账号索引缓存」类别：只匹配 `index.<账号>.sqlite`（连同 `-wal/-shm`），当前索引不在该类别里，误删不到。
+- 修复账号切换时解密副本不刷新：`nt_msg.db` 是各账号共用的副本，现在切换账号（含恢复缓存）会强制重新复制，避免拿上一个账号的数据做增量。
+- 构建锁释放逻辑抽成 `release_lock()`；`build`、`select` 共用同一把锁，`/api/index/build` 与 `/api/index/select` 也共用「构建中」判断。
+- 测试：新增 10 个账号缓存用例（park/restore 往返、LRU、keep=0、损坏缓存、锁冲突、全局账号参数、双账号端到端增量）和 5 个 Node 用例（缓存清理、旧目录检测、迁移复制、迁移端点、select 校验），Node 用例 23 个（含工具用例），Python 用例 33 个。
+- 版本升到 0.7.0。
+
 ## 0.6.1
 
 - 一键配置优先使用 [uv](https://docs.astral.sh/uv/)：`uv venv --python 3.12` 会下载托管 Python，绕开「系统 Python 版本不对 / 没有 wheel / 缺少 python3-venv」的问题；`uv pip install` 通常几秒装完。uv 不会被自动下载，检测不到就走原来的 `venv + pip`。

@@ -11,9 +11,13 @@
         # sqlcipher3 there (default PyPI or the Tsinghua mirror); it never
         # modifies the system Python.
         pythonPath: ''
-        # Holds key.txt, the decrypted database copies, and index.sqlite.
-        # Empty means %TEMP%\qqnt-chat-export on Windows and
-        # $TMPDIR/qqnt-chat-export (usually /tmp) on Linux.
+        # Holds key.txt, the decrypted database copies, index.sqlite, and the
+        # per-account index caches. Empty means the persistent default:
+        # %LOCALAPPDATA%\dsh-qqnt-chat-export\work on Windows,
+        # $XDG_DATA_HOME/dsh-qqnt-chat-export/work on Linux (usually
+        # ~/.local/share), and ~/Library/Application Support/... on macOS.
+        # An install upgrading from 0.6 keeps using its old temp directory
+        # until the migration banner in the web UI is answered.
         # Delete it after exporting.
         workDir: ''
         # Empty means %USERPROFILE%\Documents\Tencent Files on Windows and
@@ -36,3 +40,10 @@
         uvPath: ''
         # Python version uv fetches for the private environment.
         pythonVersion: '3.12'
+        # How many other accounts' indexes stay cached in workDir as
+        # index.<uin>.sqlite (0~5). Switching back to a cached account then
+        # builds incrementally instead of rebuilding from scratch.
+        keepAccountIndexes: 2
+        # fts = trigram full-text index (fast keyword search, ~3.5x disk);
+        # like = no index, keyword search scans. Rebuild for changes to apply.
+        searchIndex: fts

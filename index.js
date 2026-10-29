@@ -22,6 +22,7 @@ import {
   clearOverrides,
   defaultVenvDir,
   loadOverrides,
+  persistentWorkDir,
   publicSettings,
   resolveSettings,
   saveOverrides,
@@ -29,7 +30,7 @@ import {
   validatePatch,
   venvPython,
 } from './settings.js'
-import { buildRunning, cleanupStorage, storageSnapshot } from './storage.js'
+import { buildRunning, cleanupStorage, migrateWorkDir, removeWorkDirEntries, storageSnapshot } from './storage.js'
 import { startWebServer } from './web.js'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -839,6 +840,24 @@ export function apply(ctx, config) {
     canStartBuild: () => keyJob.state !== 'running' && setup.state !== 'running',
     updateSettings: (patch) => commitSettings({ ...overrides, ...validatePatch(patch) }),
     resetSettings: () => commitSettings({}),
+    migrateWorkDir: async () => {
+      if (keyJob.state === 'running' || setup.state === 'running') {
+        throw Object.assign(new Error('密钥提取或环境配置进行中，等它结束再迁移'), { status: 409 })
+      }
+      if (buildRunning(settings.workDir)) {
+        throw Object.assign(new Error('索引正在建立，等它结束再迁移'), { status: 409 })
+      }
+      const target = persistentWorkDir()
+      if (path.resolve(target) === path.resolve(settings.workDir)) {
+        throw Object.assign(new Error('工作目录已经在持久位置'), { status: 400 })
+      }
+      // Copy first, point the settings at the copy, and only then delete the
+      // old files: a failed settings write leaves everything where it was.
+      const result = await migrateWorkDir(settings.workDir, target)
+      await commitSettings({ ...overrides, workDir: target })
+      const removed = await removeWorkDirEntries(result.from, result.copied)
+      return { ...result, workDir: target, removed }
+    },
   }
 
 
