@@ -325,10 +325,14 @@ class IncrementalBuildTests(unittest.TestCase):
                       {'kind': 'private', 'id': 'f1'}]}))
         with zipfile.ZipFile(out) as archive:
             manifest = json.loads(archive.read('manifest.json'))
+            bodies = [name for name in archive.namelist() if name.endswith('.txt')]
+        self.assertFalse(any('g1' in name or 'f1' in name for name in bodies),
+                         'file names must not leak the chat ids')
         self.assertEqual(manifest['redacted'], 'qq')
         self.assertEqual(manifest['account'], '')
         self.assertEqual([chat['id'] for chat in manifest['chats']], ['', ''])
-        self.assertEqual([chat['name'] for chat in manifest['chats']], ['g1', 'f1'])
+        self.assertEqual([chat['name'] for chat in manifest['chats']],
+                         ['群聊1', '私聊2'])
 
     def test_redaction_rejects_an_unknown_mode(self):
         self.run_cli('build')

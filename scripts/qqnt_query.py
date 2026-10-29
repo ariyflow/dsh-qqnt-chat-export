@@ -1394,9 +1394,19 @@ class Redactor:
         return item
 
     def chat_label(self, kind, name, index=1):
-        if not self.hide_names:
-            return name
-        return ('群聊%d' if kind == GROUP_KIND else '私聊%d') % index
+        return self.chat_name(kind, name, '', index)
+
+    def chat_name(self, kind, name, chat_id='', index=1):
+        """Chat label safe for a file name / manifest under this mode."""
+        label = ('群聊%d' if kind == GROUP_KIND else '私聊%d') % index
+        if self.hide_names:
+            return label
+        if self.hide_numbers:
+            plain = str(name or '').strip()
+            if (not plain or plain == str(chat_id or '').strip()
+                    or re.fullmatch(r'(?:QQ\s*)?[0-9]+', plain)):
+                return label
+        return name
 
 
 def export_writer(conn, args, label, redactor=None, media=None):
@@ -1617,7 +1627,7 @@ def export_bundle(conn, args, out, label, chats, src=None, datadir=''):
             if scope is None:
                 kind = str(args.get('chatKind') or '')
                 chat_id = str(args.get('chatId') or '')
-                name = redactor.chat_label(kind, label, index) if kind else label
+                name = redactor.chat_name(kind, label, chat_id, index) if kind else label
                 if redactor.hide_names and not kind:
                     name = '聊天记录'
             else:
@@ -1631,7 +1641,7 @@ def export_bundle(conn, args, out, label, chats, src=None, datadir=''):
                 name = name or str(scope.get('label') or '') or chat_id
                 scope_args['chatKind'] = kind
                 scope_args['chatId'] = chat_id
-                name = redactor.chat_label(kind, name, index)
+                name = redactor.chat_name(kind, name, chat_id, index)
             entry = {'kind': kind, 'id': redactor.number(chat_id),
                      'name': name, 'rows': 0, 'file': ''}
             stem = '%03d-%s' % (index, safe_stem(name, 'chat'))
@@ -1655,11 +1665,16 @@ def export_bundle(conn, args, out, label, chats, src=None, datadir=''):
                 except OSError:
                     pass
                 skipped.append(entry)
+        manifest_label = label
+        if mode and not chats:
+            chat_kind = str(args.get('chatKind') or '')
+            manifest_label = (Redactor(mode).chat_label(chat_kind, label, 1)
+                              if chat_kind else '聊天记录')
         manifest = {
             'version': 1,
             'generatedAt': fmt_time(time.time()),
             'account': Redactor(mode).number(str(args.get('account') or '')),
-            'label': label,
+            'label': manifest_label,
             'format': fmt,
             'redacted': mode,
             'total': total,
@@ -1755,12 +1770,12 @@ def cmd_export(p, args):
                 scope_args['chatKind'] = kind
                 scope_args['chatId'] = chat_id
                 name, _qq = chat_meta(conn, kind, chat_id)
-                label = redactor.chat_label(kind, name or label, 1)
+                label = redactor.chat_name(kind, name or label, chat_id, 1)
             else:
                 kind = str(args.get('chatKind') or '')
                 chat_id = str(args.get('chatId') or '')
-                if redactor.hide_names:
-                    label = redactor.chat_label(kind, label, 1)
+                if redactor.hide_names or redactor.hide_numbers:
+                    label = redactor.chat_name(kind, label, chat_id, 1)
             datadir = (read_meta(p['index']) or {}).get('datadir', '')
             key = read_key(p, args.get('account') or None)
             src = q.open_encrypted(p['db'], key, readonly=True)

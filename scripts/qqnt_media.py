@@ -182,6 +182,12 @@ def collect(src_conn, index_conn, chat_kind, chat_id):
     return out
 
 
+def _report_name(item, redactor):
+    if redactor is not None and redactor.hide_names:
+        return ''
+    return item.get('name') or ''
+
+
 def _target_name(item, found, msg_id, order, redactor, used):
     """A stable, collision-free name inside the bundle."""
     base = os.path.basename(found['path'])
@@ -223,7 +229,7 @@ def copy_files(items_by_msg, target_dir, rel_prefix, datadir, redactor=None,
                 if len(stats['missing']) < MAX_MISSING_REPORTED:
                     stats['missing'].append({
                         'msgId': msg_id, 'kind': item['kind'],
-                        'name': item.get('name') or '',
+                        'name': _report_name(item, redactor),
                         'reason': found.get('reason') or 'missing',
                     })
                 continue
@@ -257,7 +263,7 @@ def copy_files(items_by_msg, target_dir, rel_prefix, datadir, redactor=None,
                 if len(stats['missing']) < MAX_MISSING_REPORTED:
                     stats['missing'].append({
                         'msgId': msg_id, 'kind': item['kind'],
-                        'name': item.get('name') or '', 'reason': 'copy-failed',
+                        'name': _report_name(item, redactor), 'reason': 'copy-failed',
                     })
                 continue
             budget['left'] -= size
