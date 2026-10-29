@@ -57,7 +57,7 @@ const PROMPT_ORDER = 5000
 const SYNC_FIRST_DELAY_MS = 60_000
 
 /** One-line probe: Python version, pointer width, and whether sqlcipher3 resolves. */
-const PYTHON_PROBE = "import json,struct,sys,importlib.util as u;print(json.dumps({'version':sys.version.split()[0],'bits':struct.calcsize('P')*8,'sqlcipher3':u.find_spec('sqlcipher3') is not None}))"
+const PYTHON_PROBE = "import json,struct,sys,importlib.util as u;print(json.dumps({'version':sys.version.split()[0],'bits':struct.calcsize('P')*8,'sqlcipher3':u.find_spec('sqlcipher3') is not None,'pyzipper':u.find_spec('pyzipper') is not None}))"
 
 /**
  * The user's downloads directory, following the XDG user-dirs file on Linux.
@@ -99,7 +99,7 @@ const MAX_OUTPUT_CHARS = 256 * 1024
  *
  * @returns {Promise<{code: number, output: string}>}
  */
-function run(command, argv, { signal, cwd }) {
+function run(command, argv, { signal, cwd, env } = {}) {
   if (signal?.aborted) {
     return Promise.reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
   }
@@ -107,7 +107,7 @@ function run(command, argv, { signal, cwd }) {
     const child = spawn(command, argv, {
       cwd,
       windowsHide: true,
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', ...(env || {}) },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     const lines = []
@@ -223,12 +223,13 @@ async function runCli(settings, argv, exec) {
  * `export`; failures print `{"error": ...}` and still exit non-zero, so the
  * caller decides whether a parseable error is enough.
  */
-async function runQueryJson(settings, argv, exec) {
+async function runQueryJson(settings, argv, exec, env) {
   if (!existsSync(QUERY_CLI)) throw new Error(`bundled helper is missing: ${QUERY_CLI}`)
   mkdirSync(settings.workDir, { recursive: true, mode: 0o700 })
   const result = await run(settings.python, ['-X', 'utf8', QUERY_CLI, '--work', settings.workDir, ...argv], {
     signal: exec.signal,
     cwd: settings.workDir,
+    env,
   })
   const text = result.stdout.trim()
   if (text === '') throw new Error(result.output || `查询层没有输出（exit code ${result.code}）`)
@@ -315,9 +316,11 @@ function renderReport(_args, value) {
 function renderStatus(_args, value) {
   const lines = []
   if (value.pythonVersion !== '') {
-    lines.push(`Python ${value.pythonVersion} (${value.bits}-bit); sqlcipher3 ${value.sqlcipher3 ? 'available' : 'MISSING'}`)
+    lines.push(`Python ${value.pythonVersion} (${value.bits}-bit); sqlcipher3 ${value.sqlcipher3 ? 'available' : 'MISSING'}; pyzipper ${value.pyzipper ? 'available (password ZIP)' : 'missing (password ZIP unavailable)'}`)
     if (!value.sqlcipher3) {
-      lines.push(`Install it with: ${value.pythonPath} -m pip install sqlcipher3-wheels`)
+      lines.push(`Install it with: ${value.pythonPath} -m pip install sqlcipher3-wheels pyzipper`)
+    } else if (!value.pyzipper) {
+      lines.push(`Password-protected ZIPs need: ${value.pythonPath} -m pip install pyzipper`)
     }
   }
   if (value.output !== '') lines.push(value.output)
@@ -497,6 +500,10 @@ export function exportChatTool(settings) {
           type: 'boolean',
           description: 'Inline pictures as data URIs in a single HTML file (format must be html).',
         },
+        password: {
+          type: 'string', minLength: 4, maxLength: 128,
+          description: 'Protect the resulting ZIP with AES-256 (4-128 characters). Needs pyzipper in the plugin venv; the one-click setup installs it.',
+        },
       },
     },
     output: { schema: outputSchema({ outPath: { type: 'string' } }), render: renderReport },
@@ -517,12 +524,20 @@ export function exportChatTool(settings) {
       const split = args.split === 'day' ? 'day' : ''
       const media = args.media === true || embed
       const redact = ['names', 'qq', 'all'].includes(args.redact) ? args.redact : ''
+      const password = typeof args.password === 'string' ? args.password : ''
       if (embed && format !== 'html') {
         return { ok: false, exitCode: 1, outPath: '', output: 'embed 只支持 html 格式' }
       }
-      // Media and day-splitting always arrive as one bundle; embedding stays a
-      // single shareable HTML.
-      const container = embed ? 'html' : (media || split ? 'zip' : format)
+      if (password && (password.length < 4 || password.length > 128)) {
+        return { ok: false, exitCode: 1, outPath: '', output: '密码长度需要 4~128 个字符' }
+      }
+      if (embed && password) {
+        return { ok: false, exitCode: 1, outPath: '', output: '内嵌图片不能和密码 ZIP 同时使用' }
+      }
+      // Media, day-splitting and encryption always arrive as one bundle;
+      // embedding stays a single shareable HTML.
+      const container = embed ? 'html'
+        : (media || split || password ? 'zip' : format)
       // Prefer the name the index knows; the label also names the file.
       let label = typeof args.label === 'string' ? args.label.trim() : ''
       if (label === '') {
@@ -549,7 +564,8 @@ export function exportChatTool(settings) {
       if (split) payloadArgs.split = 'day'
       if (embed) payloadArgs.embed = true
       const { code, payload } = await runQueryJson(
-        settings, ['export', '--json', JSON.stringify(payloadArgs)], exec)
+        settings, ['export', '--json', JSON.stringify(payloadArgs)], exec,
+        password ? { QQNT_EXPORT_PASSWORD: password } : undefined)
       if (code !== 0) return { ok: false, exitCode: code, outPath: '', output: payload.error || '导出失败' }
       const target = path.join(outDir, `${fileStem(label, chatId)}_${fileStamp()}.${container}`)
       try {
@@ -580,6 +596,7 @@ function statusTool(settings) {
         pythonVersion: { type: 'string' },
         bits: { type: 'integer' },
         sqlcipher3: { type: 'boolean' },
+        pyzipper: { type: 'boolean' },
       }),
       render: renderStatus,
     },
@@ -588,6 +605,7 @@ function statusTool(settings) {
       let pythonVersion = ''
       let bits = 0
       let sqlcipher3 = false
+      let pyzipper = false
       let probeError = ''
       try {
         const probe = await run(settings.python, ['-X', 'utf8', '-c', PYTHON_PROBE], { signal: exec.signal })
@@ -595,6 +613,7 @@ function statusTool(settings) {
         pythonVersion = String(info.version ?? '')
         bits = Number(info.bits ?? 0)
         sqlcipher3 = info.sqlcipher3 === true
+        pyzipper = info.pyzipper === true
       } catch (error) {
         probeError = `Environment check failed: ${error instanceof Error ? error.message : String(error)}`
       }
@@ -721,7 +740,8 @@ async function probePython(current) {
       version: String(info.version ?? ''),
       bits: Number(info.bits ?? 0),
       sqlcipher3: info.sqlcipher3 === true,
-      install: `${command} -m pip install sqlcipher3-wheels`,
+      pyzipper: info.pyzipper === true,
+      install: `${command} -m pip install sqlcipher3-wheels pyzipper`,
     }
   } catch (error) {
     return {
@@ -730,8 +750,9 @@ async function probePython(current) {
       version: '',
       bits: 0,
       sqlcipher3: false,
+      pyzipper: false,
       error: error instanceof Error ? error.message : String(error),
-      install: `${command} -m pip install sqlcipher3-wheels`,
+      install: `${command} -m pip install sqlcipher3-wheels pyzipper`,
     }
   } finally {
     clearTimeout(timer)
@@ -999,11 +1020,43 @@ function isInsideDir(parent, child) {
     }
   }
 
-  async function hasSqlcipher(command, signal) {
-    const probe = await runSetupCommand(command, ['-c', 'import sqlcipher3'], {
+  async function hasModule(command, module, signal) {
+    const probe = await runSetupCommand(command, ['-c', `import ${module}`], {
       signal, timeoutMs: 15_000,
     })
     return probe.code === 0
+  }
+
+  async function hasSqlcipher(command, signal) {
+    return hasModule(command, 'sqlcipher3', signal)
+  }
+
+  /**
+   * pyzipper is optional: only password-protected ZIPs need it. Never fail the
+   * whole setup because of it; password export reports the missing module.
+   */
+  async function installOptionalPyzipper(target, signal, indexUrl) {
+    setup.step = '安装 pyzipper（密码 ZIP，可选）'
+    setupLog('正在安装 pyzipper（密码 ZIP 需要）…')
+    const pipArgs = ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-input']
+    if (indexUrl) pipArgs.push('--index-url', indexUrl)
+    pipArgs.push('pyzipper')
+    let attempt = await runSetupCommand(target, pipArgs, { signal, timeoutMs: 5 * 60_000 })
+    if (attempt.code !== 0) {
+      const uv = await detectUv(signal)
+      if (uv.available) {
+        const uvArgs = ['pip', 'install', '--python', target]
+        if (indexUrl) uvArgs.push('--index-url', indexUrl)
+        uvArgs.push('pyzipper')
+        attempt = await runSetupCommand(uv.command, uvArgs, { signal, timeoutMs: 5 * 60_000 })
+      }
+    }
+    if (attempt.code !== 0) {
+      if (signal.aborted) throw new Error('配置已取消')
+      setupLog('pyzipper 安装失败；密码 ZIP 暂不可用，其他导出不受影响')
+    } else {
+      setupLog('pyzipper 安装完成')
+    }
   }
 
   /** Setup commands get their own timeout so a broken interpreter cannot hang the job. */
@@ -1106,7 +1159,12 @@ function isInsideDir(parent, child) {
         : '安装源：默认 PyPI')
       ensureDir(path.dirname(venvDir))
       if (existsSync(target) && await hasSqlcipher(target, signal)) {
-        setupLog('虚拟环境里已经有 sqlcipher3，直接切换')
+        setupLog('虚拟环境里已经有 sqlcipher3')
+        if (!(await hasModule(target, 'pyzipper', signal))) {
+          await installOptionalPyzipper(target, signal, indexUrl)
+        } else {
+          setupLog('pyzipper 已安装，直接切换')
+        }
       } else {
         const uv = await detectUv(signal)
         setup.uv = uv.version
@@ -1192,12 +1250,18 @@ function isInsideDir(parent, child) {
             throw new Error(`在虚拟环境里安装 sqlcipher3-wheels 失败（${sourceLabel}）；请检查网络或代理后重试，或换另一个安装源`)
           }
         }
+        await installOptionalPyzipper(target, signal, indexUrl)
       }
       setup.step = '验证'
       if (!(await hasSqlcipher(target, signal))) {
         throw new Error('虚拟环境创建成功，但 sqlcipher3 无法导入')
       }
       setupLog('sqlcipher3 验证通过，切换插件使用的 Python')
+      if (await hasModule(target, 'pyzipper', signal)) {
+        setupLog('pyzipper 验证通过，可导出密码 ZIP')
+      } else {
+        setupLog('pyzipper 未安装：密码 ZIP 不可用，其他导出不受影响')
+      }
       await commitSettings({ ...overrides, pythonPath: target })
       setup.state = 'done'
       setup.step = '完成'

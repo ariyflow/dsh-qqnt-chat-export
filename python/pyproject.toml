@@ -3,4 +3,4 @@ name = "dsh-qqnt-chat-export-env"
 version = "0.1.0"
 description = "Private Python environment for the DSH QQ chat export plugin"
 requires-python = ">=3.10,<3.15"
-dependencies = ["sqlcipher3-wheels>=0.5.7"]
+dependencies = ["sqlcipher3-wheels>=0.5.7", "pyzipper>=0.3.6"]

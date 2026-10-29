@@ -37,10 +37,11 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
 - **脱敏分享**：导出时可选「昵称打码 / QQ 号打码 / 全部」，发送者变成 `成员1…`、会话名变成 `群聊1/私聊1`，QQ 号和群号清空；正文保持原样（改动会破坏对话）；
 - **含媒体**：可选把本机已下载的图片、文件、语音、视频一起打包（ZIP 布局 `media/<会话>/…`）；缺失的媒体只记录不报错，单文件 100 MB、单次 1 GB 上限；**内嵌图片**把图片 base64 放进单个 HTML，方便直接分享（单会话、10 MB/图、200 MB/次）；
 - **按天分文件**：勾选后每个会话按日期拆成多个文件再打包成 ZIP，`manifest.json` 列出每天的文件和条数；可以和脱敏、媒体一起用；
+- **密码 ZIP**：在导出区填一个 4~128 位的密码，导出包会用 AES-256 加密（需要 `pyzipper`，一键安装会装）；密码只经子进程环境变量传递，不会出现在命令行、任务列表或日志里。ZIP 内的文件名不加密，内容加密；打开请用 7-Zip / WinRAR / Bandizip / macOS 归档工具，**Windows 资源管理器自带的解压不支持 AES**；
 - 「从 QQ 同步」复制最新数据库后**增量追新消息**；消息总数对不上（删除/回溯/换账号）时自动全量重建；
-- **启动提示**：网页打开后显示一次启动横幅，告知默认访问地址，并检查 Python / sqlcipher3 / 密钥；缺依赖时可一键创建独立虚拟环境并安装（默认源或清华镜像）；
+- **启动提示**：网页打开后显示一次启动横幅，告知默认访问地址，并检查 Python / sqlcipher3 / pyzipper / 密钥；缺依赖时可一键创建独立虚拟环境并安装（默认源或清华镜像）；
 - **密钥提取**：启动横幅和设置页都有「提取密钥」按钮，网页内显示扫描进度、日志和结果；已配置时可重新提取；点击前后都会提示查找密钥耗时较长（通常 1~3 分钟），请耐心等待；
-- **设置**：端口、工作目录 / 索引位置、环境安装方式（自动 / uv / pip）、Python 解释器、QQ 数据根目录、QQ 号、保留账号索引数、搜索索引方式，以及 Python/uv/sqlcipher3 体检；
+- **设置**：端口、工作目录 / 索引位置、环境安装方式（自动 / uv / pip）、Python 解释器、QQ 数据根目录、QQ 号、保留账号索引数、搜索索引方式，以及 Python/uv/sqlcipher3/pyzipper 体检；
 - **多账号索引缓存**：切换 QQ 账号时把上一个账号的索引留在 `workDir` 里（默认保留 2 个），切回时直接增量更新，不再整库重建；
 - **存储与清理**：分类列出插件生成的明文文件及大小（含各账号的缓存索引），二次确认后删除，不碰 QQ 原始数据。
 
@@ -55,7 +56,7 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
   - Windows 数据目录：`%USERPROFILE%\Documents\Tencent Files\<QQ号>\nt_qq\`
   - Linux 数据目录：`~/.config/QQ/nt_qq_<hash>\`
     （Flatpak 为 `~/.var/app/com.qq.QQ/config/QQ/`，Snap 为 `~/snap/qq/current/.config/QQ/`）
-- 64 位 Python 3；`sqlcipher3` **装在这个插件自己的虚拟环境里** 即可。网页启动横幅提供一键配置，不需要也不建议装进系统 Python。
+- 64 位 Python 3；`sqlcipher3` **装在这个插件自己的虚拟环境里** 即可；密码 ZIP 另外需要同一环境里的 `pyzipper`（一键安装会一起装）。网页启动横幅提供一键配置，不需要也不建议装进系统 Python。
 - 可选：[uv](https://docs.astral.sh/uv/)（推荐）。装了就自动优先用它——它自带 Python 下载，能绕开系统 Python 版本不对或缺少 `python3-venv` 的问题；没装则退回 `venv + pip`。插件**不会**替你下载 uv。
 
 > Windows 与 Linux 共用同一套导出/查询脚本：Windows 走 `ctypes` + `ReadProcessMemory`，
@@ -64,7 +65,7 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
 
 **推荐**：打开网页，用启动横幅或「设置」里的「默认源安装」/「清华镜像安装」。它会在
 `~/.local/share/dsh-qqnt-chat-export/venv`（Windows 为 `%LOCALAPPDATA%\dsh-qqnt-chat-export\venv`）
-创建独立虚拟环境并安装 `sqlcipher3-wheels`，然后自动切换插件使用的解释器。
+创建独立虚拟环境并安装 `sqlcipher3-wheels`（以及可选但推荐的 `pyzipper`，用于密码 ZIP），然后自动切换插件使用的解释器。
 
 - **默认源**：直接使用默认 PyPI；
 - **清华镜像**：使用 `https://pypi.tuna.tsinghua.edu.cn/simple`，适合国内网络。
@@ -77,7 +78,7 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
 | `uv` | 只用 uv；检测不到 uv 直接报错并给出安装地址 |
 | `pip` | 只用系统 Python 的 `venv` + `pip` |
 
-走 uv 时命令是 `uv venv --python 3.12 <venv>` + `uv pip install --python <venv>/bin/python [--index-url <镜像>] sqlcipher3-wheels`。
+走 uv 时命令是 `uv venv --python 3.12 <venv>` + `uv pip install --python <venv>/bin/python [--index-url <镜像>] sqlcipher3-wheels pyzipper`。
 Python 版本由 `pythonVersion` 决定（默认 `3.12`，uv 会自动下载托管解释器），
 `python/` 目录里还提供了一份可手工复现的 `pyproject.toml` + `.python-version`。
 
@@ -86,18 +87,18 @@ Python 版本由 `pythonVersion` 决定（默认 `3.12`，uv 会自动下载托�
 ```powershell
 # Windows（默认源）
 python -m venv "$env:LOCALAPPDATA\dsh-qqnt-chat-export\venv"
-& "$env:LOCALAPPDATA\dsh-qqnt-chat-export\venv\Scripts\python.exe" -m pip install sqlcipher3-wheels
+& "$env:LOCALAPPDATA\dsh-qqnt-chat-export\venv\Scripts\python.exe" -m pip install sqlcipher3-wheels pyzipper
 # 清华镜像：
-# & "$env:LOCALAPPDATA\dsh-qqnt-chat-export\venv\Scripts\python.exe" -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple sqlcipher3-wheels
+# & "$env:LOCALAPPDATA\dsh-qqnt-chat-export\venv\Scripts\python.exe" -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple sqlcipher3-wheels pyzipper
 # 然后把网页「设置」里的 Python 解释器填成上面的 Scripts\python.exe
 ```
 
 ```bash
 # Linux（默认源）
 python3 -m venv ~/.venvs/qqnt
-~/.venvs/qqnt/bin/pip install sqlcipher3-wheels
+~/.venvs/qqnt/bin/pip install sqlcipher3-wheels pyzipper
 # 清华镜像：
-# ~/.venvs/qqnt/bin/pip install -i https://pypi.tuna.tsinghua.edu.cn/simple sqlcipher3-wheels
+# ~/.venvs/qqnt/bin/pip install -i https://pypi.tuna.tsinghua.edu.cn/simple sqlcipher3-wheels pyzipper
 # 然后把网页「设置」里的 Python 解释器填成 ~/.venvs/qqnt/bin/python
 ```
 
@@ -149,7 +150,7 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 
 **第一次**（QQ 保持登录，别关）：
 
-1. 打开网页（默认 `http://127.0.0.1:46728/`，改过端口则以实际为准）。启动横幅会显示默认访问地址，并检查 Python / sqlcipher3 / 密钥；
+1. 打开网页（默认 `http://127.0.0.1:46728/`，改过端口则以实际为准）。启动横幅会显示默认访问地址，并检查 Python / sqlcipher3 / pyzipper / 密钥；
 2. 环境缺失时点「默认源安装」或「清华镜像安装」，等待虚拟环境创建和依赖安装完成；也可以先 `qqnt_status` 看命令行体检结果；
 3. 在网页点「提取密钥」 —— **首次约 1~3 分钟，耗时较长，请耐心等待**（期间保持 QQ 登录、不要关闭 QQ）；页面会显示扫描/校验进度和日志，成功后密钥缓存在工作目录；也可以在对话里运行 `qqnt_extract_key`；
 4. 回到网页，点「建立索引」，约 1 分钟；
@@ -162,12 +163,12 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 插件启动网页服务后，页面打开时会显示一次启动横幅（按网页服务启动时间区分，关闭提示后同一次启动不再打扰）。同一个地址也会写进 DSH 的系统提示和启动日志，Agent 可以直接告诉你；
 
 - **默认访问地址**：显示当前实际访问 URL，并提供复制按钮；模型侧也会拿到同一个 URL，可直接问 agent。
-- **环境检查**：显示 Python 版本、`sqlcipher3` 是否可用。缺失时提供两个按钮：
+- **环境检查**：显示 Python 版本、`sqlcipher3` 是否可用、密码 ZIP 所需的 `pyzipper` 是否可用。缺 `sqlcipher3` 时提供两个按钮：
   - **默认源安装**：直接使用默认 PyPI；
   - **清华镜像安装**：使用 `https://pypi.tuna.tsinghua.edu.cn/simple`；
   - 两者都会在 `~/.local/share/dsh-qqnt-chat-export/venv`（Windows `%LOCALAPPDATA%\dsh-qqnt-chat-export\venv`）创建**独立虚拟环境**；
   - 优先用 uv（可下载托管 Python、安装通常几秒）；uv 不可用或失败时自动退回系统 Python 的 `venv + pip`；
-  - 只在这个虚拟环境里执行 `uv pip install` / `pip install sqlcipher3-wheels`（镜像模式加 `--index-url`），**不修改系统 Python**；
+  - 只在这个虚拟环境里执行 `uv pip install` / `pip install sqlcipher3-wheels pyzipper`（镜像模式加 `--index-url`），**不修改系统 Python**；
   - 完成后自动把设置里的 Python 解释器切过去并持久化；
   - 页面实时显示安装源、步骤、耗时和日志；已有可用虚拟环境时直接复用；一个源失败可以直接换另一个重试。
 - **密钥检查**：环境就绪且未配置时，启动横幅和设置页「数据库密钥」卡片都会显示「提取密钥」按钮：
@@ -189,7 +190,7 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 |---|---|
 | 网页端口 | 修改端口会重启网页服务，成功后需要打开新地址；新端口被占用会保留原端口和原设置。`0` 表示关闭网页，关闭后需要编辑上面的 `settings.json`（或删除它恢复默认）才能重新打开 |
 | 工作目录 / 索引位置 | `key.txt`、解密副本、`index.sqlite` 和各账号缓存索引都放在这里；换目录后需要重新建立索引。不能设在 QQ 数据目录内，否则保存会被拒绝。默认在持久目录；从 0.6 升级且旧目录还有数据时继续用旧目录，并在横幅提示迁移 |
-| Python 解释器 | 留空使用平台默认值；可填装有 `sqlcipher3` 的虚拟环境绝对路径；设置页会实时显示检测结果，「默认源安装」/「清华镜像安装」会自动创建独立虚拟环境并切换 |
+| Python 解释器 | 留空使用平台默认值；可填装有 `sqlcipher3`（密码 ZIP 还需 `pyzipper`）的虚拟环境绝对路径；设置页会实时显示检测结果，「默认源安装」/「清华镜像安装」会自动创建独立虚拟环境并切换 |
 | QQ 数据根目录 | 留空自动识别；非标准安装或迁移数据时手动指定 |
 | QQ 号 | 多账号时指定；留空选择 `nt_msg.db` 最大的账号 |
 | 保留账号索引数 | `0~5`，默认 `2`。切换账号时把上一个账号的索引改名成 `index.<账号>.sqlite` 缓存，切回时增量更新；`0` 表示只留当前索引。每个索引约占 0.2~0.4 MB / 1000 条消息（含 FTS），按最久未用淘汰 |
@@ -207,7 +208,7 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `pythonPath` | Windows `python` / Linux `python3` | 64 位 Python 3 的路径，需装 `sqlcipher3`；用虚拟环境时填 `<venv>/bin/python` 绝对路径（支持 `~`） |
+| `pythonPath` | Windows `python` / Linux `python3` | 64 位 Python 3 的路径，需装 `sqlcipher3`（密码 ZIP 另需 `pyzipper`）；用虚拟环境时填 `<venv>/bin/python` 绝对路径（支持 `~`） |
 | `workDir` | Windows `%LOCALAPPDATA%\dsh-qqnt-chat-export\work`；Linux `$XDG_DATA_HOME/dsh-qqnt-chat-export/work` | 密钥、解密副本、索引、账号索引缓存、导出临时文件。0.6 及更早默认在系统临时目录，升级后若旧目录仍有数据会继续使用并提示迁移 |
 | `tencentRoot` | Windows `%USERPROFILE%\Documents\Tencent Files`；Linux `~/.config/QQ` | QQ 数据根目录；Linux 会自动尝试 Flatpak/Snap/`Documents/Tencent Files` |
 | `account` | 最大的库 | 多账号时指定 QQ 号；Linux 识别不出 QQ 号时也可以传数据目录的哈希 |
@@ -238,9 +239,10 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 
 - `workDir` 里会出现 `key.txt`（**明文密钥**）、`nt_msg.db`（约 1 GB 的解密副本）、`index.sqlite`（**全部消息的明文副本**）。用完建议整个删掉，把 `key.txt` 给别人等于把整个 QQ 数据库给别人。Linux 上 `workDir` 会自动设为 `0700`、`key.txt` 为 `0600`，但这不能替代用完即删；网页「设置 → 存储与清理」可以按类别删除这些文件。提取密钥时不会把密钥回显到终端或日志，只写入 `key.txt`。
 - 设置文件只保存路径和端口，不含聊天内容或密钥；POSIX 上权限为 `0600`。设置页的写操作要求同源请求和自定义请求头，避免其他网页触发端口/目录修改或清理。
+- 密码 ZIP 的密码通过 `QQNT_EXPORT_PASSWORD` 环境变量交给 Python 子进程，不出现在命令行参数里（`ps` 能看到参数，看不到别的进程的环境块），任务列表和日志也不保存它；Python 读取后立即从环境里删除。加密使用 AES-256（pyzipper），压缩包内的文件**名**仍然是明文。
 - 导出目录和文件在 POSIX 上分别是 `0700` / `0600`，只允许写在 `workDir/exports` 内。CSV 里以 `=`、`+`、`-`、`@`、Tab、CR 开头的单元格会加前导单引号，避免 Excel / LibreOffice 把聊天内容当公式执行。 导出先写临时文件再原子改名，失败不会留下半截文件；Markdown 会转义 `|`、反斜杠和换行，HTML 会转义标签，SQLite 导出不会因群聊/私聊 `msg_id` 相同而丢消息。
 - `key.json` 记录密钥属于哪个 QQ 账号；切换账号后建立索引或导出会直接提示重新提取，不会拿旧账号的密钥去试新库。
-- 「默认源安装」/「清华镜像安装」会从 PyPI 或清华镜像下载 `sqlcipher3-wheels` 并安装到插件私有虚拟环境，需要网络；都不会修改系统 Python。镜像内容由清华镜像同步，若不可用可换默认源。uv 同样只写入该虚拟环境；它下载的托管 Python 落在 uv 自己的缓存目录（默认 `~/.local/share/uv/python`，可用 `UV_PYTHON_INSTALL_DIR` 覆盖）。
+- 「默认源安装」/「清华镜像安装」会从 PyPI 或清华镜像下载 `sqlcipher3-wheels` 和 `pyzipper` 并安装到插件私有虚拟环境，需要网络；都不会修改系统 Python。镜像内容由清华镜像同步，若不可用可换默认源。uv 同样只写入该虚拟环境；它下载的托管 Python 落在 uv 自己的缓存目录（默认 `~/.local/share/uv/python`，可用 `UV_PYTHON_INSTALL_DIR` 覆盖）。
 - 网页服务**只绑 `127.0.0.1`**，并拒绝非本机的 `Host` 和跨站 `POST`，但仍然建议只在本机使用。
 - 对所有 QQ 数据**只读**：不修改 Windows 的 `Documents\Tencent Files` 或 Linux 的 `~/.config/QQ` 下任何文件，不结束 QQ 进程。
 - 媒体文件**默认不复制**：`[图片]` `[视频]` `[语音]` `[文件]` 在普通导出里只是占位符，原文件仍在 `nt_qq\nt_data\`（Windows）或 `nt_qq_<hash>/nt_data/`（Linux）。勾选「含媒体」或 `--media` 时才会把本机已下载的文件复制进 ZIP；导出过程只读 `nt_data`，不修改、不移动任何原文件。

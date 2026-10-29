@@ -124,6 +124,7 @@
   .filters label { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 4px; }
   .filters .spacer { flex: 1; }
   .filters label.check { user-select: none; }
+  .filters input[type=password] { font-family: inherit; }
   .scope {
     display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 8px;
     border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent);
@@ -368,6 +369,9 @@
       <label class="check" title="每个会话按日期拆成多个文件，再打包成 ZIP">
         <input type="checkbox" id="split"> 按天分文件
       </label>
+      <input type="password" id="zipPassword" placeholder="ZIP 密码（可选）"
+             autocomplete="new-password" style="width:130px"
+             title="设置后导出为 AES-256 加密 ZIP（7-Zip / WinRAR / Bandizip 可打开）">
       <button class="ghost" type="button" id="statsBtn" title="本机统计：时间分布、发言人、活跃会话">统计</button>
       <button class="primary" type="button" id="download">下载</button>
     </form>
@@ -426,7 +430,7 @@
       <label class="field">
         <span>Python 解释器</span>
         <input type="text" id="setPythonPath" spellcheck="false" placeholder="默认 python3 / python">
-        <small>留空使用平台默认值；也可指向装有 sqlcipher3 的虚拟环境，例如 <code>~/.venvs/qqnt/bin/python</code>。</small>
+        <small>留空使用平台默认值；也可指向装有 sqlcipher3 的虚拟环境，例如 <code>~/.venvs/qqnt/bin/python</code>。密码 ZIP 还需要同一个环境里有 <code>pyzipper</code>。</small>
       </label>
       <label class="field">
         <span>QQ 数据根目录</span>
@@ -1340,7 +1344,10 @@
     if (!state.total) { toast('当前没有可导出的消息'); return }
     var embed = $('embed').checked
     var split = $('split').checked
+    var password = $('zipPassword').value
     if (embed && split) { toast('内嵌图片和按天分文件不能同时使用'); return }
+    if (embed && password) { toast('内嵌图片不能和密码 ZIP 同时使用'); return }
+    if (password && password.length < 4) { toast('ZIP 密码至少 4 个字符'); return }
     var withMedia = $('media').checked || embed
     if (embed && $('format').value !== 'html') {
       toast('内嵌图片需要把导出格式选为 HTML')
@@ -1363,10 +1370,11 @@
       method: 'POST',
       body: Object.assign({}, filters, {
         format: format, label: label, redact: redact, media: withMedia, embed: embed,
-        split: split ? 'day' : ''
+        split: split ? 'day' : '', password: password
       })
     }).then(function (result) {
-      toast('已加入导出队列：' + format.toUpperCase())
+      $('zipPassword').value = ''
+      toast('已加入导出队列：' + (password ? '加密 ZIP' : format.toUpperCase()))
       showTaskPanel()
       pollTasks()
       return result
@@ -1382,15 +1390,21 @@
       return
     }
     var format = $('format').value
+    var password = $('zipPassword').value
+    if (password && password.length < 4) { toast('ZIP 密码至少 4 个字符'); return }
+    if (password && $('embed').checked) { toast('内嵌图片不能和密码 ZIP 同时使用'); return }
     api('/api/export/queue', {
       method: 'POST',
       body: {
         chats: chats, format: format, label: '批量导出 ' + chats.length + ' 个会话',
         redact: $('redact').value, media: $('media').checked,
-        embed: $('embed').checked, split: $('split').checked ? 'day' : ''
+        embed: $('embed').checked, split: $('split').checked ? 'day' : '',
+        password: password
       }
     }).then(function () {
-      toast('已加入导出队列：' + chats.length + ' 个会话（ZIP）')
+      $('zipPassword').value = ''
+      toast('已加入导出队列：' + chats.length + ' 个会话（' +
+        (password ? '加密 ZIP' : 'ZIP') + '）')
       showTaskPanel()
       pollTasks()
     }).catch(function (error) { toast(error.message) })
@@ -1433,7 +1447,8 @@
         stateText.innerHTML = '<span class="spinner"></span>导出中'
       } else if (task.state === 'done') {
         stateText.textContent = num(task.rows) + ' 条 · ' + bytes(task.bytes) +
-          (task.media && task.media.files ? ' · 媒体 ' + task.media.files + ' 个' : '')
+          (task.media && task.media.files ? ' · 媒体 ' + task.media.files + ' 个' : '') +
+          (task.encrypted ? ' · 加密' : '')
       } else if (task.state === 'cancelled') {
         stateText.textContent = '已取消'
       } else {
@@ -1505,7 +1520,7 @@
     if (state.startupStartedAt && marker === String(state.startupStartedAt)) return
     $('startup').classList.remove('hidden')
     $('startupUrl').textContent = location.origin + '/'
-    $('startupEnv').textContent = '正在检查 Python / sqlcipher3…'
+    $('startupEnv').textContent = '正在检查 Python / sqlcipher3 / pyzipper…'
     $('startupEnv').className = 'startup-line'
     $('startupSetup').classList.add('hidden')
     $('startupSetupMirror').classList.add('hidden')
@@ -1536,7 +1551,7 @@
     $('startup').classList.remove('hidden')
     $('startupUrl').textContent = location.origin + '/'
     $('startupEnv').className = 'startup-line'
-    $('startupEnv').textContent = '正在检查 Python / sqlcipher3…'
+    $('startupEnv').textContent = '正在检查 Python / sqlcipher3 / pyzipper…'
     $('startupSetup').classList.remove('hidden')
     $('startupSetupMirror').classList.remove('hidden')
     $('startupKey').className = 'startup-line bad'
@@ -1566,7 +1581,8 @@
     }
     if (info.sqlcipher3) {
       line.classList.add('ok')
-      line.textContent = '环境：Python ' + info.version + ' (' + info.bits + '-bit) · sqlcipher3 已安装'
+      line.textContent = '环境：Python ' + info.version + ' (' + info.bits + '-bit) · sqlcipher3 已安装' +
+        (info.pyzipper ? ' · 密码 ZIP 可用' : ' · 密码 ZIP 需先安装 pyzipper')
       buttons.forEach(function (button) { button.classList.add('hidden') })
       return
     }
@@ -1789,7 +1805,7 @@
     var venv = state.diagnostics && state.diagnostics.venv
       ? state.diagnostics.venv.dir
       : '独立虚拟环境'
-    if (!confirm('将在下面的目录创建独立虚拟环境并安装 sqlcipher3-wheels：\n' + venv +
+    if (!confirm('将在下面的目录创建独立虚拟环境并安装 sqlcipher3-wheels + pyzipper（密码 ZIP）：\n' + venv +
       '\n\n安装源：' + sourceLabel + '\n不会修改系统 Python。继续？')) return
     api('/api/setup/venv', { method: 'POST', body: { confirm: true, source: choice } }).then(function (status) {
       if ($('settings').classList.contains('hidden')) openSettings()
@@ -1821,7 +1837,7 @@
   function loadDiagnostics() {
     var line = $('runtimeLine')
     line.className = 'runtime-line'
-    line.textContent = '正在检测 Python 与 sqlcipher3…'
+    line.textContent = '正在检测 Python、sqlcipher3 与 pyzipper…'
     api('/api/diagnostics').then(function (info) {
       state.diagnostics = info
       renderKeyStatus(info)
@@ -1844,6 +1860,7 @@
         appendSetupButtons(line)
       } else {
         line.textContent = 'Python ' + info.version + ' (' + info.bits + '-bit) · sqlcipher3 已安装' +
+          (info.pyzipper ? ' · 密码 ZIP 可用' : ' · 密码 ZIP 需先安装 pyzipper') +
           (info.uv && info.uv.available ? (' · ' + uvLabel(info)) : ' · 未检测到 uv')
       }
     }).catch(function (error) {

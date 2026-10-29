@@ -125,11 +125,12 @@ class IncrementalBuildTests(unittest.TestCase):
         conn.commit()
         conn.close()
 
-    def run_cli(self, *args):
+    def run_cli(self, *args, env=None):
         proc = subprocess.run(
             [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
              '--root', self.root, '--account', '12345', '--work', self.work, *args],
             capture_output=True, text=True,
+            env={**os.environ, **(env or {})},
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         return json.loads(proc.stdout) if proc.stdout.strip() else {}
@@ -508,10 +509,12 @@ class IncrementalBuildTests(unittest.TestCase):
             'format': 'txt', 'out': out, 'label': 'g1', 'chatKind': 'group',
             'chatId': 'g1', 'split': 'day'}))
         self.assertEqual(result['rows'], 3)
+        self.assertEqual(result['label'], 'g1', 'the per-day loop must not shadow the bundle label')
         with zipfile.ZipFile(out) as archive:
             names = archive.namelist()
             manifest = json.loads(archive.read('manifest.json'))
         self.assertEqual(manifest['split'], 'day')
+        self.assertEqual(manifest['label'], 'g1')
         entry = manifest['chats'][0]
         self.assertEqual(entry['rows'], 3)
         self.assertEqual([item['day'] for item in entry['files']], ['2023-11-15', '2023-11-16'])
@@ -519,6 +522,53 @@ class IncrementalBuildTests(unittest.TestCase):
         self.assertTrue(any('2023-11-15' in name for name in names))
         self.assertTrue(any('2023-11-16' in name for name in names))
         self.assertEqual(len(names), 3, 'two daily files plus the manifest')
+
+    def test_password_zip_is_aes_encrypted(self):
+        try:
+            import pyzipper
+        except ImportError:
+            self.skipTest('pyzipper is not installed')
+        self.run_cli('build')
+        out = os.path.join(self.work, 'exports', 'secret.zip')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        result = self.run_cli('export', '--json', json.dumps({
+            'format': 'txt', 'out': out, 'label': 'g1',
+            'chatKind': 'group', 'chatId': 'g1'}),
+            env={'QQNT_EXPORT_PASSWORD': 'secret123'})
+        self.assertEqual(result['format'], 'zip', 'a password always means a zip')
+        self.assertTrue(result['encrypted'])
+        # The archive is a normal ZIP whose content is AES-encrypted: no
+        # password fails, the right one reads the manifest.
+        with pyzipper.AESZipFile(out) as archive:
+            with self.assertRaises(RuntimeError):
+                archive.read('manifest.json')
+            archive.setpassword(b'secret123')
+            manifest = json.loads(archive.read('manifest.json'))
+            names = archive.namelist()
+        self.assertTrue(manifest['encrypted'])
+        self.assertIn('manifest.json', names)
+        with pyzipper.AESZipFile(out) as archive:
+            archive.setpassword(b'wrong-password')
+            with self.assertRaises(RuntimeError):
+                archive.read('manifest.json')
+        # stdlib can list it but not decrypt it.
+        with zipfile.ZipFile(out) as plain:
+            self.assertTrue(plain.getinfo('manifest.json').flag_bits & 0x1)
+
+    def test_password_length_is_validated(self):
+        self.run_cli('build')
+        out = os.path.join(self.work, 'exports', 'short.zip')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        proc = subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
+             '--root', self.root, '--account', '12345', '--work', self.work,
+             'export', '--json', json.dumps({
+                 'format': 'txt', 'out': out, 'chatKind': 'group', 'chatId': 'g1'})],
+            capture_output=True, text=True,
+            env={**os.environ, 'QQNT_EXPORT_PASSWORD': 'abc'},
+        )
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn('密码长度', json.loads(proc.stdout)['error'])
 
     def test_split_rejects_an_unknown_unit(self):
         self.run_cli('build')

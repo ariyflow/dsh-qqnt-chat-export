@@ -713,6 +713,13 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
           const media = body.media === true
           const embed = body.embed === true
           const split = body.split === 'day' ? 'day' : ''
+          const password = typeof body.password === 'string' ? body.password : ''
+          if (password && (password.length < 4 || password.length > 128)) {
+            throw Object.assign(new Error('ZIP 密码长度需要 4~128 个字符'), { status: 400 })
+          }
+          if (password && embed) {
+            throw Object.assign(new Error('内嵌图片不能和密码 ZIP 同时使用'), { status: 400 })
+          }
           if (body.split && body.split !== 'day') {
             throw Object.assign(new Error('split 只支持 day'), { status: 400 })
           }
@@ -726,7 +733,7 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
             throw Object.assign(new Error('内嵌图片不能和按天分文件同时使用'), { status: 400 })
           }
           const container = embed ? innerFormat
-            : (chats.length > 0 || media || split ? 'zip' : innerFormat)
+            : (chats.length > 0 || media || split || password ? 'zip' : innerFormat)
           const label = String(body.label || (chats.length > 1
             ? `批量导出 ${chats.length} 个会话` : 'QQ聊天记录')).slice(0, 120)
           const args = filtersFromBody(body)
@@ -734,7 +741,9 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
           if (media || embed) args.media = true
           if (embed) args.embed = true
           if (split) args.split = 'day'
-          const queued = queue.enqueue(args, { label, format: container, innerFormat })
+          const queued = queue.enqueue(args, {
+            label, format: container, innerFormat, password,
+          })
           if (!queued) {
             throw Object.assign(new Error(
               `最多同时 ${MAX_CONCURRENT} 个导出任务，等一个完成再试`), { status: 429 })

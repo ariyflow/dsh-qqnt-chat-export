@@ -61,23 +61,29 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
     task.state = 'done'
     task.bytes = Number(payload?.bytes) || 0
     task.rows = Number(payload?.rows) || 0
+    if (payload?.encrypted === true) task.encrypted = true
     if (payload?.media && Number.isFinite(Number(payload.media.files))) {
       task.media = { files: Number(payload.media.files), missing: Number(payload.media.missing) || 0 }
     }
     if (typeof payload?.path === 'string' && payload.path !== '') task.path = payload.path
   }
 
-  function start(task, args) {
+  function start(task, args, password = '') {
     const argv = ['-X', 'utf8', queryCli, '--work', settings.workDir]
     if (settings.tencentRoot) argv.push('--root', settings.tencentRoot)
     if (settings.account) argv.push('--account', String(settings.account))
     argv.push('export', '--json', JSON.stringify(args))
 
+    // The password travels in the environment, not argv: `ps` exposes every
+    // argument to other users, environment blocks do not.
+    const env = { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' }
+    if (password) env.QQNT_EXPORT_PASSWORD = password
+
     let child
     try {
       child = spawn(settings.python, argv, {
         windowsHide: true,
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+        env,
         stdio: ['ignore', 'pipe', 'pipe'],
       })
     } catch (error) {
@@ -145,7 +151,7 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
    * `format` is the file the user downloads (a bundle is always `zip`);
    * `innerFormat` is what each chat file inside a bundle should be.
    */
-  function enqueue(args, { label = 'QQ聊天记录', format = 'txt', innerFormat } = {}) {
+  function enqueue(args, { label = 'QQ聊天记录', format = 'txt', innerFormat, password = '' } = {}) {
     if (running() >= concurrency) return null
     const id = `e${Date.now().toString(36)}${(counter += 1).toString(36)}`
     const out = path.join(exportsDir(), `${id}.${format}`)
@@ -163,7 +169,7 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
     }
     tasks.unshift(task)
     trim()
-    start(task, { ...args, format: innerFormat || format, out, label })
+    start(task, { ...args, format: innerFormat || format, out, label }, password)
     return { ...task }
   }
 

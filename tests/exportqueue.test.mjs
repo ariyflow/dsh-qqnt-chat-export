@@ -42,8 +42,11 @@ with open(payload['out'], 'wb') as f:
     f.write(b'PK')
 with open(payload['out'] + '.args.json', 'w', encoding='utf-8') as f:
     json.dump(payload, f)
+with open(payload['out'] + '.env.json', 'w', encoding='utf-8') as f:
+    json.dump({'password': os.environ.get('QQNT_EXPORT_PASSWORD', '')}, f)
 print(json.dumps({'path': payload['out'], 'format': payload['format'],
-                  'rows': 3, 'bytes': 2, 'label': payload.get('label', '')}))`,
+                  'rows': 3, 'bytes': 2, 'label': payload.get('label', ''),
+                  'encrypted': bool(os.environ.get('QQNT_EXPORT_PASSWORD'))}))`,
     outside: `import json, sys
 args = sys.argv[1:]
 payload = json.loads(args[args.index('--json') + 1])
@@ -373,6 +376,51 @@ test('a day-split export is bundled as a zip', { skip: POSIX_ONLY }, async () =>
     const args = JSON.parse(await readFile(`${finished.path}.args.json`, 'utf8'))
     assert.equal(args.split, 'day')
     assert.equal(args.format, 'txt')
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a password export travels in the environment and comes back encrypted', {
+  skip: POSIX_ONLY,
+}, async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  const python = await fakePython(dir, 'echo')
+  const { server, base } = await startServer({ python, workDir: work })
+  try {
+    let response = await fetch(`${base}/api/export/queue`, {
+      method: 'POST', headers: actionHeaders,
+      body: JSON.stringify({ chatKind: 'group', chatId: '1', format: 'txt', password: 'abc' }),
+    })
+    assert.equal(response.status, 400, 'short passwords are refused')
+
+    response = await fetch(`${base}/api/export/queue`, {
+      method: 'POST', headers: actionHeaders,
+      body: JSON.stringify({ chatKind: 'group', chatId: '1', format: 'html', embed: true, password: 'secret123' }),
+    })
+    assert.equal(response.status, 400, 'embed and a password cannot be combined')
+
+    response = await fetch(`${base}/api/export/queue`, {
+      method: 'POST', headers: actionHeaders,
+      body: JSON.stringify({ chatKind: 'group', chatId: '1', format: 'txt', password: 'secret123' }),
+    })
+    assert.equal(response.status, 202)
+    const { id, task } = await response.json()
+    assert.equal(task.format, 'zip', 'a password always means a zip')
+    assert.equal(task.password, undefined, 'the task must not keep the password')
+
+    const finished = await waitFor(async () => {
+      const list = await (await fetch(`${base}/api/export/queue`)).json()
+      return list.tasks.find((row) => row.id === id && row.state === 'done')
+    })
+    assert.equal(finished.encrypted, true)
+    const args = JSON.parse(await readFile(`${finished.path}.args.json`, 'utf8'))
+    assert.equal(args.password, undefined, 'the password must not be in argv')
+    const env = JSON.parse(await readFile(`${finished.path}.env.json`, 'utf8'))
+    assert.equal(env.password, 'secret123')
   } finally {
     await server.close()
     await rm(dir, { recursive: true, force: true })

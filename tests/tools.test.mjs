@@ -22,6 +22,15 @@ function hasPython() {
   }
 }
 
+function hasPyzipper() {
+  try {
+    execFileSync(PYTHON, ['-c', 'import pyzipper'], { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
+
 const signal = () => new AbortController().signal
 
 /** Build a plain (unencrypted) sidecar index with two chats and three messages. */
@@ -130,6 +139,37 @@ test('export tool bundles, splits, and redacts', { skip: !hasPython() && 'python
       { signal: signal() })
     assert.equal(bad.ok, false)
     assert.match(bad.output, /html/)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('export tool protects a bundle with a password', {
+  skip: (!hasPython() && 'python is not installed') || (!hasPyzipper() && 'pyzipper is not installed'),
+}, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const outDir = path.join(work, 'out')
+    const result = await exportChatTool(settings).execute(
+      { chatKind: 'group', chatId: 'g1', format: 'txt', outDir, password: 'secret123' },
+      { signal: signal() })
+    assert.equal(result.ok, true, result.output)
+    assert.match(result.outPath, /\.zip$/)
+    assert.ok(existsSync(result.outPath))
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('export tool validates the password length', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const outDir = path.join(work, 'out')
+    const short = await exportChatTool(settings).execute(
+      { chatKind: 'group', chatId: 'g1', format: 'txt', outDir, password: 'abc' },
+      { signal: signal() })
+    assert.equal(short.ok, false)
+    assert.match(short.output, /密码长度/)
   } finally {
     await rm(work, { recursive: true, force: true })
   }

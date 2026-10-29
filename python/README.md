@@ -1,6 +1,6 @@
 # Python 环境说明
 
-插件的一键配置会创建私有虚拟环境并安装 `sqlcipher3-wheels`，不会改动系统 Python。
+插件的一键配置会创建私有虚拟环境并安装 `sqlcipher3-wheels`（密码 ZIP 还装 `pyzipper`），不会改动系统 Python。
 这个目录是同一套环境的**声明式副本**，方便你在插件之外手工复现。
 
 ```bash
@@ -21,6 +21,7 @@ UV_PROJECT_ENVIRONMENT=~/.local/share/dsh-qqnt-chat-export/venv \
 uv venv --python 3.12 ~/.local/share/dsh-qqnt-chat-export/venv
 uv pip install --python ~/.local/share/dsh-qqnt-chat-export/venv/bin/python \
   sqlcipher3-wheels
+  pyzipper
 ```
 
 ## 为什么没有提交 `uv.lock`

@@ -1674,11 +1674,30 @@ def chat_meta(conn, kind, chat_id):
     return (row[0] or '', row[1] or '') if row else ('', '')
 
 
-def write_zip(directory, target):
-    """Zip a finished bundle next to its target, then swap it in."""
+def write_zip(directory, target, password=''):
+    """Zip a finished bundle next to its target, then swap it in.
+
+    With a password the archive uses AES-256 (pyzipper). That is what 7-Zip,
+    WinRAR, Bandizip and macOS Archive Utility read; Windows Explorer's built-in
+    unzip does not support AES, so the README says so.
+    """
     tmp = target + '.part'
     try:
-        with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+        if password:
+            try:
+                import pyzipper
+            except ImportError:
+                raise BadInput(
+                    '密码 ZIP 需要 pyzipper：在插件虚拟环境里运行 '
+                    'pip install pyzipper（网页「一键安装」会自动安装）')
+            archive = pyzipper.AESZipFile(
+                tmp, 'w', compression=pyzipper.ZIP_DEFLATED,
+                encryption=pyzipper.WZ_AES)
+            archive.setpassword(password.encode('utf-8'))
+        else:
+            archive = zipfile.ZipFile(
+                tmp, 'w', zipfile.ZIP_DEFLATED, compresslevel=6)
+        with archive:
             for root, dirs, files in os.walk(directory):
                 dirs.sort()
                 for name in sorted(files):
@@ -1695,7 +1714,7 @@ def write_zip(directory, target):
                 pass
 
 
-def export_bundle(conn, args, out, label, chats, src=None, datadir=''):
+def export_bundle(conn, args, out, label, chats, src=None, datadir='', password=''):
     """Many chats (or one chat plus media) in one zip with a manifest."""
     fmt = args['format']
     mode = str(args.get('redact') or '')
@@ -1755,8 +1774,8 @@ def export_bundle(conn, args, out, label, chats, src=None, datadir=''):
                         continue
                     # ts=0 rows from QQ show up as 1970; call that "unknown"
                     # instead of shipping a folder full of 1970 files.
-                    label = day if day >= '2000-01-01' else '未知'
-                    base = '%s-%s' % (stem, label)
+                    day_label = day if day >= '2000-01-01' else '未知'
+                    base = '%s-%s' % (stem, day_label)
                     candidate = base
                     suffix = 2
                     while candidate in used_names:
@@ -1767,10 +1786,10 @@ def export_bundle(conn, args, out, label, chats, src=None, datadir=''):
                     filename = candidate + '.' + fmt
                     count = write_export_file(
                         conn, day_args, os.path.join(workdir, filename),
-                        '%s · %s' % (name, label), redactor, refs)
+                        '%s · %s' % (name, day_label), redactor, refs)
                     if count:
                         files.append({'file': filename, 'rows': count, 'day': day,
-                                      'label': label})
+                                      'label': day_label})
                         total += count
                 entry['rows'] = sum(item['rows'] for item in files)
                 if files:
@@ -1805,6 +1824,7 @@ def export_bundle(conn, args, out, label, chats, src=None, datadir=''):
             'format': fmt,
             'split': split,
             'redacted': mode,
+            'encrypted': bool(password),
             'total': total,
             'chats': entries,
             'skipped': skipped,
@@ -1821,13 +1841,14 @@ def export_bundle(conn, args, out, label, chats, src=None, datadir=''):
         with open(os.path.join(workdir, 'manifest.json'), 'w', encoding='utf-8') as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
             f.write('\n')
-        write_zip(workdir, out)
+        write_zip(workdir, out, password)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     q.private_file(out)
     size = os.path.getsize(out) if os.path.exists(out) else 0
     return {'path': out, 'format': 'zip', 'rows': total, 'bytes': size,
             'label': label, 'chats': len(entries), 'skipped': len(skipped),
+            'encrypted': bool(password),
             'media': {'files': media_stats['files'], 'bytes': media_stats['bytes'],
                       'missing': media_stats['missingCount'],
                       'skipped': media_stats['skippedCount']}}
@@ -1853,6 +1874,14 @@ def cmd_export(p, args):
         raise BadInput('chats 必须是数组')
     if len(chats) > MAX_BATCH_CHATS:
         raise BadInput('一次最多导出 %d 个会话' % MAX_BATCH_CHATS)
+    # Never accept the password in argv/json: `ps` shows every argument to
+    # other users, while a per-child environment variable does not. The caller
+    # unsets it here so a failed export cannot leak it into a traceback.
+    password = os.environ.pop('QQNT_EXPORT_PASSWORD', '')
+    if password and not 4 <= len(password) <= 128:
+        raise BadInput('密码长度需要 4~128 个字符')
+    if password and args.get('embed'):
+        raise BadInput('内嵌图片不能和密码 ZIP 同时使用')
     embed = bool(args.get('embed'))
     split = str(args.get('split') or '').lower()
     if split and split != 'day':
@@ -1860,7 +1889,8 @@ def cmd_export(p, args):
     if embed and split:
         raise BadInput('内嵌图片不能和按天分文件同时使用')
     media_enabled = bool(args.get('media')) or embed
-    zip_mode = (bool(chats) or media_enabled or split == 'day') and not embed
+    zip_mode = (bool(chats) or media_enabled or split == 'day'
+                or bool(password)) and not embed
     if zip_mode and not out.lower().endswith('.zip'):
         raise BadInput('批量或媒体导出必须输出 .zip')
     if embed:
@@ -1890,7 +1920,8 @@ def cmd_export(p, args):
                 datadir = (read_meta(p['index']) or {}).get('datadir', '')
                 key = read_key(p, args.get('account') or None)
                 src = q.open_encrypted(p['db'], key, readonly=True)
-            payload = export_bundle(conn, args, out, label, chats, src, datadir)
+            payload = export_bundle(conn, args, out, label, chats, src, datadir,
+                                    password)
         elif embed:
             redactor = Redactor(mode)
             scope_args = dict(args)
