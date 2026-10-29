@@ -273,7 +273,7 @@ function filtersFrom(params) {
 /** The same filters, read from a JSON body instead of the query string. */
 function filtersFromBody(body) {
   const args = {}
-  for (const key of ['chatKind', 'chatId', 'keyword', 'sender', 'since', 'until']) {
+  for (const key of ['chatKind', 'chatId', 'keyword', 'sender', 'since', 'until', 'redact']) {
     const value = body[key]
     if (typeof value === 'string' && value.trim() !== '') args[key] = value.trim()
   }

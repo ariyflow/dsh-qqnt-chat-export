@@ -1352,7 +1352,53 @@ def exports_target(p, out):
     return out
 
 
-def export_writer(conn, args, label):
+REDACT_MODES = ('names', 'qq', 'all')
+
+
+class Redactor:
+    """Pseudonymise the structured fields of one export.
+
+    Only sender names, QQ numbers and chat labels change. Message text is left
+    alone on purpose: a nickname quoted inside a message is part of the
+    conversation, and mangling it would corrupt the archive. `names` hides
+    display names, `qq` blanks numbers and group ids, `all` does both.
+    """
+
+    def __init__(self, mode=''):
+        self.mode = mode if mode in REDACT_MODES else ''
+        self.members = {}
+
+    @property
+    def hide_names(self):
+        return self.mode in ('names', 'all')
+
+    @property
+    def hide_numbers(self):
+        return self.mode in ('qq', 'all')
+
+    def number(self, value):
+        return '' if self.hide_numbers else value
+
+    def member(self, key):
+        label = self.members.get(key)
+        if label is None:
+            label = '成员%d' % (len(self.members) + 1)
+            self.members[key] = label
+        return label
+
+    def apply(self, item):
+        if self.hide_names:
+            item['sender'] = self.member(item.get('qq') or item.get('sender') or '?')
+        item['qq'] = self.number(item.get('qq') or '')
+        return item
+
+    def chat_label(self, kind, name, index=1):
+        if not self.hide_names:
+            return name
+        return ('群聊%d' if kind == GROUP_KIND else '私聊%d') % index
+
+
+def export_writer(conn, args, label, redactor=None):
     """Rows and a `write(target)` for one export, so bundles reuse the writers."""
     fmt = str(args.get('format') or 'txt').lower()
     where, params = build_where(conn, args)
@@ -1365,6 +1411,10 @@ def export_writer(conn, args, label):
             % (label, account, datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
     state = {'rows': 0}
 
+    def record(row):
+        item = row_json(row)
+        return redactor.apply(item) if redactor is not None else item
+
     def write(out):
         count = 0
         if fmt == 'txt':
@@ -1372,7 +1422,7 @@ def export_writer(conn, args, label):
                 f.write(head)
                 f.write('=' * 70 + '\n\n')
                 for row in cur:
-                    item = row_json(row)
+                    item = record(row)
                     f.write('[%s] %s: %s\n' % (item['time'], item['sender'],
                                                item['text'].replace('\n', ' \\n ')))
                     count += 1
@@ -1382,7 +1432,7 @@ def export_writer(conn, args, label):
                 writer = csv.writer(f)
                 writer.writerow(['时间', '发送者', 'QQ号', '方向', '类型', '内容'])
                 for row in cur:
-                    item = row_json(row)
+                    item = record(row)
                     writer.writerow([q.csv_cell(item['time']), q.csv_cell(item['sender']),
                                      q.csv_cell(item['qq']), '我' if item['out'] else '对方',
                                      q.csv_cell(item['kinds']), q.csv_cell(item['text'])])
@@ -1395,7 +1445,7 @@ def export_writer(conn, args, label):
                 for row in cur:
                     if count:
                         f.write(',')
-                    f.write(json.dumps(row_json(row), ensure_ascii=False))
+                    f.write(json.dumps(record(row), ensure_ascii=False))
                     count += 1
                 f.write(']}\n')
         elif fmt == 'md':
@@ -1403,7 +1453,7 @@ def export_writer(conn, args, label):
                 f.write('# %s\n\n| 时间 | 发送者 | 内容 |\n|---|---|---|\n'
                         % md_cell(label.replace('\n', ' ')))
                 for row in cur:
-                    item = row_json(row)
+                    item = record(row)
                     f.write('| %s | %s | %s |\n'
                             % (md_cell(item['time']), md_cell(item['sender']),
                                md_cell(item['text'])))
@@ -1422,7 +1472,7 @@ def export_writer(conn, args, label):
                         % (html_escape(label), html_escape(label)))
                 f.write('<table><thead><tr><th>时间</th><th>发送者</th><th>内容</th></tr></thead><tbody>')
                 for row in cur:
-                    item = row_json(row)
+                    item = record(row)
                     cls = ' class="out"' if item['out'] else ''
                     f.write('<tr%s><td class="t">%s</td><td class="s">%s</td><td>%s</td></tr>'
                             % (cls, html_escape(item['time']), html_escape(item['sender']),
@@ -1444,7 +1494,7 @@ def export_writer(conn, args, label):
                     db.execute('CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT)')
                     batch = []
                     for row in cur:
-                        item = row_json(row)
+                        item = record(row)
                         batch.append((int(item['id']), item['ts'], item['time'], item['sender'],
                                       item['qq'], 1 if item['out'] else 0, item['kinds'], item['text']))
                         count += 1
@@ -1466,8 +1516,8 @@ def export_writer(conn, args, label):
     return write, state
 
 
-def write_export_file(conn, args, out, label):
-    write, _state = export_writer(conn, args, label)
+def write_export_file(conn, args, out, label, redactor=None):
+    write, _state = export_writer(conn, args, label, redactor)
     return write(out)
 
 
@@ -1507,16 +1557,20 @@ def write_zip(directory, target):
 def export_bundle(conn, args, out, label, chats):
     """Many chats (or one chat plus media) in one zip with a manifest."""
     fmt = args['format']
+    mode = str(args.get('redact') or '')
     workdir = tempfile.mkdtemp(prefix='.bundle-', dir=os.path.dirname(out) or '.')
     entries, skipped = [], []
     total = 0
     try:
         for index, scope in enumerate(chats or [None], 1):
             scope_args = dict(args)
+            redactor = Redactor(mode)
             if scope is None:
                 kind = str(args.get('chatKind') or '')
                 chat_id = str(args.get('chatId') or '')
-                name = label
+                name = redactor.chat_label(kind, label, index) if kind else label
+                if redactor.hide_names and not kind:
+                    name = '聊天记录'
             else:
                 if not isinstance(scope, dict):
                     raise BadInput('chats 的每一项都必须是 {kind, id}')
@@ -1528,10 +1582,11 @@ def export_bundle(conn, args, out, label, chats):
                 name = name or str(scope.get('label') or '') or chat_id
                 scope_args['chatKind'] = kind
                 scope_args['chatId'] = chat_id
-            entry = {'kind': kind, 'id': chat_id, 'name': name,
-                     'rows': 0, 'file': ''}
+                name = redactor.chat_label(kind, name, index)
+            entry = {'kind': kind, 'id': redactor.number(chat_id),
+                     'name': name, 'rows': 0, 'file': ''}
             path = os.path.join(workdir, '%03d-%s.%s' % (index, safe_stem(name, 'chat'), fmt))
-            rows = write_export_file(conn, scope_args, path, name)
+            rows = write_export_file(conn, scope_args, path, name, redactor)
             total += rows
             entry['rows'] = rows
             if rows:
@@ -1546,9 +1601,10 @@ def export_bundle(conn, args, out, label, chats):
         manifest = {
             'version': 1,
             'generatedAt': fmt_time(time.time()),
-            'account': str(args.get('account') or ''),
+            'account': Redactor(mode).number(str(args.get('account') or '')),
             'label': label,
             'format': fmt,
+            'redacted': mode,
             'total': total,
             'chats': entries,
             'skipped': skipped,
@@ -1578,6 +1634,9 @@ def cmd_export(p, args):
         q.die('缺少输出路径')
     out = exports_target(p, out)
     label = str(args.get('label') or 'QQ聊天记录')
+    mode = str(args.get('redact') or '').lower()
+    if mode and mode not in REDACT_MODES:
+        raise BadInput('redact 只能是 names、qq 或 all')
     chats = args.get('chats') or []
     if chats and not isinstance(chats, list):
         raise BadInput('chats 必须是数组')
@@ -1595,7 +1654,11 @@ def cmd_export(p, args):
         if zip_mode:
             payload = export_bundle(conn, args, out, label, chats)
         else:
-            rows = write_export_file(conn, args, out, label)
+            redactor = Redactor(mode)
+            kind = str(args.get('chatKind') or '')
+            if redactor.hide_names:
+                label = redactor.chat_label(kind, label, 1) if kind else '聊天记录'
+            rows = write_export_file(conn, args, out, label, redactor)
             q.private_file(out)
             payload = {'path': out, 'format': fmt, 'rows': rows,
                        'bytes': os.path.getsize(out) if os.path.exists(out) else 0,

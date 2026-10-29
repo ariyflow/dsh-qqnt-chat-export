@@ -285,6 +285,52 @@ class IncrementalBuildTests(unittest.TestCase):
             self.assertIn('第一条消息', joined)
             self.assertIn('私聊一条', joined)
 
+    def test_redaction_pseudonymises_senders_and_numbers(self):
+        self.run_cli('build')
+        out = os.path.join(self.work, 'exports', 'redacted.json')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        result = self.run_cli('export', '--json', json.dumps({
+            'format': 'json', 'out': out, 'label': 'g1',
+            'chatKind': 'group', 'chatId': 'g1', 'redact': 'all'}))
+        self.assertEqual(result['rows'], 2)
+        with open(out, encoding='utf-8') as f:
+            payload = json.load(f)
+        self.assertEqual(payload['chat'], '群聊1')
+        self.assertEqual([item['sender'] for item in payload['messages']],
+                         ['成员1', '成员1'])
+        self.assertEqual([item['qq'] for item in payload['messages']], ['', ''])
+        # The conversation itself is never rewritten.
+        self.assertEqual(payload['messages'][0]['text'], '第一条消息')
+
+    def test_bundle_manifest_hides_numbers_when_asked(self):
+        self.run_cli('build')
+        out = os.path.join(self.work, 'exports', 'redacted.zip')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        self.run_cli('export', '--json', json.dumps({
+            'format': 'txt', 'out': out, 'label': '批量', 'redact': 'qq',
+            'chats': [{'kind': 'group', 'id': 'g1'},
+                      {'kind': 'private', 'id': 'f1'}]}))
+        with zipfile.ZipFile(out) as archive:
+            manifest = json.loads(archive.read('manifest.json'))
+        self.assertEqual(manifest['redacted'], 'qq')
+        self.assertEqual(manifest['account'], '')
+        self.assertEqual([chat['id'] for chat in manifest['chats']], ['', ''])
+        self.assertEqual([chat['name'] for chat in manifest['chats']], ['g1', 'f1'])
+
+    def test_redaction_rejects_an_unknown_mode(self):
+        self.run_cli('build')
+        out = os.path.join(self.work, 'exports', 'bad.json')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        proc = subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
+             '--root', self.root, '--account', '12345', '--work', self.work,
+             'export', '--json', json.dumps({
+                 'format': 'json', 'out': out, 'redact': 'everything'})],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn('redact', json.loads(proc.stdout)['error'])
+
     def test_batch_export_requires_a_zip_target(self):
         self.run_cli('build')
         out = os.path.join(self.work, 'exports', 'bundle.txt')

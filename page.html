@@ -332,6 +332,12 @@
         <option value="html">网页 .html</option>
         <option value="sqlite">数据库 .sqlite</option>
       </select>
+      <select id="redact" title="导出前替换发送者昵称和 QQ 号；正文不改">
+        <option value="">不脱敏</option>
+        <option value="names">昵称打码</option>
+        <option value="qq">QQ 号打码</option>
+        <option value="all">昵称 + QQ 号</option>
+      </select>
       <button class="primary" type="button" id="download">下载</button>
     </form>
     <div class="summary" id="summary">选择左侧的会话，直接输入关键词可跨全部会话查询。</div>
@@ -1162,7 +1168,9 @@
     if (keyword) label += '_' + keyword
     api('/api/export/queue', {
       method: 'POST',
-      body: Object.assign({}, filters, { format: format, label: label })
+      body: Object.assign({}, filters, {
+        format: format, label: label, redact: $('redact').value
+      })
     }).then(function (result) {
       toast('已加入导出队列：' + format.toUpperCase())
       showTaskPanel()
@@ -1178,7 +1186,10 @@
     var format = $('format').value
     api('/api/export/queue', {
       method: 'POST',
-      body: { chats: chats, format: format, label: '批量导出 ' + chats.length + ' 个会话' }
+      body: {
+        chats: chats, format: format, label: '批量导出 ' + chats.length + ' 个会话',
+        redact: $('redact').value
+      }
     }).then(function () {
       toast('已加入导出队列：' + chats.length + ' 个会话（ZIP）')
       showTaskPanel()
