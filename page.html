@@ -149,6 +149,33 @@
   @media (prefers-color-scheme: dark) { mark { background: #6b5900; } }
   .more { padding: 12px; text-align: center; border-top: 1px solid var(--line); }
   .empty { padding: 40px 20px; text-align: center; color: var(--muted); }
+  .task-panel {
+    position: fixed; right: 18px; bottom: 18px; width: min(320px, calc(100vw - 36px));
+    max-height: 42vh; display: flex; flex-direction: column; z-index: 25;
+    border: 1px solid var(--line); border-radius: 10px; background: var(--bg);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, .18);
+  }
+  .task-panel header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 12px; border-bottom: 1px solid var(--line);
+  }
+  .task-list { overflow: auto; padding: 8px 12px 10px; display: grid; gap: 8px; }
+  .task-row { display: grid; gap: 3px; font-size: 12px; padding-bottom: 6px; border-bottom: 1px dashed var(--line); }
+  .task-row:last-child { border-bottom: 0; padding-bottom: 0; }
+  .task-row .t-head { display: flex; justify-content: space-between; gap: 8px; }
+  .task-row .t-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .task-row .t-state { color: var(--muted); white-space: nowrap; }
+  .task-row.done .t-state { color: var(--out); }
+  .task-row.error .t-state { color: var(--danger); }
+  .task-row .t-error { color: var(--danger); word-break: break-word; }
+  .task-row button { font-size: 11px; padding: 1px 8px; justify-self: start; }
+  .spinner {
+    display: inline-block; width: 8px; height: 8px; margin-right: 4px; border-radius: 50%;
+    border: 2px solid var(--line); border-top-color: var(--accent);
+    animation: spin .8s linear infinite; vertical-align: middle;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
   .toast {
     position: fixed; right: 18px; bottom: 18px; padding: 10px 16px; border-radius: 8px;
     background: var(--text); color: var(--bg); opacity: 0; transition: opacity .2s;
@@ -433,6 +460,14 @@
   </form>
 </dialog>
 
+<section class="task-panel hidden" id="taskPanel" aria-live="polite">
+  <header>
+    <strong>导出任务</strong>
+    <button class="ghost" type="button" id="taskClose" title="隐藏面板">×</button>
+  </header>
+  <div class="task-list" id="taskList"></div>
+</section>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -461,7 +496,6 @@
     poll: 0,
     reqSeq: 0,
     loading: false,
-    downloadFrame: null,
     settings: null,
     workDir: '',
     storage: null,
@@ -474,7 +508,9 @@
     keyJob: null,
     keyPoll: 0,
     lastSyncAt: 0,
-    around: 0
+    around: 0,
+    exportTasks: [],
+    taskPoll: 0
   }
 
   var $ = function (id) { return document.getElementById(id) }
@@ -1087,31 +1123,80 @@
     var label = state.chatId ? state.chatName : '全部会话'
     var keyword = (filters.keyword || '').trim()
     if (keyword) label += '_' + keyword
-    var query = queryString(filters, { format: format, label: label })
-    toast('正在生成 ' + format.toUpperCase() + ' 文件…')
-    var frame = state.downloadFrame
-    if (!frame) {
-      // A hidden frame downloads the attachment without replacing the SPA; a
-      // JSON error body is still readable because it is same-origin.
-      frame = document.createElement('iframe')
-      frame.style.display = 'none'
-      frame.title = '导出下载'
-      frame.addEventListener('load', function () {
-        var text = ''
-        try { text = frame.contentDocument && frame.contentDocument.body ? frame.contentDocument.body.textContent : '' } catch (e) {}
-        if (text && text.trim().charAt(0) === '{') {
-          var message = '导出失败'
-          try { message = JSON.parse(text).error || message } catch (e) {}
-          toast(message)
-        }
+    api('/api/export/queue', {
+      method: 'POST',
+      body: Object.assign({}, filters, { format: format, label: label })
+    }).then(function (result) {
+      toast('已加入导出队列：' + format.toUpperCase())
+      showTaskPanel()
+      pollTasks()
+      return result
+    }).catch(function (error) { toast(error.message) })
+  }
+
+  /** Export tasks live in the host's memory; poll while anything is running. */
+  function pollTasks() {
+    if (state.taskPoll) return
+    var tick = function () {
+      state.taskPoll = 0
+      api('/api/export/queue').then(function (payload) {
+        state.exportTasks = payload.tasks || []
+        renderTasks()
+        if (payload.running > 0) state.taskPoll = setTimeout(tick, 1000)
+      }).catch(function (error) {
+        toast('读取导出任务失败：' + error.message)
       })
-      document.body.appendChild(frame)
-      state.downloadFrame = frame
     }
-    frame.src = '/api/export?' + query
-    var button = $('download')
-    button.disabled = true
-    setTimeout(function () { button.disabled = false }, 3000)
+    tick()
+  }
+
+  function renderTasks() {
+    var host = $('taskList')
+    if (!state.exportTasks.length) {
+      host.innerHTML = '<div class="hint">还没有导出任务</div>'
+      return
+    }
+    host.innerHTML = ''
+    state.exportTasks.slice(0, 8).forEach(function (task) {
+      var row = document.createElement('div')
+      row.className = 'task-row ' + task.state
+      var head = document.createElement('div')
+      head.className = 't-head'
+      var name = document.createElement('span')
+      name.className = 't-name'
+      name.textContent = task.label + ' · ' + String(task.format).toUpperCase()
+      var stateText = document.createElement('span')
+      stateText.className = 't-state'
+      if (task.state === 'running') {
+        stateText.innerHTML = '<span class="spinner"></span>导出中'
+      } else if (task.state === 'done') {
+        stateText.textContent = num(task.rows) + ' 条 · ' + bytes(task.bytes)
+      } else {
+        stateText.textContent = '失败'
+      }
+      head.appendChild(name)
+      head.appendChild(stateText)
+      row.appendChild(head)
+      if (task.state === 'done') {
+        var link = document.createElement('a')
+        link.href = '/api/export/queue/' + encodeURIComponent(task.id) + '/file'
+        link.setAttribute('download', '')
+        link.className = 'ghost'
+        link.textContent = '下载'
+        row.appendChild(link)
+      }
+      if (task.state === 'error' && task.error) {
+        var err = document.createElement('div')
+        err.className = 't-error'
+        err.textContent = task.error
+        row.appendChild(err)
+      }
+      host.appendChild(row)
+    })
+  }
+
+  function showTaskPanel() {
+    $('taskPanel').classList.remove('hidden')
   }
 
   // ---------------------------------------------------------------- 启动提示与一键配置
@@ -1707,6 +1792,9 @@
     loadMessages(true)
   })
   $('download').addEventListener('click', download)
+  $('taskClose').addEventListener('click', function () {
+    $('taskPanel').classList.add('hidden')
+  })
   $('more').addEventListener('click', function () { loadMessages(false) })
   $('reload').addEventListener('click', function () { refreshStatus(false) })
   $('sync').addEventListener('click', function () { startBuild(true) })
@@ -1764,6 +1852,7 @@
   })
 
   updateScope()
+  pollTasks()
   refreshStatus(false)
   startStatusPoll()
   // `/api/status` spawns the Python helper; show the address/setup prompt even

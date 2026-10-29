@@ -15,6 +15,7 @@ import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, createRead
 import { createServer } from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createExportQueue, MAX_CONCURRENT } from './exportQueue.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const QUERY_CLI = path.join(HERE, 'scripts', 'qqnt_query.py')
@@ -267,6 +268,16 @@ function filtersFrom(params) {
   return args
 }
 
+/** The same filters, read from a JSON body instead of the query string. */
+function filtersFromBody(body) {
+  const args = {}
+  for (const key of ['chatKind', 'chatId', 'keyword', 'sender', 'since', 'until']) {
+    const value = body[key]
+    if (typeof value === 'string' && value.trim() !== '') args[key] = value.trim()
+  }
+  return args
+}
+
 function safeFileStem(text) {
   return String(text).replace(/[\\/:*?"<>|\r\n\t]+/g, '_').replace(/^\.+/, '').trim().slice(0, 60) || 'QQ聊天记录'
 }
@@ -413,6 +424,10 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
   })
   ready.catch(() => {})       // callers that ignore ready must not crash the process
   if (!port) return { close: async () => {}, url: '', error: undefined, ready: Promise.resolve('') }
+
+  // Long exports belong to a queue, not to one request: parsing a 1.2M-row
+  // account takes minutes and used to be cut at the 180-second timeout.
+  const queue = createExportQueue({ settings, queryCli: QUERY_CLI })
 
   let pageHtml = ''
   try {
@@ -654,6 +669,65 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
         .catch((error) => sendJson(res, error.status ?? 409, { error: error.message }))
       return
     }
+    if (req.method === 'POST' && pathname === '/api/export/queue') {
+      if (!isTrustedMutation(req)) {
+        sendJson(res, 403, { error: 'cross-origin requests are refused' })
+        return
+      }
+      readJsonBody(req)
+        .then((body) => {
+          const format = String(body.format || 'txt').toLowerCase()
+          const allowed = new Set(['txt', 'csv', 'json', 'md', 'html', 'sqlite'])
+          if (!allowed.has(format)) {
+            throw Object.assign(new Error(`unsupported format: ${format}`), { status: 400 })
+          }
+          const label = String(body.label || 'QQ聊天记录').slice(0, 120)
+          const queued = queue.enqueue(filtersFromBody(body), { label, format })
+          if (!queued) {
+            throw Object.assign(new Error(
+              `最多同时 ${MAX_CONCURRENT} 个导出任务，等一个完成再试`), { status: 429 })
+          }
+          sendJson(res, 202, { id: queued.id, task: queued })
+        })
+        .catch((error) => sendJson(res, error.status ?? 500, { error: error.message }))
+      return
+    }
+    if (req.method === 'GET' && pathname === '/api/export/queue') {
+      sendJson(res, 200, queue.list())
+      return
+    }
+    if (req.method === 'GET' && pathname.startsWith('/api/export/queue/')) {
+      const rest = pathname.slice('/api/export/queue/'.length)
+      const match = /^([0-9a-z]+)(\/file)?$/.exec(rest)
+      if (!match) {
+        sendJson(res, 404, { error: 'not found' })
+        return
+      }
+      const found = match[2] ? queue.file(match[1]) : null
+      if (!found) {
+        const task = queue.get(match[1])
+        sendJson(res, task ? 409 : 404, {
+          error: task ? '导出还没有完成' : '没有这个导出任务（进程重启后任务列表会清空）',
+        })
+        return
+      }
+      const filename = `${safeFileStem(found.task.label)}_${stamp()}.${found.task.format}`
+      res.writeHead(200, {
+        'content-type': found.task.format === 'html'
+          ? 'text/html; charset=utf-8' : 'application/octet-stream',
+        'content-disposition':
+          `attachment; filename="qqnt-export-${Date.now()}.${found.task.format}"; ` +
+          `filename*=UTF-8''${encodeURIComponent(filename)}`,
+        'cache-control': 'no-store',
+      })
+      const stream = createReadStream(found.path)
+      stream.on('error', () => {
+        if (!res.headersSent) sendJson(res, 500, { error: '导出文件不可读' })
+        else res.end()
+      })
+      stream.pipe(res)
+      return
+    }
     if (req.method === 'GET' && pathname === '/api/export') {
       const format = (params.get('format') || 'txt').toLowerCase()
       const allowed = new Set(['txt', 'csv', 'json', 'md', 'html', 'sqlite'])
@@ -792,6 +866,7 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
     },
     ready,
     close: () => new Promise((resolve) => {
+      queue.close()
       if (!server.listening) {
         resolve()
         return
