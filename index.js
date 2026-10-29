@@ -359,7 +359,7 @@ function statusTool(settings) {
   }
 }
 
-function keyTool(settings) {
+function keyTool(settings, busy) {
   return {
     name: 'qqnt_extract_key',
     description: 'Recover the local QQ message-database key from the running, logged-in QQ client and cache it for later calls. Finding the key is slow: it scans QQ process memory and validates candidate keys, which usually takes one to three minutes. Tell the user it takes a while and to please wait before calling this tool, and never cancel it merely because it is slow.',
@@ -381,6 +381,15 @@ function keyTool(settings) {
     timeoutMs: KEY_TIMEOUT_MS,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
+      // The web page runs the same job; two scans would race for key.txt and
+      // both write into the same work directory.
+      if (busy?.()) {
+        return {
+          ok: false,
+          exitCode: 1,
+          output: '网页正在提取数据库密钥，等它结束后再试；进度可以在网页的「设置 → 数据库密钥」里查看。',
+        }
+      }
       const argv = [...globalArgs(settings, args.account), 'key']
       if (args.force === true) argv.push('--force')
       const { code, output } = await runCli(settings, argv, exec)
@@ -486,10 +495,12 @@ function ptraceInfo() {
     // No yama on this kernel.
   }
   const root = typeof process.geteuid === 'function' && process.geteuid() === 0
+  // A missing yama file means the kernel does not restrict ptrace at all;
+  // treating `null` as "restricted" refuses extraction on those systems.
   return {
     platform: 'linux',
     ptraceScope: scope,
-    restricted: !root && scope !== 0,
+    restricted: !root && scope !== null && scope !== 0,
   }
 }
 
@@ -507,9 +518,12 @@ export function apply(ctx, config) {
   let overrides = loadOverrides()
   const settings = resolveSettings(bundleConfig, overrides)
   const defaults = resolveSettings(bundleConfig, {})
-  for (const build of [statusTool, keyTool, groupsTool, exportTool]) {
-    ctx.tools.register(build(settings))
-  }
+  // The model-facing key tool shares the web job's slot: `busy` is evaluated
+  // when the tool runs, long after `keyJob` below is initialised.
+  ctx.tools.register(statusTool(settings))
+  ctx.tools.register(keyTool(settings, () => keyJob.state === 'running'))
+  ctx.tools.register(groupsTool(settings))
+  ctx.tools.register(exportTool(settings))
 
   let webUrl = ''
   let webServer = null
@@ -599,6 +613,35 @@ export function apply(ctx, config) {
     resetSettings: () => commitSettings({}),
   }
 
+
+/** Data directories owned by QQ; the plugin must never write into them. */
+function qqDataRoots(tencentRoot) {
+  const home = os.homedir()
+  const roots = []
+  if (tencentRoot) roots.push(tencentRoot)
+  if (process.platform === 'win32') {
+    roots.push(path.join(home, 'Documents', 'Tencent Files'))
+  } else {
+    const configHome = process.env.XDG_CONFIG_HOME || path.join(home, '.config')
+    roots.push(
+      path.join(configHome, 'QQ'),
+      path.join(home, '.var', 'app', 'com.qq.QQ', 'config', 'QQ'),
+      path.join(home, '.var', 'app', 'com.tencent.qq', 'config', 'QQ'),
+      path.join(home, 'snap', 'qq', 'current', '.config', 'QQ'),
+      path.join(home, 'snap', 'qq', 'common', '.config', 'QQ'),
+      path.join(home, 'Documents', 'Tencent Files'),
+      path.join(home, '文档', 'Tencent Files'),
+    )
+  }
+  return roots
+}
+
+/** Whether `child` is `parent` itself or sits underneath it. */
+function isInsideDir(parent, child) {
+  const rel = path.relative(path.resolve(parent), path.resolve(child))
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+}
+
   /**
    * Apply a full set of overrides. A changed port is bind-tested on the new
    * port before the old listener is closed, so a typo or a busy port leaves
@@ -614,6 +657,13 @@ export function apply(ctx, config) {
       const next = resolveSettings(bundleConfig, nextOverrides)
       if (next.workDir === path.parse(next.workDir).root) {
         throw Object.assign(new Error('工作目录不能是文件系统根目录'), { status: 400 })
+      }
+      for (const root of qqDataRoots(next.tencentRoot)) {
+        if (isInsideDir(root, next.workDir)) {
+          throw Object.assign(new Error(
+            `工作目录不能放在 QQ 数据目录内（${root}）。插件对 QQ 数据只读，请换一个目录。`
+          ), { status: 400 })
+        }
       }
       try {
         ensureDir(next.workDir)
@@ -813,33 +863,46 @@ export function apply(ctx, config) {
         'Linux 的 ptrace 限制还没有放开。先在终端执行：sudo sysctl -w kernel.yama.ptrace_scope=0'
       ), { status: 409 })
     }
-    if (!(await hasSqlcipher(settings.python, undefined))) {
-      throw Object.assign(new Error(
-        '还没有可用的 sqlcipher3。先点「默认源安装」或「清华镜像安装」'
-      ), { status: 409 })
-    }
-
-    ensureDir(settings.workDir)
+    // Claim the slot before the first `await`: otherwise two clicks (or the
+    // model tool and the page) both pass the `running` check and scan memory,
+    // write key.txt, and overwrite each other's log.
     Object.assign(keyJob, {
-      state: 'running', step: '启动 QQ 进程扫描', error: '', force: !!force,
+      state: 'running', step: '检查运行环境', error: '', force: !!force,
       startedAt: Date.now(), finishedAt: 0, folded: 0, dropped: 0, key: false,
       log: ['提示：查找密钥耗时较长（通常 1~3 分钟，内存较大时更久），请耐心等待；期间保持 QQ 登录，不要关闭 QQ。'],
     })
     keyJobAbort = new AbortController()
+    let child
+    try {
+      ensureDir(settings.workDir)
+      if (!(await hasSqlcipher(settings.python, keyJobAbort.signal))) {
+        throw Object.assign(new Error(
+          '还没有可用的 sqlcipher3。先点「默认源安装」或「清华镜像安装」'
+        ), { status: 409 })
+      }
+      const argv = ['-X', 'utf8', CLI, '--work', settings.workDir]
+      if (settings.tencentRoot) argv.push('--root', settings.tencentRoot)
+      if (settings.account) argv.push('--account', String(settings.account))
+      argv.push('key')
+      if (force) argv.push('--force')
+      child = spawn(settings.python, argv, {
+        cwd: settings.workDir,
+        windowsHide: true,
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      keyJob.step = '启动 QQ 进程扫描'
+    } catch (error) {
+      // Nothing started; release the slot so the next click can try again.
+      keyJobAbort = null
+      Object.assign(keyJob, {
+        state: 'idle', step: '', error: '', finishedAt: Date.now(), log: [], key: false,
+      })
+      throw error && typeof error === 'object' && error.status
+        ? error
+        : Object.assign(error instanceof Error ? error : new Error(String(error)), { status: 409 })
+    }
     const signal = keyJobAbort.signal
-
-    const argv = ['-X', 'utf8', CLI, '--work', settings.workDir]
-    if (settings.tencentRoot) argv.push('--root', settings.tencentRoot)
-    if (settings.account) argv.push('--account', String(settings.account))
-    argv.push('key')
-    if (force) argv.push('--force')
-
-    const child = spawn(settings.python, argv, {
-      cwd: settings.workDir,
-      windowsHide: true,
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
     let outPending = ''
     let errPending = ''
     let settled = false

@@ -32,6 +32,7 @@ import re
 import sqlite3
 import sys
 import time
+import urllib.parse
 
 # --------------------------------------------------------------------------
 # 平台
@@ -96,6 +97,28 @@ def fmt_count(n):
     return '{:,}'.format(int(n))
 
 
+def as_seconds(ts):
+    """Unix 时间戳容错：兼容毫秒值、字符串和异常越界值。
+
+    QQ 改字段单位（秒 -> 毫秒）或个别行损坏时，datetime.fromtimestamp 会抛
+    ValueError/OverflowError，进而中断整次导出。统一在这里收敛成秒或 0。
+    """
+    try:
+        value = int(ts or 0)
+    except (TypeError, ValueError):
+        return 0
+    if value > 10 ** 11:              # 毫秒
+        value //= 1000
+    if value < 0 or value > 10 ** 10:  # 2100 年之后视为脏数据
+        return 0
+    return value
+
+
+def fmt_timestamp(ts, pattern='%Y-%m-%d %H:%M:%S'):
+    seconds = as_seconds(ts)
+    return datetime.datetime.fromtimestamp(seconds).strftime(pattern) if seconds else ''
+
+
 def ensure_workdir(path):
     """Create the work directory and keep its plaintext contents private.
 
@@ -112,6 +135,33 @@ def ensure_workdir(path):
     return path
 
 
+def ensure_private_dir(path):
+    """Create an export directory that other local users cannot traverse."""
+    return ensure_workdir(path)
+
+
+def private_file(path):
+    if not IS_WINDOWS:
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    return path
+
+
+def csv_cell(value):
+    """Neutralize spreadsheet formulas in untrusted chat text.
+
+    Group members can send `=HYPERLINK(...)`, `+cmd`, `@SUM(...)`, or text that
+    starts with a tab/CR; Excel and LibreOffice would evaluate those on open.
+    A leading apostrophe keeps the cell as text without changing what it says.
+    """
+    text = '' if value is None else str(value)
+    if text[:1] in ('=', '+', '-', '@', '\t', '\r'):
+        return "'" + text
+    return text
+
+
 def sqlcipher_module():
     try:
         from sqlcipher3 import dbapi2 as mod
@@ -125,9 +175,21 @@ def sqlcipher_module():
             '~/.venvs/qqnt/bin/pip install sqlcipher3-wheels')
 
 
+def _readonly_uri(path):
+    normalized = os.path.abspath(path).replace('\\', '/')
+    return 'file:%s?mode=ro' % urllib.parse.quote(normalized, safe='/:')
+
+
 def open_encrypted(path, key, readonly=True):
+    """Open a stripped QQ database; read-only by default.
+
+    The decrypted copy belongs to the plugin, and every caller only reads it.
+    A read-write handle would create -journal/-wal files and take write locks,
+    which breaks when the work directory is on read-only media and can race a
+    concurrent copy.
+    """
     mod = sqlcipher_module()
-    conn = mod.connect(path)
+    conn = mod.connect(_readonly_uri(path), uri=True) if readonly else mod.connect(path)
     for name, value in SQLCIPHER_PRAGMAS[:1]:
         conn.execute('PRAGMA %s = %s' % (name, value))
     conn.execute("PRAGMA key = '%s'" % key.replace("'", "''"))
@@ -591,19 +653,24 @@ def _iter_accounts(root):
                                 hash_=name[len('nt_qq_'):])
 
 
-def find_account(root=None, account=None):
-    """返回 (uin, nt_db_dir, nt_data_dir, nt_msg_size)"""
+def find_account(root=None, account=None, strict=True):
+    """返回 (uin, nt_db_dir, nt_data_dir, nt_msg_size)
+
+    ``strict=False`` returns empty strings instead of exiting; the status
+    command uses it so a machine without QQ still produces a JSON report.
+    """
     roots = [root] if root else default_roots()
     accounts = []
     for candidate in roots:
         accounts.extend(_iter_accounts(candidate))
-    if not accounts and root:
-        # Keep the original Windows behaviour: a wrong/explicit --root still
-        # falls back to the platform's default data directory.
-        roots = default_roots()
-        for candidate in roots:
-            accounts.extend(_iter_accounts(candidate))
     if not accounts:
+        if not strict:
+            return '', '', '', 0
+        if root:
+            # A wrong --root must not silently fall back to the default
+            # directory: the user would inspect data they did not ask for.
+            die('指定的 QQ 数据目录里没有找到账号：%s。确认路径正确、QQ 为 NT 架构并已登录过。'
+                % root)
         die('找不到 QQ 数据目录（已查找: %s）。确认 QQ 为 NT 架构并已登录过。'
             % ', '.join(roots))
 
@@ -612,6 +679,8 @@ def find_account(root=None, account=None):
         for acc in accounts:
             if want in (acc['label'], acc['hash'], 'nt_qq_' + acc['hash']):
                 return acc['label'], acc['dbdir'], acc['datadir'], acc['size']
+        if not strict:
+            return '', '', '', 0
         known = ', '.join(sorted({acc['label'] for acc in accounts}))
         die('没有找到账号 %s。可用账号: %s' % (want, known))
 
@@ -631,6 +700,46 @@ def try_key(db_path, key):
         return False
 
 
+def key_meta_path(work):
+    return os.path.join(work, 'key.json')
+
+
+def write_key_meta(work, uin, src):
+    """Remember which account (and source DB) a cached key belongs to.
+
+    key.txt is shared by every account that uses this work directory. Without
+    this stamp, switching QQ accounts silently validates the old key against
+    the new database and ends in a confusing "no key found".
+    """
+    payload = {'account': str(uin or ''), 'size': os.path.getsize(src),
+               'mtime': int(os.stat(src).st_mtime)}
+    target = key_meta_path(work)
+    tmp = target + '.tmp'
+    fd = os.open(tmp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, ensure_ascii=False)
+    os.replace(tmp, target)
+
+
+def read_key_meta(work):
+    try:
+        with open(key_meta_path(work), encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def check_key_account(work, account):
+    """Return an error string when the cached key belongs to another account."""
+    meta = read_key_meta(work)
+    owner = str(meta.get('account') or '')
+    if owner and account and owner != str(account):
+        return ('缓存密钥属于账号 %s，当前账号是 %s，需要为当前账号重新提取密钥。'
+                % (owner, account))
+    return ''
+
+
 def cmd_key(args):
     sqlcipher_module()          # fail before a multi-minute memory scan
     uin, dbdir, datadir, _ = find_account(args.root, args.account)
@@ -639,12 +748,17 @@ def cmd_key(args):
     ensure_workdir(args.work)
 
     if os.path.exists(keyfile) and not args.force:
-        key = open(keyfile, encoding='ascii', errors='replace').read().strip()
-        if key and try_key(strip_db(src, args.work, quiet=True), key):
-            print('已有可用密钥，无需重新提取（--force 可强制重新扫描）。')
-            print('密钥文件: %s（内容不在输出中显示）' % keyfile)
-            return
-        warn('缓存的密钥无效，重新提取')
+        mismatch = check_key_account(args.work, uin)
+        if mismatch:
+            warn(mismatch)
+        else:
+            key = open(keyfile, encoding='ascii', errors='replace').read().strip()
+            if key and try_key(strip_db(src, args.work, quiet=True), key):
+                write_key_meta(args.work, uin, src)
+                print('已有可用密钥，无需重新提取（--force 可强制重新扫描）。')
+                print('密钥文件: %s（内容不在输出中显示）' % keyfile)
+                return
+            warn('缓存的密钥无效，重新提取')
 
     pids = find_pids()
     if not pids:
@@ -694,16 +808,30 @@ def cmd_key(args):
         if try_key(clear, key):
             elapsed = time.time() - t0
             print('')
-            print('*** 找到密钥: %s ***' % key)
+            # Never echo the key: it is a credential, and stdout ends up in
+            # terminals, CI logs, screenshots, and the DSH transcript.
+            print('*** 找到密钥（内容已隐藏）***')
             print('  第 %s 个候选命中（共 %s 个），总用时 %.0f 秒'
                   % (fmt_count(i), fmt_count(len(ordered)), elapsed))
-            with open(keyfile, 'w', encoding='ascii') as f:
-                f.write(key)
-            if not IS_WINDOWS:
+            tmp = keyfile + '.tmp'
+            try:
+                # Create the temp file with 0600 so permissive umasks never
+                # expose the key between the write and the chmod.
+                fd = os.open(tmp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+                with os.fdopen(fd, 'w', encoding='ascii') as f:
+                    f.write(key)
+                if not IS_WINDOWS:
+                    try:
+                        os.chmod(tmp, 0o600)
+                    except OSError:
+                        pass
+                os.replace(tmp, keyfile)
+            except OSError:
                 try:
-                    os.chmod(keyfile, 0o600)
+                    os.remove(tmp)
                 except OSError:
                     pass
+                raise
             print('  已保存到: ' + keyfile)
             return
         now = time.time()
@@ -717,16 +845,68 @@ def cmd_key(args):
     die('没有找到有效密钥。请确认: 1) QQ 已登录 2) 数据目录正确 3) QQ 版本为 NT 架构')
 
 
+def _copy_is_fresh(src, dst, skip=HEADER_SIZE):
+    """True when *dst* is byte-identical in size and source mtime to *src*.
+
+    A size-only check silently reuses a stale copy when SQLite rewrites pages in
+    place (same file size, different content), and when two accounts happen to
+    have equally sized databases.
+    """
+    try:
+        src_stat = os.stat(src)
+        dst_stat = os.stat(dst)
+    except OSError:
+        return False
+    return (dst_stat.st_size == src_stat.st_size - skip
+            and dst_stat.st_mtime_ns == src_stat.st_mtime_ns)
+
+
+def copy_db_file(src, dst, skip=HEADER_SIZE, quiet=True):
+    """Copy *src* without its Tencent header into *dst*, atomically.
+
+    QQ keeps writing the source while it runs, so the copy goes to a
+    per-process temp file, is checked against the expected length, stamped with
+    the source mtime, and only then renamed into place. A torn copy is retried
+    once instead of being left behind as a plausible-looking database.
+    """
+    ensure_workdir(os.path.dirname(dst) or os.curdir)
+    if _copy_is_fresh(src, dst, skip):
+        return dst
+    tmp = '%s.%d.tmp' % (dst, os.getpid())
+    last_error = None
+    for _ in range(2):
+        try:
+            expected = os.path.getsize(src) - skip
+            copy_shared(src, tmp, skip=skip)
+            got = os.path.getsize(tmp)
+            if got != expected:
+                raise OSError('复制不完整：期望 %d 字节，实际 %d 字节（QQ 可能正在写入数据库，稍后重试）'
+                              % (expected, got))
+            src_stat = os.stat(src)
+            try:
+                os.utime(tmp, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
+            except OSError:
+                # Some filesystems cannot store this timestamp; the copy is
+                # still valid, it just gets refreshed on the next call.
+                pass
+            os.replace(tmp, dst)
+            private_file(dst)
+            if not quiet:
+                print('复制并剥离 %d 字节头 -> %s' % (skip, dst))
+            return dst
+        except OSError as exc:
+            last_error = exc
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    raise last_error
+
+
 def strip_db(src, work, quiet=False):
     """剥掉 1024 字节自定义头，返回明文 SQLCipher 文件路径"""
     ensure_workdir(work)
-    dst = os.path.join(work, 'nt_msg.db')
-    if os.path.exists(dst) and os.path.getsize(dst) == os.path.getsize(src) - HEADER_SIZE:
-        return dst
-    if not quiet:
-        print('复制并剥离 1024 字节头 -> %s' % dst)
-    copy_shared(src, dst, skip=HEADER_SIZE)
-    return dst
+    return copy_db_file(src, os.path.join(work, 'nt_msg.db'), quiet=quiet)
 
 
 # --------------------------------------------------------------------------
@@ -735,13 +915,16 @@ def strip_db(src, work, quiet=False):
 def rv(b, i):
     r = 0
     s = 0
-    while True:
+    while i < len(b):
         x = b[i]
         i += 1
         r |= (x & 0x7F) << s
         if not (x & 0x80):
             return r, i
         s += 7
+        if s > 63:
+            raise ValueError('varint too long')
+    raise ValueError('truncated varint')
 
 
 def walk(b):
@@ -780,7 +963,7 @@ def s2(v):
     return v.decode('utf-8', 'replace') if isinstance(v, bytes) else ''
 
 
-def render(blob):
+def _render(blob):
     """40800 blob -> (可读文本, 消息段类型串)"""
     if not blob:
         return '', ''
@@ -853,6 +1036,14 @@ def render(blob):
     return text, ','.join(kinds)
 
 
+def render(blob):
+    """容错版 _render：单条损坏的消息不能中断整次导出或索引构建。"""
+    try:
+        return _render(blob)
+    except Exception:          # noqa: BLE001 - 截断/畸形 Protobuf
+        return '[无法解析的消息]', ''
+
+
 # --------------------------------------------------------------------------
 # 元数据
 # --------------------------------------------------------------------------
@@ -897,10 +1088,13 @@ def member_names(dbdir, key, work, gid):
 # --------------------------------------------------------------------------
 # 命令
 # --------------------------------------------------------------------------
-def load_key(args, dbdir):
+def load_key(args, dbdir, uin):
     keyfile = os.path.join(args.work, 'key.txt')
     if args.key:
         return args.key
+    mismatch = check_key_account(args.work, uin)
+    if mismatch:
+        die(mismatch + '\n    python qqnt_export.py key --account %s --force' % uin)
     if os.path.exists(keyfile):
         key = open(keyfile, encoding='ascii', errors='replace').read().strip()
         if key:
@@ -931,7 +1125,7 @@ def cmd_info(args):
 
 def cmd_groups(args):
     uin, dbdir, datadir, _ = find_account(args.root, args.account)
-    key = load_key(args, dbdir)
+    key = load_key(args, dbdir, uin)
     clear = strip_db(os.path.join(dbdir, 'nt_msg.db'), args.work)
     names = group_names(dbdir, key, args.work)
     conn = open_encrypted(clear, key)
@@ -949,13 +1143,13 @@ def cmd_groups(args):
             gid_i = int(gid)
         except (TypeError, ValueError):
             continue
-        f = lambda t: datetime.datetime.fromtimestamp(t).strftime('%Y-%m-%d') if t and t > 0 else '-'
+        f = lambda t: fmt_timestamp(t, '%Y-%m-%d') or '-'
         print('%-14s %-9s %-12s %-12s %s' % (gid_i, cnt, f(mn), f(mx), names.get(gid_i, '')))
 
 
 def cmd_export(args):
     uin, dbdir, datadir, _ = find_account(args.root, args.account)
-    key = load_key(args, dbdir)
+    key = load_key(args, dbdir, uin)
     gid = str(args.group).strip()
 
     clear = strip_db(os.path.join(dbdir, 'nt_msg.db'), args.work)
@@ -979,7 +1173,7 @@ def cmd_export(args):
         die(msg)
 
     out = args.out or os.path.join(os.getcwd(), 'QQ导出_' + gid)
-    os.makedirs(out, exist_ok=True)
+    ensure_private_dir(out)
     print('账号 %s  群 %s %s  共 %d 条' % (uin, gid, gname, total))
 
     txt_path = os.path.join(out, '聊天记录.txt')
@@ -1027,14 +1221,13 @@ def cmd_export(args):
     for msg_id, ts, uid, qq, direction, t11, t12, blob in cur:
         text, kinds = render(blob)
         name = names.get(uid) or (str(qq) if qq else (uid or '?'))
-        ts_s = datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S') \
-            if ts and ts > 0 else ''
+        ts_s = fmt_timestamp(ts)
         if sq:
-            batch.append((msg_id, ts or 0, ts_s, uid, qq, name, direction, t11, t12, text, kinds))
+            batch.append((msg_id, as_seconds(ts), ts_s, uid, qq, name, direction, t11, t12, text, kinds))
         if fx and ts_s:
             fx.write('[%s] %s: %s\n' % (ts_s, name, text.replace('\n', ' \\n ')))
         if cw and ts_s:
-            cw.writerow([ts_s, name, qq or '', text])
+            cw.writerow([csv_cell(ts_s), csv_cell(name), csv_cell(qq or ''), csv_cell(text)])
         n += 1
         if sq and len(batch) >= 5000:
             sq.executemany('INSERT OR REPLACE INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?)', batch)
@@ -1046,18 +1239,22 @@ def cmd_export(args):
         sq.commit()
     if fx:
         fx.close()
+        private_file(txt_path)
     if fcsv:
         fcsv.close()
+        private_file(csv_path)
 
     if sq:
         sq.execute('CREATE INDEX idx_ts ON messages(ts)')
         sq.execute('CREATE INDEX idx_sender ON messages(sender_qq)')
         sq.commit()
         sq.close()
+        private_file(db_path)
     conn.close()
 
     write_readme(out, gid, gname, uin, total, datadir,
                  want_txt=want_txt, want_sqlite=want_sqlite, want_csv=want_csv)
+    private_file(os.path.join(out, 'README.md'))
     print('\n完成，用时 %.1fs' % (time.time() - t0))
     for p in (txt_path, db_path, csv_path):
         if os.path.exists(p):
@@ -1133,6 +1330,11 @@ SELECT time, sender_name, text FROM messages WHERE text LIKE '%关键词%';
 
 # --------------------------------------------------------------------------
 def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding='utf-8', errors='replace')
+        except (AttributeError, ValueError):
+            pass
     p = argparse.ArgumentParser(
         description='NTQQ 群聊记录导出（Windows / Linux，仅限导出你自己的聊天记录）',
         formatter_class=argparse.RawDescriptionHelpFormatter,

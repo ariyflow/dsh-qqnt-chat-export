@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "QQ Chat Export",
-    "description": "Exports NTQQ group chat history from the running QQ client as plain text, SQLite, and CSV."
+    "description": "Read, search, and export NTQQ group and private chat history on Windows and Linux. Local web UI: http://127.0.0.1:46728/ (the port is configurable in Settings)."
   }
 }

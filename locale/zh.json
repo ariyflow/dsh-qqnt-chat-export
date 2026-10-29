@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "QQ 聊天记录导出",
-    "description": "从正在运行的 NTQQ 客户端导出群聊记录为纯文本、SQLite 和 CSV。"
+    "description": "在 Windows / Linux 上读取、搜索并导出 NTQQ 群聊和私聊记录。本地网页界面：http://127.0.0.1:46728/（端口可在设置中修改）。"
   }
 }

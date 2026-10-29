@@ -26,8 +26,10 @@ import argparse
 import datetime
 import json
 import os
+import shutil
 import sqlite3
 import sys
+import threading
 import time
 import urllib.parse
 
@@ -36,6 +38,7 @@ import qqnt_export as q
 GROUP_KIND = 'group'
 PRIVATE_KIND = 'private'
 PAGE_LIMIT_MAX = 500
+INDEX_VERSION = '3'            # bump when the sidecar schema changes
 STATUS_INTERVAL = 1.5          # seconds between progress writes
 BATCH = 2000
 LOCK_MAX_AGE = 15 * 60         # seconds before a stale build lock is taken over
@@ -46,7 +49,8 @@ class BadInput(Exception):
 
 SCHEMA = '''
 CREATE TABLE messages(
-    msg_id      INTEGER PRIMARY KEY,
+    id          INTEGER PRIMARY KEY,
+    msg_id      INTEGER NOT NULL,
     chat_kind   TEXT    NOT NULL,
     chat_id     TEXT    NOT NULL,
     ts          INTEGER NOT NULL,
@@ -57,7 +61,8 @@ CREATE TABLE messages(
     msg_type    INTEGER,
     subtype     INTEGER,
     seg_kinds   TEXT,
-    text        TEXT
+    text        TEXT,
+    UNIQUE(chat_kind, msg_id)
 );
 CREATE TABLE chats(
     chat_kind TEXT NOT NULL,
@@ -68,6 +73,14 @@ CREATE TABLE chats(
 );
 CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT);
 '''
+
+# The keyword index. Contentless because `messages.text` is already stored:
+# duplicating a few million messages would double the sidecar for no gain, and
+# every query joins back on `rowid` anyway. `trigram` is what makes a substring
+# search (not just a word search) fast for Chinese, which has no word breaks.
+FTS_DDL = ("CREATE VIRTUAL TABLE message_fts USING fts5("
+           "text, content='', tokenize='trigram')")
+MIN_FTS_CHARS = 3              # a trigram cannot answer a shorter query
 
 
 # --------------------------------------------------------------------------
@@ -99,26 +112,30 @@ def readonly_uri(path):
     return 'file:%s?mode=ro' % urllib.parse.quote(normalized, safe='/:')
 
 
-def read_key(p):
+def read_key(p, account=None):
+    mismatch = q.check_key_account(p['work'], account)
+    if mismatch:
+        q.die(mismatch + ' 在网页点「提取密钥」即可为当前账号重新提取。')
     try:
         with open(p['key'], encoding='ascii', errors='replace') as f:
             key = f.read().strip()
     except OSError:
-        q.die('还没有数据库密钥。先运行 qqnt_extract_key 提取密钥。')
+        q.die('还没有数据库密钥。先在网页点「提取密钥」，或运行 qqnt_extract_key。')
     if not key:
         q.die('密钥文件是空的。先运行 qqnt_extract_key。')
     return key
 
 
 def copy_db(src, dst):
-    """Copy one database with its 1 KB Tencent header stripped, reusing the copy."""
+    """Copy one database with its 1 KB Tencent header stripped.
+
+    Delegates to the shared implementation so the copy is atomic, verified, and
+    reused only while the source's size and mtime still match.
+    """
     if not os.path.exists(src):
         return None
     q.ensure_workdir(os.path.dirname(dst))
-    if os.path.exists(dst) and os.path.getsize(dst) == os.path.getsize(src) - q.HEADER_SIZE:
-        return dst
-    q.copy_shared(src, dst, skip=q.HEADER_SIZE)
-    return dst
+    return q.copy_db_file(src, dst)
 
 
 def write_status(p, payload):
@@ -154,7 +171,8 @@ def index_counts(path):
         messages = conn.execute('SELECT count(*) FROM messages').fetchone()[0]
         chats = conn.execute('SELECT count(*) FROM chats').fetchone()[0]
         conn.close()
-        return {'messages': messages, 'chats': chats, 'builtAt': int(meta.get('builtAt', 0))}, messages
+        return {'messages': messages, 'chats': chats, 'builtAt': int(meta.get('builtAt', 0)),
+                'account': str(meta.get('account') or '')}, messages
     except sqlite3.Error as exc:
         return {'error': str(exc)}, 0
 
@@ -195,7 +213,13 @@ def load_names(p, key):
 # 建索引
 # --------------------------------------------------------------------------
 def acquire_lock(p):
-    """序列化构建：两个 build 同时写 index.sqlite.tmp 会互相覆盖。"""
+    """序列化构建：两个 build 同时写 index.sqlite.tmp 会互相覆盖。
+
+    The lock records the owner's pid and its mtime is refreshed by every
+    progress report, so a genuinely long build is never mistaken for a stale
+    lock. Taking over a stale lock re-checks O_EXCL, because two late builds
+    may try to steal it at the same moment.
+    """
     lock = os.path.join(p['work'], 'build.lock')
     try:
         handle = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -206,21 +230,57 @@ def acquire_lock(p):
             age = 0
         if age < LOCK_MAX_AGE:
             raise BadInput('已有一次索引构建在进行（已 %.0f 秒），请等它结束。' % age)
-        os.remove(lock)          # 陈旧锁，接管
-        handle = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            os.remove(lock)          # 陈旧锁，接管
+        except FileNotFoundError:
+            pass
+        try:
+            handle = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            raise BadInput('另一个索引构建刚刚接管了锁，请稍后重试。')
     os.write(handle, str(os.getpid()).encode())
     os.close(handle)
     return lock
 
 
+def touch_lock(lock):
+    """刷新构建锁的 mtime，向其它进程证明这个构建还活着。"""
+    if not lock:
+        return
+    try:
+        os.utime(lock, None)
+    except OSError:
+        pass
+
+
+def start_heartbeat(lock, interval=60):
+    """后台刷新锁，覆盖读取群名、解密大表等长时间没有进度上报的阶段。"""
+    stop = threading.Event()
+
+    def beat():
+        while not stop.wait(interval):
+            touch_lock(lock)
+
+    thread = threading.Thread(target=beat, name='build-lock-heartbeat', daemon=True)
+    thread.start()
+    return stop
+
+
 def cmd_build(p, root, account, refresh):
     q.ensure_workdir(p['work'])
     lock = acquire_lock(p)
+    stop_heartbeat = start_heartbeat(lock)
     try:
-        run_build(p, root, account, refresh)
+        run_build(p, root, account, refresh, lock)
     finally:
+        stop_heartbeat.set()
+        # Another process may have taken over a lock we could not refresh;
+        # deleting it unconditionally would break that build.
         try:
-            os.remove(lock)
+            with open(lock, encoding='ascii') as fh:
+                owned = fh.read().strip() == str(os.getpid())
+            if owned:
+                os.remove(lock)
         except OSError:
             pass
 
@@ -236,20 +296,74 @@ def require_build_prerequisites(p):
             '如果系统 pip 受 PEP 668 限制，建议创建虚拟环境，并在网页“设置”里把 '
             'Python 解释器指向它。' % (exc, sys.executable))
     if not os.path.exists(p['key']):
-        raise BadInput('还没有数据库密钥。先在 DSH 会话里运行 qqnt_extract_key，'
-                       '成功后再建立索引。')
+        raise BadInput('还没有数据库密钥。先在网页点「提取密钥」（或运行 '
+                       'qqnt_extract_key），成功后再建立索引。')
 
 
-def run_build(p, root, account, refresh):
+def index_snapshot(path):
+    """Read account, per-kind counts, and msg_id watermarks from an index."""
+    if not os.path.exists(path):
+        return None
+    try:
+        conn = sqlite3.connect(readonly_uri(path), uri=True)
+        try:
+            meta = dict(conn.execute('SELECT k, v FROM meta').fetchall())
+            counts, marks = {}, {}
+            for kind in (GROUP_KIND, PRIVATE_KIND):
+                counts[kind] = conn.execute(
+                    'SELECT count(*) FROM messages WHERE chat_kind=?', (kind,)).fetchone()[0]
+                marks[kind] = int(conn.execute(
+                    'SELECT max(msg_id) FROM messages WHERE chat_kind=?', (kind,)).fetchone()[0] or 0)
+            return {'meta': meta, 'counts': counts, 'marks': marks}
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        return None
+
+
+def plan_incremental(p, src, uin, source_counts):
+    """Append-only sync, or None to request a full rebuild.
+
+    Only rows above the stored msg_id watermark are read. The per-kind count
+    equality check refuses the plan when the source gained or lost rows below
+    the watermark (deletion, backfill, account switch), so those cases fall
+    back to a full parse instead of silently keeping stale messages.
+    """
+    snap = index_snapshot(p['index'])
+    if not snap:
+        return None
+    if str(snap['meta'].get('account') or '') != str(uin):
+        return None
+    if str(snap['meta'].get('version') or '') != INDEX_VERSION:
+        return None
+    new_counts, total_new = {}, 0
+    for kind, table in ((GROUP_KIND, 'group_msg_table'), (PRIVATE_KIND, 'c2c_msg_table')):
+        mark = snap['marks'].get(kind, 0)
+        added = src.execute(
+            'SELECT count(*) FROM %s WHERE [40001] > ?' % table, (mark,)).fetchone()[0]
+        if source_counts.get(kind, 0) != snap['counts'].get(kind, 0) + added:
+            return None
+        new_counts[kind] = added
+        total_new += added
+    return {
+        'marks': snap['marks'], 'new_counts': new_counts, 'total_new': total_new,
+        'old_total': sum(snap['counts'].values()),
+        'new_total': sum(snap['counts'].values()) + total_new,
+    }
+
+
+def run_build(p, root, account, refresh, lock=None):
     started = int(time.time())
     state = {'state': 'running', 'mode': 'full', 'processed': 0, 'total': 0,
              'startedAt': started, 'finishedAt': 0, 'error': '',
              'index': p['index']}
     write_status(p, state)
+    touch_lock(lock)
 
     def report(**kwargs):
         state.update(kwargs)
         write_status(p, state)
+        touch_lock(lock)
 
     try:
         q.LAST_ERROR = ''
@@ -258,6 +372,9 @@ def run_build(p, root, account, refresh):
         state['account'] = uin
         report()
 
+        # Resolve the key before copying a ~1 GB database: a key stamped for
+        # another account should fail in milliseconds, not after a long copy.
+        key = read_key(p, uin)
         src_msg = os.path.join(dbdir, 'nt_msg.db')
         if refresh or not os.path.exists(p['db']):
             report(step='复制并剥离数据库副本')
@@ -265,15 +382,45 @@ def run_build(p, root, account, refresh):
         for name, slot in (('group_info.db', 'group'), ('profile_info.db', 'profile')):
             copy_db(os.path.join(dbdir, name), p[slot])
 
-        key = read_key(p)
         report(step='读取群名与昵称')
         group_names, member_names, friends = load_names(p, key)
 
         report(step='打开加密数据库')
         src = q.open_encrypted(p['db'], key)
-        total = src.execute('SELECT count(*) FROM group_msg_table').fetchone()[0]
-        total += src.execute('SELECT count(*) FROM c2c_msg_table').fetchone()[0]
-        report(total=total, step='解析消息')
+        source_counts = {}
+        for kind, table in ((GROUP_KIND, 'group_msg_table'), (PRIVATE_KIND, 'c2c_msg_table')):
+            source_counts[kind] = src.execute('SELECT count(*) FROM %s' % table).fetchone()[0]
+        source_total = sum(source_counts.values())
+
+        plan = None
+        if refresh and os.path.exists(p['index']):
+            plan = plan_incremental(p, src, uin, source_counts)
+        mode = 'incremental' if plan else 'full'
+        if plan and plan['total_new'] == 0:
+            # Nothing new: keep the existing index, only refresh its builtAt.
+            try:
+                conn = sqlite3.connect(p['index'])
+                try:
+                    conn.execute("INSERT OR REPLACE INTO meta VALUES ('builtAt', ?)",
+                                 (str(int(time.time())),))
+                    conn.commit()
+                finally:
+                    conn.close()
+            except sqlite3.Error:
+                pass
+            src.close()
+            write_status(p, {
+                'state': 'done', 'mode': 'incremental', 'processed': 0,
+                'total': plan['new_total'],
+                'startedAt': started, 'finishedAt': int(time.time()), 'error': '',
+                'index': p['index'], 'account': uin, 'step': '已是最新', 'added': 0,
+            })
+            print(json.dumps({'ok': True, 'mode': 'incremental', 'added': 0,
+                              'seconds': int(time.time()) - started}, ensure_ascii=False))
+            return
+
+        total = plan['total_new'] if plan else source_total
+        report(total=total, mode=mode, step=('同步新消息' if plan else '解析消息'))
 
         tmp = p['index'] + '.tmp'
         for suffix in ('', '-wal', '-shm'):
@@ -281,23 +428,39 @@ def run_build(p, root, account, refresh):
                 os.remove(tmp + suffix)
             except OSError:
                 pass
+        if plan:
+            shutil.copyfile(p['index'], tmp)
         idx = sqlite3.connect(tmp)
         idx.execute('PRAGMA journal_mode=OFF')
         idx.execute('PRAGMA synchronous=OFF')
-        idx.executescript(SCHEMA)
+        if not plan:
+            idx.executescript(SCHEMA)
+            fts = create_fts(idx)
+        else:
+            # A copied index keeps its own keyword table; an index built on a
+            # SQLite without FTS5 simply has none.
+            fts = has_fts(idx)
 
         chats = {}
         processed = 0
         last_report = 0.0
+        next_id = 1
+        if plan:
+            next_id = idx.execute(
+                'SELECT coalesce(max(id), 0) + 1 FROM messages').fetchone()[0]
         insert = ('INSERT OR REPLACE INTO messages VALUES '
-                  '(?,?,?,?,?,?,?,?,?,?,?,?)')
+                  '(?,?,?,?,?,?,?,?,?,?,?,?,?)')
 
         for kind, table in ((GROUP_KIND, 'group_msg_table'),
                             (PRIVATE_KIND, 'c2c_msg_table')):
-            cur = src.execute(
-                'SELECT [40001],[40050],[40020],[40033],[40013],[40011],[40012],'
-                '[40800],[40021] FROM %s' % table)
-            batch = []
+            sql = ('SELECT [40001],[40050],[40020],[40033],[40013],[40011],[40012],'
+                   '[40800],[40021] FROM %s' % table)
+            params = ()
+            if plan:
+                sql += ' WHERE [40001] > ?'
+                params = (plan['marks'].get(kind, 0),)
+            cur = src.execute(sql, params)
+            batch, fts_batch = [], []
             while True:
                 rows = cur.fetchmany(BATCH)
                 if not rows:
@@ -329,11 +492,20 @@ def run_build(p, root, account, refresh):
                         is_out = 0
                     else:
                         is_out = 1
-                    batch.append((msg_id, kind, chat_id, int(ts or 0), uid, qq_s,
-                                  sender, is_out, t11, t12, kinds, text))
+                    batch.append((next_id, msg_id, kind, chat_id, q.as_seconds(ts),
+                                  uid, qq_s, sender, is_out, t11, t12, kinds, text))
+                    if fts:
+                        # Row ids are ours, so the keyword index can be fed
+                        # from the same tuple without a second lookup.
+                        fts_batch.append((next_id, text))
+                    next_id += 1
                     processed += 1
                 idx.executemany(insert, batch)
                 batch.clear()
+                if fts and fts_batch:
+                    idx.executemany(
+                        'INSERT INTO message_fts(rowid, text) VALUES (?,?)', fts_batch)
+                    fts_batch.clear()
                 now = time.time()
                 if now - last_report >= STATUS_INTERVAL:
                     last_report = now
@@ -352,11 +524,15 @@ def run_build(p, root, account, refresh):
         idx.executemany(
             'INSERT OR REPLACE INTO chats VALUES (?,?,?,?)',
             [(kind, chat_id, name, qq) for (kind, chat_id), (name, qq) in resolved.items()])
-        idx.execute('CREATE INDEX idx_chat_ts ON messages(chat_kind, chat_id, ts)')
-        idx.execute('CREATE INDEX idx_ts ON messages(ts)')
+        if not plan:
+            idx.execute('CREATE INDEX idx_chat_ts ON messages(chat_kind, chat_id, ts)')
+            idx.execute('CREATE INDEX idx_ts ON messages(ts)')
+        total_after = plan['new_total'] if plan else processed
         meta = {'builtAt': int(time.time()), 'account': str(uin),
-                'datadir': datadir, 'total': str(processed),
-                'version': '1'}
+                'datadir': datadir, 'total': str(total_after),
+                'chats': str(idx.execute('SELECT count(*) FROM chats').fetchone()[0]),
+                'fts': '1' if fts else '0',
+                'version': INDEX_VERSION}
         idx.executemany('INSERT OR REPLACE INTO meta VALUES (?,?)', list(meta.items()))
         idx.commit()
         idx.close()
@@ -370,12 +546,14 @@ def run_build(p, root, account, refresh):
         os.replace(tmp, p['index'])
 
         write_status(p, {
-            'state': 'done', 'mode': 'full', 'processed': processed,
-            'total': processed, 'startedAt': started,
+            'state': 'done', 'mode': mode, 'processed': processed,
+            'total': total_after, 'startedAt': started,
             'finishedAt': int(time.time()), 'error': '',
             'index': p['index'], 'account': uin, 'step': '完成',
+            'added': plan['total_new'] if plan else processed,
         })
-        print(json.dumps({'ok': True, 'processed': processed,
+        print(json.dumps({'ok': True, 'mode': mode, 'processed': processed,
+                          'added': plan['total_new'] if plan else processed,
                           'seconds': int(time.time()) - started}, ensure_ascii=False))
     except BaseException as exc:      # noqa: BLE001 - 任何失败都要落到状态文件
         if isinstance(exc, BadInput):
@@ -403,6 +581,29 @@ def like_escape(text):
         text = text.replace(ch, '\\' + ch)
     return text
 
+def create_fts(conn):
+    """Create the trigram keyword index; False when this SQLite lacks it."""
+    try:
+        conn.execute(FTS_DDL)
+        return True
+    except sqlite3.Error:
+        # FTS5 is optional in SQLCipher builds; queries fall back to LIKE.
+        return False
+
+
+def has_fts(conn):
+    try:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_fts'"
+        ).fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
+def fts_phrase(keyword):
+    """Quote a keyword as an FTS5 phrase so MATCH operators stay literal."""
+    return '"%s"' % keyword.replace('"', '""')
+
 
 def parse_day(value, end):
     """'YYYY-MM-DD' 或 Unix 秒 -> 本地时区当天的起止时间戳。"""
@@ -423,7 +624,7 @@ def parse_day(value, end):
     return int(day.timestamp())
 
 
-def build_where(args):
+def build_where(conn, args):
     clauses, params = [], []
     kind = args.get('chatKind')
     chat = args.get('chatId')
@@ -436,8 +637,13 @@ def build_where(args):
         params += [kind, str(chat)]
     keyword = (args.get('keyword') or '').strip()
     if keyword:
-        clauses.append("text LIKE ? ESCAPE '\\'")
-        params.append('%' + like_escape(keyword) + '%')
+        if len(keyword) >= MIN_FTS_CHARS and has_fts(conn):
+            clauses.append('rowid IN (SELECT rowid FROM message_fts '
+                           'WHERE message_fts MATCH ?)')
+            params.append(fts_phrase(keyword))
+        else:
+            clauses.append("text LIKE ? ESCAPE '\\'")
+            params.append('%' + like_escape(keyword) + '%')
     sender = (args.get('sender') or '').strip()
     if sender:
         clauses.append("(sender_name LIKE ? ESCAPE '\\' OR sender_qq = ?)")
@@ -456,14 +662,12 @@ def build_where(args):
 
 
 def fmt_time(ts):
-    if not ts:
-        return ''
-    return datetime.datetime.fromtimestamp(int(ts)).strftime('%Y-%m-%d %H:%M:%S')
+    return q.fmt_timestamp(ts)
 
 
 def row_json(row):
     msg_id, ts, sender, qq, is_out, text, kinds = row
-    return {'id': str(msg_id), 'ts': int(ts or 0), 'time': fmt_time(ts),
+    return {'id': str(msg_id), 'ts': q.as_seconds(ts), 'time': fmt_time(ts),
             'sender': sender or '', 'qq': qq or '', 'out': bool(is_out),
             'text': text or '', 'kinds': kinds or ''}
 
@@ -485,8 +689,8 @@ def cmd_sessions(p):
             'name': (name or '').strip() or fallback,
             'qq': chat_qq or ('' if kind == GROUP_KIND else ''),
             'messages': count,
-            'first': int(first or 0),
-            'last': int(last or 0),
+            'first': q.as_seconds(first),
+            'last': q.as_seconds(last),
             'lastTime': fmt_time(last),
         })
     print(json.dumps({'sessions': sessions}, ensure_ascii=False))
@@ -494,11 +698,14 @@ def cmd_sessions(p):
 
 def cmd_messages(p, args):
     conn = open_index(p)
-    where, params = build_where(args)
+    where, params = build_where(conn, args)
     total = conn.execute('SELECT count(*) FROM messages' + where, params).fetchone()[0]
     limit = args.get('limit')
-    limit = min(max(int(limit), 1), PAGE_LIMIT_MAX) if limit else 50
-    offset = max(int(args.get('offset') or 0), 0)
+    try:
+        limit = min(max(int(limit), 1), PAGE_LIMIT_MAX) if limit else 50
+        offset = max(int(args.get('offset') or 0), 0)
+    except (TypeError, ValueError):
+        raise BadInput('limit / offset 必须是整数')
     order = 'ASC' if str(args.get('order', '')).lower() == 'asc' else 'DESC'
     rows = conn.execute(
         'SELECT msg_id, ts, sender_name, sender_qq, is_out, text, seg_kinds '
@@ -517,6 +724,24 @@ def html_escape(text):
             .replace('>', '&gt;').replace('"', '&quot;'))
 
 
+def exports_target(p, out):
+    """Keep generated downloads inside workDir/exports.
+
+    The HTTP layer always passes such a path, but this module is also callable
+    directly; refusing anything else keeps a bad caller from writing plaintext
+    chat logs to an arbitrary location.
+    """
+    root = os.path.realpath(p['exports'])
+    target = os.path.realpath(out)
+    try:
+        inside = os.path.commonpath([root, target]) == root and target != root
+    except ValueError:          # different drives on Windows
+        inside = False
+    if not inside:
+        raise BadInput('输出路径必须位于 %s 内' % p['exports'])
+    return out
+
+
 def cmd_export(p, args):
     fmt = str(args.get('format') or 'txt').lower()
     if fmt not in ('txt', 'csv', 'json', 'md', 'html', 'sqlite'):
@@ -524,11 +749,12 @@ def cmd_export(p, args):
     out = args.get('out')
     if not out:
         q.die('缺少输出路径')
+    out = exports_target(p, out)
     label = str(args.get('label') or 'QQ聊天记录')
-    os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
+    q.ensure_private_dir(os.path.dirname(out) or '.')
 
     conn = open_index(p)
-    where, params = build_where(args)
+    where, params = build_where(conn, args)
     cur = conn.execute(
         'SELECT msg_id, ts, sender_name, sender_qq, is_out, text, seg_kinds '
         'FROM messages' + where + ' ORDER BY ts ASC, msg_id ASC', params)
@@ -554,9 +780,9 @@ def cmd_export(p, args):
             count = 0
             for row in cur:
                 item = row_json(row)
-                writer.writerow([item['time'], item['sender'], item['qq'],
-                                 '我' if item['out'] else '对方',
-                                 item['kinds'], item['text']])
+                writer.writerow([q.csv_cell(item['time']), q.csv_cell(item['sender']),
+                                 q.csv_cell(item['qq']), '我' if item['out'] else '对方',
+                                 q.csv_cell(item['kinds']), q.csv_cell(item['text'])])
                 count += 1
     elif fmt == 'json':
         with open(out, 'w', encoding='utf-8', newline='\n') as f:
@@ -633,16 +859,19 @@ def cmd_export(p, args):
         db.close()
     conn.close()
 
+    q.private_file(out)
     size = os.path.getsize(out) if os.path.exists(out) else 0
     print(json.dumps({'path': out, 'format': fmt, 'rows': count, 'bytes': size,
                       'label': label}, ensure_ascii=False))
 
 
-def cmd_status(p):
+def cmd_status(p, root=None, account=None):
     build = read_status(p)
     counts, _ = index_counts(p['index'])
+    current = q.find_account(root, account, strict=False)[0]
     print(json.dumps({
         'work': p['work'],
+        'account': str(current or ''),
         'db': file_info(p['db']),
         'index': dict(file_info(p['index']), **counts),
         'build': build,
@@ -652,6 +881,13 @@ def cmd_status(p):
 
 # --------------------------------------------------------------------------
 def main(argv=None):
+    # stdout is a pipe on Windows (cp936 by default); chat text commonly holds
+    # emoji and rare characters that would raise UnicodeEncodeError there.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding='utf-8', errors='replace')
+        except (AttributeError, ValueError):
+            pass
     parser = argparse.ArgumentParser(description='NTQQ 数据库只读查询层')
     parser.add_argument('--work', default='.qqnt-work', help='工作目录')
     parser.add_argument('--root', default=None, help='Tencent Files 目录')
@@ -677,7 +913,7 @@ def main(argv=None):
         if args.cmd == 'build':
             cmd_build(p, root, args.account, args.refresh)
         elif args.cmd == 'status':
-            cmd_status(p)
+            cmd_status(p, root, args.account)
         elif args.cmd == 'sessions':
             cmd_sessions(p)
         elif args.cmd == 'messages':

@@ -27,8 +27,8 @@ export const STORAGE_ITEMS = [
   {
     id: 'key',
     label: '数据库密钥',
-    detail: 'key.txt；删除后需要重新运行 qqnt_extract_key',
-    files: ['key.txt'],
+    detail: 'key.txt / key.json；删除后需要重新提取密钥',
+    files: ['key.txt', 'key.json', 'key.json.tmp'],
   },
   {
     id: 'exports',

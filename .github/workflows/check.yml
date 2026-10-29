@@ -43,6 +43,11 @@ jobs:
       - name: Python syntax
         run: python -m py_compile scripts/qqnt_export.py scripts/qqnt_query.py
 
+      - name: Unit tests
+        run: |
+          python -m unittest discover -s tests -v
+          node --test tests/*.test.mjs
+
       # Running `info` loads the platform backend and enumerates processes;
       # `status` opens the query layer without needing sqlcipher3.
       - name: Runtime smoke test

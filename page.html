@@ -100,6 +100,7 @@
   }
   .session:hover { background: var(--bg); }
   .session.active { background: var(--accent-soft); }
+  .session:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .session .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .session .sub { color: var(--muted); font-size: 12px; grid-column: 1 / -1; display: flex; gap: 8px; }
   .badge {
@@ -139,6 +140,16 @@
     pointer-events: none; max-width: 420px; z-index: 30;
   }
   .toast.show { opacity: .94; }
+
+  @media (max-width: 760px) {
+    main { flex-direction: column; }
+    aside { width: auto; max-height: 42vh; border-right: 0; border-bottom: 1px solid var(--line); }
+    .row { grid-template-columns: 1fr auto; gap: 2px 10px; }
+    .row .time { grid-column: 1; grid-row: 1; }
+    .row .who { grid-column: 1; grid-row: 2; }
+    .row .msg { grid-column: 1 / -1; grid-row: 3; }
+    .row .tools { grid-column: 2; grid-row: 1; }
+  }
 
   button.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
   button.danger:hover { filter: brightness(1.08); }
@@ -274,7 +285,7 @@
   <div class="settings-inner">
     <header class="settings-head">
       <div>
-        <h2>设置</h2>
+        <h2 id="settingsTitle">设置</h2>
         <p class="meta" id="settingsMeta">正在读取设置…</p>
       </div>
       <button class="ghost" type="button" id="closeSettings">关闭</button>
@@ -394,6 +405,9 @@
     building: false,
     autoLoaded: false,
     poll: 0,
+    reqSeq: 0,
+    loading: false,
+    downloadFrame: null,
     settings: null,
     storage: null,
     pendingCleanup: null,
@@ -411,6 +425,27 @@
     return String(text == null ? '' : text)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
+  }
+
+  /**
+   * Escape and highlight in one pass. Splitting the already-escaped HTML would
+   * turn a keyword like "amp" into a broken entity (`&<mark>amp</mark>;`), and
+   * SQLite's LIKE is case-insensitive, so matching lowercased text keeps the
+   * highlight in step with the query.
+   */
+  function highlight(raw, keyword) {
+    if (!keyword) return esc(raw)
+    var haystack = raw.toLowerCase()
+    var needle = keyword.toLowerCase()
+    var out = ''
+    var index = 0
+    while (true) {
+      var at = haystack.indexOf(needle, index)
+      if (at === -1) break
+      out += esc(raw.slice(index, at)) + '<mark>' + esc(raw.slice(at, at + keyword.length)) + '</mark>'
+      index = at + needle.length
+    }
+    return out + esc(raw.slice(index))
   }
 
   function toast(message) {
@@ -456,12 +491,16 @@
   // ---------------------------------------------------------------- 状态与索引
   function paintStatus(status) {
     var parts = []
+    var currentAccount = status.account || ''
+    var indexedAccount = (status.index && status.index.account) || ''
     if (status.index && status.index.exists) {
       parts.push('索引 ' + num(status.index.messages || 0) + ' 条')
       if (status.index.chats) parts.push(num(status.index.chats) + ' 个会话')
     } else {
       parts.push('未建立索引')
     }
+    if (indexedAccount) parts.push('索引账号 ' + indexedAccount)
+    else if (currentAccount) parts.push('账号 ' + currentAccount)
     if (status.db && status.db.exists) {
       var when = new Date(status.db.mtime * 1000)
       parts.push('数据副本 ' + when.toLocaleString('zh-CN', { hour12: false }))
@@ -526,6 +565,16 @@
       action.onclick = function () { startBuild(false) }
       return
     }
+    if (indexedAccount && currentAccount && indexedAccount !== currentAccount) {
+      banner.classList.remove('hidden')
+      banner.classList.add('error')
+      text.textContent = '索引属于账号 ' + indexedAccount + '，当前 QQ 账号是 ' + currentAccount +
+        '，需要重新同步（不会改动 QQ 数据）。'
+      action.textContent = '重新同步'
+      action.classList.remove('hidden')
+      action.onclick = function () { startBuild(true) }
+      return
+    }
     banner.classList.add('hidden')
     action.onclick = null
   }
@@ -539,9 +588,17 @@
   }
 
   function refreshStatus(quiet) {
+    var wasBuilding = state.building
     return api('/api/status').then(function (status) {
       paintStatus(status)
       maybeShowStartup(status)
+      if (wasBuilding && !state.building && state.indexReady) {
+        // A rebuild just finished: the sidebar and the message list still show
+        // the pre-sync snapshot until they are fetched again.
+        state.autoLoaded = true
+        loadSessions()
+        loadMessages(true)
+      }
       if (state.building) return
       if (state.indexReady && state.sessions.length === 0) loadSessions()
       if (state.indexReady && !state.autoLoaded) {
@@ -598,8 +655,12 @@
         if (hay.indexOf(term) === -1) return
       }
       shown += 1
+      var active = item.kind === state.sessionKind && item.id === state.chatId
       var row = document.createElement('div')
-      row.className = 'session' + (item.kind === state.sessionKind && item.id === state.chatId ? ' active' : '')
+      row.className = 'session' + (active ? ' active' : '')
+      row.tabIndex = 0
+      row.setAttribute('role', 'button')
+      row.setAttribute('aria-current', active ? 'true' : 'false')
       row.innerHTML =
         '<div class="name">' + esc(item.name) + '</div>' +
         '<div class="count">' + num(item.messages) + '</div>' +
@@ -608,6 +669,12 @@
         esc(item.kind === 'private' ? (item.qq || item.id) : ('群 ' + item.id)) + '</span><span>' +
         esc(item.lastTime || '') + '</span></div>'
       row.onclick = function () { pickSession(item) }
+      row.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          pickSession(item)
+        }
+      })
       host.appendChild(row)
     })
     if (!shown) {
@@ -654,6 +721,7 @@
 
   function loadMessages(reset) {
     if (!state.indexReady) { toast('先建立索引'); return }
+    if (!reset && state.loading) return
     if (reset) {
       // 记住本次查询的筛选条件：翻页与高亮都用它，不受之后输入框改动影响
       state.filters = currentFilters()
@@ -663,15 +731,25 @@
     }
     var filters = state.filters || currentFilters()
     var query = queryString(filters, { offset: state.offset, limit: PAGE })
+    // Requests may resolve out of order (fast chat switch, double "load more");
+    // only the newest one may touch the list and the offset.
+    var seq = ++state.reqSeq
+    state.loading = true
+    $('more').disabled = true
     $('summary').textContent = '查询中…'
     api('/api/messages?' + query).then(function (payload) {
+      if (seq !== state.reqSeq) return
+      state.loading = false
+      $('more').disabled = false
       state.total = payload.total || 0
       var rows = payload.rows || []
       var host = $('messages')
       if (reset && rows.length === 0) {
         host.innerHTML = '<div class="empty">没有符合条件的消息</div>'
       }
-      rows.forEach(function (item) { host.appendChild(renderRow(item, filters.keyword || '')) })
+      var fragment = document.createDocumentFragment()
+      rows.forEach(function (item) { fragment.appendChild(renderRow(item, filters.keyword || '')) })
+      host.appendChild(fragment)
       state.offset += rows.length
       state.rows += rows.length
       var scope = state.chatId ? '「' + state.chatName + '」' : '全部会话'
@@ -683,6 +761,9 @@
         (state.rows && state.rows < state.total ? '，已显示 ' + num(state.rows) + ' 条' : '')
       $('more').classList.toggle('hidden', state.offset >= state.total)
     }).catch(function (error) {
+      if (seq !== state.reqSeq) return
+      state.loading = false
+      $('more').disabled = false
       $('summary').textContent = '查询失败：' + error.message
     })
   }
@@ -708,17 +789,14 @@
 
     var msg = document.createElement('div')
     msg.className = 'msg'
-    var text = esc(item.text)
-    if (keyword) {
-      var safeKeyword = esc(keyword)
-      text = text.split(safeKeyword).join('<mark>' + safeKeyword + '</mark>')
-    }
+    var raw = item.text == null ? '' : String(item.text)
+    var text = highlight(raw, keyword)
     // 只把纯占位符（[图片]、[语音] …）标灰，别把整条回复也灰掉
-    msg.innerHTML = /^\[[^\]]{1,12}\]$/.test(item.text) ? '<span class="ph">' + text + '</span>' : text
+    msg.innerHTML = /^\[[^\]]{1,12}\]$/.test(raw) ? '<span class="ph">' + text + '</span>' : text
 
     var tools = document.createElement('div')
     tools.className = 'tools'
-    if (item.text.length > 500 || item.text.split('\n').length > 10) {
+    if (raw.length > 500 || raw.split('\n').length > 10) {
       msg.classList.add('clamped')
       var toggle = document.createElement('button')
       toggle.className = 'ghost expand'
@@ -742,12 +820,37 @@
     if (!state.indexReady) { toast('先建立索引'); return }
     if (!state.total) { toast('当前没有可导出的消息'); return }
     if (state.total > 20000 && !confirm('将要导出 ' + num(state.total) + ' 条消息，可能是个大文件。继续？')) return
+    // Use the filters of the visible result, not whatever is typed but not run.
+    var filters = state.filters || currentFilters()
+    var format = $('format').value
     var label = state.chatId ? state.chatName : '全部会话'
-    var keyword = $('keyword').value.trim()
+    var keyword = (filters.keyword || '').trim()
     if (keyword) label += '_' + keyword
-    var query = queryString(currentFilters(), { format: $('format').value, label: label })
-    toast('正在生成 ' + $('format').value.toUpperCase() + ' 文件…')
-    window.location.href = '/api/export?' + query
+    var query = queryString(filters, { format: format, label: label })
+    toast('正在生成 ' + format.toUpperCase() + ' 文件…')
+    var frame = state.downloadFrame
+    if (!frame) {
+      // A hidden frame downloads the attachment without replacing the SPA; a
+      // JSON error body is still readable because it is same-origin.
+      frame = document.createElement('iframe')
+      frame.style.display = 'none'
+      frame.title = '导出下载'
+      frame.addEventListener('load', function () {
+        var text = ''
+        try { text = frame.contentDocument && frame.contentDocument.body ? frame.contentDocument.body.textContent : '' } catch (e) {}
+        if (text && text.trim().charAt(0) === '{') {
+          var message = '导出失败'
+          try { message = JSON.parse(text).error || message } catch (e) {}
+          toast(message)
+        }
+      })
+      document.body.appendChild(frame)
+      state.downloadFrame = frame
+    }
+    frame.src = '/api/export?' + query
+    var button = $('download')
+    button.disabled = true
+    setTimeout(function () { button.disabled = false }, 3000)
   }
 
   // ---------------------------------------------------------------- 启动提示与一键配置
@@ -1156,12 +1259,17 @@
   function openSettings() {
     $('settings').classList.remove('hidden')
     $('settings').setAttribute('aria-hidden', 'false')
+    $('settings').setAttribute('role', 'dialog')
+    $('settings').setAttribute('aria-modal', 'true')
+    $('settings').setAttribute('aria-labelledby', 'settingsTitle')
     loadSettings()
+    setTimeout(function () { $('setWebPort').focus() }, 0)
   }
 
   function closeSettings() {
     $('settings').classList.add('hidden')
     $('settings').setAttribute('aria-hidden', 'true')
+    $('settingsBtn').focus()
   }
 
   function saveSettings(event) {
@@ -1272,7 +1380,11 @@
       }
       loadStorage()
       refreshStatus(false)
-    }).catch(function (error) { toast('删除失败：' + error.message) })
+    }).catch(function (error) {
+      // The native <dialog> lives in the top layer, so a toast would be hidden
+      // behind it; report the failure in the dialog itself and keep it open.
+      $('confirmText').textContent = '删除失败：' + error.message
+    })
   }
 
   // ---------------------------------------------------------------- 事件

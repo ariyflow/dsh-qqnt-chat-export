@@ -74,6 +74,47 @@ function readJsonBody(req, limit = 64 * 1024) {
   })
 }
 
+/**
+ * Start the detached index builder and resolve once Node knows whether the
+ * process really started.
+ *
+ * `spawn` reports a missing interpreter through an asynchronous `error` event;
+ * an unhandled `error` event on a ChildProcess would take the whole host
+ * process down. Waiting for `spawn` also lets the HTTP response report a bad
+ * `pythonPath` instead of answering 202 for a build that never existed.
+ */
+function spawnBuild(settings, argv) {
+  return new Promise((resolve) => {
+    let child
+    try {
+      child = spawn(settings.python, argv, {
+        windowsHide: true,
+        detached: true,
+        stdio: 'ignore',
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+      })
+    } catch (error) {
+      resolve({ ok: false, error })
+      return
+    }
+    const onError = (error) => {
+      child.removeListener('spawn', onSpawn)
+      resolve({ ok: false, error })
+    }
+    const onSpawn = () => {
+      child.removeListener('error', onError)
+      // A later error (killed by the OS, for instance) must stay harmless.
+      child.on('error', (error) => {
+        console.warn(`[qqnt-chat-export] index build child error: ${error.message}`)
+      })
+      child.unref()
+      resolve({ ok: true })
+    }
+    child.once('error', onError)
+    child.once('spawn', onSpawn)
+  })
+}
+
 /** One python invocation returning parsed JSON from stdout. */
 function runJson(settings, command, args = {}, { signal } = {}) {
   return new Promise((resolve, reject) => {
@@ -176,6 +217,26 @@ function stamp() {
   return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`
 }
 
+/** One file's size/mtime, in the shape the page already reads. */
+function fileInfo(file) {
+  try {
+    const info = statSync(file)
+    return { path: file, exists: true, size: info.size, mtime: Math.floor(info.mtimeMs / 1000) }
+  } catch {
+    return { path: file, exists: false, size: 0, mtime: 0 }
+  }
+}
+
+/** The helper's progress file; `{ state: 'idle' }` before the first build. */
+function readBuildState(workDir) {
+  try {
+    const value = JSON.parse(readFileSync(path.join(workDir, 'build-status.json'), 'utf8'))
+    return value && typeof value === 'object' ? value : { state: 'idle' }
+  } catch {
+    return { state: 'idle' }
+  }
+}
+
 /** Drop export files a previous session left behind. */
 function sweepExports(dir) {
   try {
@@ -211,6 +272,36 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
     server: undefined,
     startedAt: Date.now(),
   }
+  /**
+   * Last successful `status` report plus the index file it described. The page
+   * polls `/api/status` every 1.2 s during a build, and spawning Python for
+   * each poll would compete with that build for the same disk.
+   */
+  let statusCache
+  const indexFile = path.join(settings.workDir, 'index.sqlite')
+  const dbFile = path.join(settings.workDir, 'nt_msg.db')
+  const keyFile = path.join(settings.workDir, 'key.txt')
+
+  /** Status from the helper, reused while a build runs or the index is unchanged. */
+  const currentStatus = async () => {
+    const index = fileInfo(indexFile)
+    const build = readBuildState(settings.workDir)
+    const cached = statusCache
+    const usable = cached && (build.state === 'running'
+      || (Date.now() - cached.at < 5000 && cached.indexMtime === index.mtime))
+    if (!usable) {
+      statusCache = { at: Date.now(), indexMtime: index.mtime, value: await runJson(settings, 'status') }
+    }
+    const value = statusCache.value
+    return {
+      ...value,
+      db: fileInfo(dbFile),
+      index: { ...(value.index || {}), ...index },
+      key: existsSync(keyFile),
+      build,
+    }
+  }
+
   let resolveReady
   let rejectReady
   const ready = new Promise((resolve, reject) => {
@@ -406,7 +497,7 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
     }
     if (req.method === 'GET' && pathname === '/api/status') {
       const exports = path.join(settings.workDir, 'exports')
-      runJson(settings, 'status')
+      currentStatus()
         .then((status) => sendJson(res, 200, {
           ...status,
           port,
@@ -419,8 +510,8 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       return
     }
     if (req.method === 'GET' && pathname === '/api/index') {
-      runJson(settings, 'status')
-        .then((status) => sendJson(res, 200, { index: status.index, build: status.build, db: status.db, key: status.key }))
+      currentStatus()
+        .then(({ index, build, db, key }) => sendJson(res, 200, { index, build, db, key }))
         .catch((error) => sendJson(res, 500, { error: error.message }))
       return
     }
@@ -515,20 +606,27 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
         sendJson(res, 409, { error: '已有一次索引构建正在进行，请等它结束。' })
         return
       }
-      lastBuildSpawnAt = Date.now()
+      const refresh = params.get('refresh') === '1'
       const argv = ['-X', 'utf8', QUERY_CLI, '--work', settings.workDir]
       if (settings.tencentRoot) argv.push('--root', settings.tencentRoot)
       if (settings.account) argv.push('--account', String(settings.account))
       argv.push('build')
-      if (params.get('refresh') === '1') argv.push('--refresh')
-      const child = spawn(settings.python, argv, {
-        windowsHide: true,
-        detached: true,
-        stdio: 'ignore',
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+      if (refresh) argv.push('--refresh')
+      // Only claim the spawn gap once the child exists; a failed spawn must not
+      // make `/api/status` think a build is running for the next ten seconds.
+      spawnBuild(settings, argv).then((result) => {
+        if (!result.ok) {
+          const missing = result.error?.code === 'ENOENT'
+          sendJson(res, 500, {
+            error: missing
+              ? `无法运行 Python 解释器「${settings.python}」：找不到可执行文件。请在设置里检查「Python 解释器」。`
+              : `无法启动索引构建：${result.error?.message || '未知错误'}`,
+          })
+          return
+        }
+        lastBuildSpawnAt = Date.now()
+        sendJson(res, 202, { started: true, refresh })
       })
-      child.unref()
-      sendJson(res, 202, { started: true, refresh: params.get('refresh') === '1' })
       return
     }
     sendJson(res, 404, { error: 'not found' })
