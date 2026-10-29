@@ -115,16 +115,22 @@ function spawnBuild(settings, argv) {
   })
 }
 
-/**
- * Drop parked account indexes beyond a newly lowered limit.
- *
- * Runs detached and never blocks the settings response: a busy build lock or a
- * missing interpreter only costs a log line, and the next sync prunes again.
- */
-export function pruneAccountIndexes(settings, keep) {
+/** argv prefix shared by every detached helper run. */
+function helperArgv(settings, command) {
   const argv = ['-X', 'utf8', QUERY_CLI, '--work', settings.workDir]
   if (settings.tencentRoot) argv.push('--root', settings.tencentRoot)
-  argv.push('prune', '--keep', String(keep))
+  if (settings.account) argv.push('--account', String(settings.account))
+  argv.push(command)
+  return argv
+}
+
+/**
+ * Run a helper command detached, without blocking the caller.
+ *
+ * A missing interpreter or a busy lock must cost one log line, not a failed
+ * settings save or a crashed host; the next interval retries.
+ */
+function spawnDetached(settings, argv, label) {
   try {
     const child = spawn(settings.python, argv, {
       windowsHide: true,
@@ -133,14 +139,36 @@ export function pruneAccountIndexes(settings, keep) {
       env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
     })
     child.on('error', (error) => {
-      console.warn(`[qqnt-chat-export] account cache prune skipped: ${error.message}`)
+      console.warn(`[qqnt-chat-export] ${label} skipped: ${error.message}`)
     })
     child.unref()
     return true
   } catch (error) {
-    console.warn(`[qqnt-chat-export] account cache prune failed: ${error.message}`)
+    console.warn(`[qqnt-chat-export] ${label} failed: ${error.message}`)
     return false
   }
+}
+
+/**
+ * Drop parked account indexes beyond a newly lowered limit.
+ *
+ * Runs detached and never blocks the settings response: a busy build lock or a
+ * missing interpreter only costs a log line, and the next sync prunes again.
+ */
+export function pruneAccountIndexes(settings, keep) {
+  return spawnDetached(settings, helperArgv(settings, 'prune')
+    .concat(['--keep', String(keep)]), 'account cache prune')
+}
+
+/**
+ * One automatic sync: the helper decides whether anything changed, so the
+ * timer costs a Python start (and nothing else) when the database is idle.
+ */
+export function spawnAutosync(settings, { keep, search } = {}) {
+  const argv = helperArgv(settings, 'autosync')
+  argv.push('--keep', String(keep ?? settings.keepAccountIndexes ?? 2))
+  argv.push('--search', search === 'like' ? 'like' : 'fts')
+  return spawnDetached(settings, argv, 'automatic sync')
 }
 
 /** One python invocation returning parsed JSON from stdout. */
@@ -269,6 +297,16 @@ function readBuildState(workDir) {
   }
 }
 
+/** The last automatic sync; `{}` before the first tick. */
+export function readSyncState(workDir) {
+  try {
+    const value = JSON.parse(readFileSync(path.join(workDir, 'sync-status.json'), 'utf8'))
+    return value && typeof value === 'object' ? value : {}
+  } catch {
+    return {}
+  }
+}
+
 /** Drop export files a previous session left behind. */
 function sweepExports(dir) {
   try {
@@ -357,6 +395,11 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       index: { ...(value.index || {}), ...index },
       key: existsSync(keyFile()),
       build,
+      sync: {
+        ...readSyncState(settings.workDir),
+        autoSync: settings.autoSync !== false,
+        intervalMinutes: settings.syncIntervalMinutes ?? 60,
+      },
       workDir: settings.workDir,
       workDirLegacy: settings.workDirLegacy === true,
     }

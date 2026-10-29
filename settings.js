@@ -16,6 +16,7 @@ export const SETTINGS_KEYS = [
   'pythonPath', 'workDir', 'tencentRoot', 'account', 'webPort',
   'installer', 'uvPath', 'pythonVersion',
   'keepAccountIndexes', 'searchIndex', 'legacyWorkDirDismissed',
+  'autoSync', 'syncIntervalMinutes',
 ]
 /** `auto` prefers uv when it is installed and falls back to venv + pip. */
 export const INSTALLERS = ['auto', 'uv', 'pip']
@@ -27,6 +28,11 @@ export const MAX_KEEP_ACCOUNT_INDEXES = 5
 /** `fts` uses the trigram full-text index; `like` saves disk and scans. */
 export const SEARCH_INDEXES = ['fts', 'like']
 export const DEFAULT_SEARCH_INDEX = 'fts'
+/** Background sync while DSH runs; it never builds the very first index. */
+export const DEFAULT_AUTO_SYNC = true
+export const DEFAULT_SYNC_INTERVAL_MINUTES = 60
+export const MIN_SYNC_INTERVAL_MINUTES = 5
+export const MAX_SYNC_INTERVAL_MINUTES = 1440
 const APP_DIR = 'dsh-qqnt-chat-export'
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
 
@@ -152,6 +158,16 @@ export function resolveSettings(config, overrides = {}) {
     : DEFAULT_KEEP_ACCOUNT_INDEXES
   const searchRaw = str(raw.searchIndex)
   const searchIndex = SEARCH_INDEXES.includes(searchRaw) ? searchRaw : DEFAULT_SEARCH_INDEX
+  // YAML supplies a real boolean; a hand-edited JSON file may hold "true"/1.
+  // Only an explicit false turns the timer off, so a missing value stays on.
+  const autoSync = !(raw.autoSync === false || raw.autoSync === 'false' || raw.autoSync === 0)
+  const intervalRaw = raw.syncIntervalMinutes === '' || raw.syncIntervalMinutes == null
+    ? Number.NaN
+    : Number(raw.syncIntervalMinutes)
+  const syncIntervalMinutes = Number.isInteger(intervalRaw)
+    && intervalRaw >= MIN_SYNC_INTERVAL_MINUTES && intervalRaw <= MAX_SYNC_INTERVAL_MINUTES
+    ? intervalRaw
+    : DEFAULT_SYNC_INTERVAL_MINUTES
 
   // Explicit configuration wins. Otherwise an upgrade that still has data in
   // the old temp directory keeps using it (flagged for the migration banner);
@@ -189,6 +205,8 @@ export function resolveSettings(config, overrides = {}) {
     webHost: LOOPBACK.has(host) ? bindHost : DEFAULT_WEB_HOST,
     keepAccountIndexes,
     searchIndex,
+    autoSync,
+    syncIntervalMinutes,
   }
 }
 
@@ -298,6 +316,22 @@ export function validatePatch(patch) {
     }
     out.searchIndex = value
   }
+  if (Object.prototype.hasOwnProperty.call(patch, 'autoSync')) {
+    if (typeof patch.autoSync !== 'boolean') {
+      throw Object.assign(new Error('autoSync 必须是布尔值'), { status: 400 })
+    }
+    out.autoSync = patch.autoSync
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'syncIntervalMinutes')) {
+    const minutes = Number(patch.syncIntervalMinutes)
+    if (!Number.isInteger(minutes)
+      || minutes < MIN_SYNC_INTERVAL_MINUTES || minutes > MAX_SYNC_INTERVAL_MINUTES) {
+      throw Object.assign(new Error(
+        `自动同步间隔必须是 ${MIN_SYNC_INTERVAL_MINUTES}~${MAX_SYNC_INTERVAL_MINUTES} 的整数（分钟）`),
+      { status: 400 })
+    }
+    out.syncIntervalMinutes = minutes
+  }
   if (Object.prototype.hasOwnProperty.call(patch, 'legacyWorkDirDismissed')) {
     if (typeof patch.legacyWorkDirDismissed !== 'boolean') {
       throw Object.assign(new Error('legacyWorkDirDismissed 必须是布尔值'), { status: 400 })
@@ -323,6 +357,8 @@ export function publicSettings(settings, defaults, { url = '', file = settingsFi
       pythonVersion: settings.pythonVersion,
       keepAccountIndexes: settings.keepAccountIndexes,
       searchIndex: settings.searchIndex,
+      autoSync: settings.autoSync !== false,
+      syncIntervalMinutes: settings.syncIntervalMinutes,
       workDirLegacy: settings.workDirLegacy === true,
       legacyWorkDir: legacyWorkDir(),
     },
@@ -339,6 +375,8 @@ export function publicSettings(settings, defaults, { url = '', file = settingsFi
       pythonVersion: defaults.pythonVersion,
       keepAccountIndexes: defaults.keepAccountIndexes,
       searchIndex: defaults.searchIndex,
+      autoSync: defaults.autoSync !== false,
+      syncIntervalMinutes: defaults.syncIntervalMinutes,
       workDirLegacy: defaults.workDirLegacy === true,
     },
     file,

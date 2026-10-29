@@ -36,6 +36,24 @@ test('settings defaults keep the UI on loopback', () => {
   assert.equal(settings.pythonVersion, '3.12')
   assert.equal(settings.keepAccountIndexes, 2)
   assert.equal(settings.searchIndex, 'fts')
+  assert.equal(settings.autoSync, true)
+  assert.equal(settings.syncIntervalMinutes, 60)
+})
+
+test('automatic sync settings validate and fall back', () => {
+  assert.deepEqual(validatePatch({ autoSync: false, syncIntervalMinutes: 15 }),
+    { autoSync: false, syncIntervalMinutes: 15 })
+  assert.deepEqual(validatePatch({ syncIntervalMinutes: '5' }), { syncIntervalMinutes: 5 })
+  assert.throws(() => validatePatch({ autoSync: 'yes' }), /布尔值/)
+  assert.throws(() => validatePatch({ syncIntervalMinutes: 4 }), /5~1440/)
+  assert.throws(() => validatePatch({ syncIntervalMinutes: 1441 }), /5~1440/)
+  assert.throws(() => validatePatch({ syncIntervalMinutes: 1.5 }), /5~1440/)
+  assert.equal(resolveSettings({}, { autoSync: false }).autoSync, false)
+  assert.equal(resolveSettings({}, { autoSync: 'false' }).autoSync, false)
+  // A hand-edited file with garbage keeps the safe defaults: on, every hour.
+  assert.equal(resolveSettings({}, { autoSync: 'nope' }).autoSync, true)
+  assert.equal(resolveSettings({}, { syncIntervalMinutes: 'x' }).syncIntervalMinutes, 60)
+  assert.equal(resolveSettings({}, { syncIntervalMinutes: 0 }).syncIntervalMinutes, 60)
 })
 
 test('account index retention and search mode validate', () => {
@@ -359,6 +377,34 @@ test('a missing interpreter returns 500 without killing the server', async () =>
 
     const alive = await fetch(`${base}/api/settings`)
     assert.ok([200, 501].includes(alive.status))
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('status exposes the automatic sync setting and its last run', {
+  skip: process.platform === 'win32' ? 'needs python3 on PATH' : false,
+}, async () => {
+  const dir = await tempDir()
+  const settings = {
+    python: 'python3', workDir: dir, autoSync: true, syncIntervalMinutes: 30,
+  }
+  await writeFile(path.join(dir, 'sync-status.json'), JSON.stringify({
+    checkedAt: 1700000000, lastSyncAt: 1699999000, added: 7, mode: 'incremental',
+  }))
+  const { server, base } = await startServer(settings, {})
+  try {
+    const status = await (await fetch(`${base}/api/status`)).json()
+    assert.equal(status.sync.autoSync, true)
+    assert.equal(status.sync.intervalMinutes, 30)
+    assert.equal(status.sync.lastSyncAt, 1699999000)
+    assert.equal(status.sync.added, 7)
+
+    // A disabled timer is reported as such; the page hides the hint.
+    settings.autoSync = false
+    const off = await (await fetch(`${base}/api/status`)).json()
+    assert.equal(off.sync.autoSync, false)
   } finally {
     await server.close()
     await rm(dir, { recursive: true, force: true })

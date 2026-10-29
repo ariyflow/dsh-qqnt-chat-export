@@ -47,3 +47,8 @@
         # fts = trigram full-text index (fast keyword search, +30~60% disk);
         # like = no index, keyword search scans. Rebuild for changes to apply.
         searchIndex: fts
+        # Sync new messages in the background while DSH runs. The first index
+        # is always a manual action, and an unchanged database costs nothing.
+        autoSync: true
+        # Minutes between automatic syncs (5~1440).
+        syncIntervalMinutes: 60

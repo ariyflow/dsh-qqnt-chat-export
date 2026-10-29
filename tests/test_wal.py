@@ -16,6 +16,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'scripts'))
@@ -26,6 +27,7 @@ except Exception:                       # noqa: BLE001 - CI has no wheel
     sqlcipher = None
 
 import qqnt_export as q                 # noqa: E402
+import qqnt_query as qqq                # noqa: E402
 
 KEY = '#TESTKEY12345678'
 
@@ -50,14 +52,20 @@ def copy_stripped(src, dst, skip=q.HEADER_SIZE):
 
 
 @unittest.skipIf(sqlcipher is None, 'sqlcipher3-wheels is not installed')
-class WalReplayTests(unittest.TestCase):
+class WalFixture(unittest.TestCase):
+    """A live WAL-mode SQLCipher database published as a QQ-style file."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         base = self.tmp.name
         self.qqdir = os.path.join(base, 'qq')
         self.copies = os.path.join(base, 'copies')
+        self.work = os.path.join(base, 'work')
         os.makedirs(self.qqdir)
         os.makedirs(self.copies)
+        os.makedirs(self.work)
+        with open(os.path.join(self.work, 'key.txt'), 'w', encoding='ascii') as f:
+            f.write(KEY)
         self.secret = os.path.join(base, 'secret.db')
         self.writer = sqlcipher.connect(self.secret)
         self.writer.execute('PRAGMA cipher_page_size = 4096')
@@ -74,6 +82,7 @@ class WalReplayTests(unittest.TestCase):
         # rows that a main-file-only copy would miss.
         self.writer.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchall()
         self.publish()
+        self.p = qqq.paths(self.work)
 
     def tearDown(self):
         try:
@@ -125,6 +134,7 @@ class WalReplayTests(unittest.TestCase):
             shutil.copy2(os.path.join(self.qqdir, 'nt_msg.db-shm'), dst + '-shm')
         return dst
 
+    # -- shared helpers -------------------------------------------------
     def rows(self, path):
         conn = open_copy(path)
         try:
@@ -138,6 +148,17 @@ class WalReplayTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def copy_rows(self, path):
+        conn = open_copy(path)
+        try:
+            ok = conn.execute('PRAGMA integrity_check').fetchone()[0]
+            new = conn.execute("SELECT count(*) FROM t WHERE v = 'new'").fetchone()[0]
+            return ok, new
+        finally:
+            conn.close()
+
+
+class WalReplayTests(WalFixture):
     def test_main_file_alone_misses_the_wal_frames(self):
         self.add_wal_rows(3)
         result = self.rows(self.copy_case('main-only'))
@@ -182,6 +203,44 @@ class WalReplayTests(unittest.TestCase):
         after = {name: os.stat(os.path.join(self.qqdir, name)).st_mtime_ns
                  for name in os.listdir(self.qqdir)}
         self.assertEqual(before, after, 'opening the copy must not write the source')
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+class CopyDbWithWalTests(WalFixture):
+    """The production copy step used by `build` and `autosync`."""
+
+    def test_it_replays_the_frames_into_the_work_copy(self):
+        self.add_wal_rows(2)
+        qqq.WAL_STATE.update(pending=True, error='stale', replayed=False)
+        qqq.copy_db_with_wal(self.p, os.path.join(self.qqdir, 'nt_msg.db'), KEY)
+        self.assertTrue(qqq.WAL_STATE['replayed'])
+        self.assertFalse(qqq.WAL_STATE['pending'])
+        self.assertEqual(qqq.WAL_STATE['error'], '')
+        ok, new = self.copy_rows(self.p['db'])
+        self.assertEqual(ok, 'ok')
+        self.assertEqual(new, 2)
+
+    def test_a_failed_replay_falls_back_to_the_main_file(self):
+        self.add_wal_rows(2)
+        with unittest.mock.patch.object(qqq, 'replay_wal', return_value=(False, 'boom')):
+            qqq.copy_db_with_wal(self.p, os.path.join(self.qqdir, 'nt_msg.db'), KEY)
+        self.assertTrue(qqq.WAL_STATE['pending'])
+        self.assertIn('boom', qqq.WAL_STATE['error'])
+        self.assertFalse(os.path.exists(self.p['db'] + '-wal'),
+                         'the unusable sidecar must not be left behind')
+        ok, new = self.copy_rows(self.p['db'])
+        self.assertEqual(ok, 'ok')
+        self.assertEqual(new, 0, 'the fallback copy holds the main-file rows only')
+
+    def test_a_clean_database_copies_without_pending(self):
+        # A checkpointed database has a zero-byte WAL: opening the copy is a
+        # no-op, and nothing is reported as lagging behind.
+        qqq.copy_db_with_wal(self.p, os.path.join(self.qqdir, 'nt_msg.db'), KEY)
+        self.assertFalse(qqq.WAL_STATE['pending'])
+        ok, new = self.copy_rows(self.p['db'])
+        self.assertEqual((ok, new), ('ok', 0))
 
 
 if __name__ == '__main__':

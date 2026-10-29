@@ -110,6 +110,26 @@ class AccountCacheTests(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()):
             self.qqq.cmd_build(self.p, self.root, uin, refresh, keep)
 
+    def append_message(self, msg_id, text):
+        """Append one message to the synthetic source database and republish it."""
+        conn = sqlcipher.connect(self.secret)
+        conn.execute('PRAGMA cipher_page_size = 4096')
+        conn.execute("PRAGMA key = '%s'" % KEY)
+        conn.execute('PRAGMA kdf_iter = 4000')
+        conn.execute('PRAGMA cipher_hmac_algorithm = HMAC_SHA1')
+        conn.execute('PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512')
+        conn.execute('INSERT INTO group_msg_table VALUES (?,?,?,?,?,?,?,?,?)',
+                     (msg_id, 1700000000 + msg_id, 'u', 0, 1, 1, '',
+                      _message_blob(text), 'g1'))
+        conn.commit()
+        conn.close()
+        target = os.path.join(self.dbdir, 'nt_msg.db')
+        with open(self.secret, 'rb') as src, open(target, 'wb') as dst:
+            dst.write(HEADER + src.read())
+
+    def autosync(self, keep=2):
+        return self.run_cli('autosync', '--keep', str(keep))
+
     def add_account(self, uin, texts):
         """Create another account's synthetic nt_msg.db next to the first."""
         dbdir = os.path.join(self.root, uin, 'nt_qq', 'nt_db')
@@ -221,6 +241,66 @@ class AccountCacheTests(unittest.TestCase):
 
     def _cache_accounts(self):
         return [item for item in self.qqq.index_accounts(self.p) if not item['current']]
+
+    def test_autosync_needs_an_existing_index(self):
+        result = self.autosync()
+        self.assertEqual(result['skipped'], 'no-index')
+        self.assertFalse(result['changed'])
+        self.assertFalse(os.path.exists(self.p['index']))
+
+    def test_autosync_skips_an_unchanged_source(self):
+        self.build()
+        first = self.autosync()
+        self.assertTrue(first['changed'])
+        self.assertEqual(first['added'], 0)
+        self.assertTrue(first['lastSyncAt'])
+        before = os.stat(self.p['index']).st_mtime_ns
+
+        second = self.autosync()
+        self.assertEqual(second['skipped'], 'unchanged')
+        self.assertFalse(second['changed'])
+        self.assertEqual(os.stat(self.p['index']).st_mtime_ns, before,
+                         'an unchanged database must not rebuild the index')
+
+    def test_autosync_appends_new_messages(self):
+        self.build()
+        self.autosync()                       # baseline fingerprint
+        self.append_message(3, '第三条消息')
+        result = self.autosync()
+        self.assertTrue(result['changed'])
+        self.assertEqual(result['added'], 1)
+        self.assertEqual(result['account'], GROUP)
+        self.assertEqual(result['mode'], 'incremental')
+        texts = {row['text'] for row in
+                 self.run_cli('messages', '--json', '{"limit":20}')['rows']}
+        self.assertIn('第三条消息', texts)
+        status = self.run_cli('status')
+        self.assertEqual(status['sync']['added'], 1)
+        self.assertEqual(status['sync']['account'], GROUP)
+
+    def test_autosync_steps_aside_while_a_build_runs(self):
+        self.build()
+        lock = os.path.join(self.work, 'build.lock')
+        with open(lock, 'w', encoding='ascii') as f:
+            f.write(str(os.getpid()))
+        try:
+            result = self.autosync()
+        finally:
+            os.remove(lock)
+        self.assertEqual(result['skipped'], 'busy')
+        self.assertTrue(result['changed'])
+        self.assertNotIn('db', result, 'a busy tick must retry on the next interval')
+
+    def test_autosync_reports_a_broken_copy_without_raising(self):
+        self.build()
+        # A key file for another account makes the helper refuse before copying;
+        # the timer must record that instead of exiting non-zero.
+        import qqnt_export as q
+        q.write_key_meta(self.work, OTHER, os.path.join(self.dbdir, 'nt_msg.db'))
+        result = self.autosync()
+        self.assertTrue(result['changed'])
+        self.assertTrue(result['error'])
+        self.assertEqual(result['added'], 0)
 
     # -- commands --------------------------------------------------------
     def test_switching_accounts_reuses_the_cached_index(self):

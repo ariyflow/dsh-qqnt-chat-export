@@ -106,6 +106,7 @@ def paths(work):
         'profile': p('profile_info.db'),
         'index': p('index.sqlite'),
         'status': p('build-status.json'),
+        'sync': p('sync-status.json'),
         'key': p('key.txt'),
         'exports': p('exports'),
     }
@@ -152,7 +153,7 @@ def write_status(p, payload):
     tmp = p['status'] + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(payload, f, ensure_ascii=False)
-    os.replace(tmp, p['status'])
+    replace_with_retry(tmp, p['status'])
 
 
 def read_status(p):
@@ -161,6 +162,152 @@ def read_status(p):
             return json.load(f)
     except (OSError, ValueError):
         return {'state': 'idle'}
+
+
+def replace_with_retry(src, dst, attempts=5, delay=0.2):
+    """`os.replace` with retries: on Windows an open reader (the page polling
+    the index) makes the swap fail with EBUSY for a moment."""
+    last = None
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return dst
+        except OSError as exc:
+            last = exc
+            if attempt + 1 < attempts:
+                time.sleep(delay)
+    raise last
+
+
+def write_sync_status(p, payload):
+    tmp = p['sync'] + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, ensure_ascii=False)
+    replace_with_retry(tmp, p['sync'])
+
+
+def read_sync_status(p):
+    try:
+        with open(p['sync'], encoding='utf-8') as f:
+            value = json.load(f)
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def source_fingerprint(src_db):
+    """Identity of the *live* database, WAL included.
+
+    The main file only changes when QQ checkpoints, so a size/mtime check
+    without the WAL would call a database with new messages "unchanged".
+    """
+    out = {}
+    for name, suffix in (('db', ''), ('wal', '-wal')):
+        try:
+            st = os.stat(src_db + suffix)
+            out[name] = {'size': st.st_size, 'mtime': st.st_mtime_ns}
+        except OSError:
+            out[name] = {'size': 0, 'mtime': 0}
+    return out
+
+
+def same_fingerprint(a, b):
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return False
+    return all(a.get(key) == b.get(key) for key in ('db', 'wal'))
+
+
+# How the last database copy handled the WAL; reported by `build`/`autosync`.
+WAL_STATE = {'pending': False, 'error': '', 'replayed': False}
+
+
+def replay_wal(path, key):
+    """Open the copy read-write once so SQLite applies the WAL frames.
+
+    Returns `(ok, error)`. A WAL that does not validate is not an error: SQLite
+    silently ignores the bad frames (see tests/test_wal.py), and `ok` is then
+    still True with fewer rows. Only a failed open/checkpoint is reported.
+    """
+    try:
+        conn = q.open_encrypted(path, key, readonly=False)
+    except Exception as exc:            # noqa: BLE001 - 坏副本要走回退路径
+        return False, '%s: %s' % (exc.__class__.__name__, exc)
+    try:
+        check = conn.execute('PRAGMA quick_check').fetchone()[0]
+        if check != 'ok':
+            return False, 'quick_check: %s' % check
+        conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchall()
+        return True, ''
+    except Exception as exc:            # noqa: BLE001
+        return False, '%s: %s' % (exc.__class__.__name__, exc)
+    finally:
+        try:
+            conn.close()
+        except Exception:               # noqa: BLE001
+            pass
+
+
+def copy_db_with_wal(p, src, key):
+    """Copy the database with its WAL/SHM and replay the frames into the copy.
+
+    The source stays read-only. When the WAL cannot be replayed the copy is
+    redone from the main file only and `walPending` is reported, so the next
+    sync (and the status line) explains the missing tail instead of failing.
+    """
+    WAL_STATE.update(pending=False, error='', replayed=False)
+    if not os.path.exists(src):
+        return None
+    q.ensure_workdir(os.path.dirname(p['db']))
+
+    def fresh_main():
+        for suffix in ('',) + SIDECARS:
+            try:
+                os.remove(p['db'] + suffix)
+            except OSError:
+                pass
+        q.copy_db_file(src, p['db'], force=True)
+
+    def copy_sidecars():
+        """Copy WAL + SHM, retrying once if QQ appended while we read."""
+        wal = src + '-wal'
+        if not os.path.exists(wal):
+            return False
+        for _ in range(2):
+            before = source_fingerprint(src)
+            q.copy_shared(wal, p['db'] + '-wal')
+            try:
+                q.copy_shared(src + '-shm', p['db'] + '-shm')
+            except OSError:
+                pass                # the shm is only a wal-index
+            if same_fingerprint(before, source_fingerprint(src)):
+                return True
+            try:
+                os.remove(p['db'] + '-wal')
+            except OSError:
+                pass
+        return os.path.exists(p['db'] + '-wal')
+
+    fresh_main()
+    try:
+        copied_wal = copy_sidecars()
+    except OSError as exc:
+        copied_wal = False
+        WAL_STATE['error'] = '复制 WAL 失败（%s）' % exc
+    if copied_wal:
+        ok, error = replay_wal(p['db'], key)
+        if ok:
+            WAL_STATE['replayed'] = True
+            return p['db']
+        WAL_STATE.update(pending=True, error=error or 'WAL 回放失败')
+    elif not WAL_STATE['error']:
+        # No WAL at all: the main file already holds everything.
+        return p['db']
+    # Fallback: a clean main-file copy, flagged so the page can explain it.
+    fresh_main()
+    WAL_STATE['pending'] = True
+    if not WAL_STATE['error']:
+        WAL_STATE['error'] = '已退回只复制主库'
+    return p['db']
 
 
 def file_info(path):
@@ -546,7 +693,8 @@ def plan_incremental(p, src, uin, source_counts, search='fts'):
     }
 
 
-def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, search='fts'):
+def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, search='fts',
+              quiet=False):
     keep = clamp_keep(keep)
     search = 'like' if str(search).strip().lower() == 'like' else 'fts'
     started = int(time.time())
@@ -591,7 +739,8 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
         # switch (including a restored cache) must refresh it.
         if refresh or switched or not os.path.exists(p['db']):
             report(step='复制并剥离数据库副本')
-            copy_db(src_msg, p['db'])
+            copy_db_with_wal(p, src_msg, key)
+            report(walPending=WAL_STATE['pending'], walError=WAL_STATE['error'])
         for name, slot in (('group_info.db', 'group'), ('profile_info.db', 'profile')):
             copy_db(os.path.join(dbdir, name), p[slot])
 
@@ -628,10 +777,15 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
                 'total': plan['new_total'],
                 'startedAt': started, 'finishedAt': int(time.time()), 'error': '',
                 'index': p['index'], 'account': uin, 'step': '已是最新', 'added': 0,
+                'walPending': WAL_STATE['pending'], 'walError': WAL_STATE['error'],
             })
-            print(json.dumps({'ok': True, 'mode': 'incremental', 'added': 0,
-                              'seconds': int(time.time()) - started}, ensure_ascii=False))
-            return
+            result = {'ok': True, 'mode': 'incremental', 'added': 0,
+                      'total': plan['new_total'],
+                      'walPending': WAL_STATE['pending'],
+                      'seconds': int(time.time()) - started}
+            if not quiet:
+                print(json.dumps(result, ensure_ascii=False))
+            return result
 
         total = plan['total_new'] if plan else source_total
         report(total=total, mode=mode, step=('同步新消息' if plan else '解析消息'))
@@ -758,7 +912,7 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
                 os.remove(p['index'] + suffix)
             except OSError:
                 pass
-        os.replace(tmp, p['index'])
+        replace_with_retry(tmp, p['index'])
         prune_cached(p, keep)
 
         write_status(p, {
@@ -767,10 +921,15 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
             'finishedAt': int(time.time()), 'error': '',
             'index': p['index'], 'account': uin, 'step': '完成',
             'added': plan['total_new'] if plan else processed,
+            'walPending': WAL_STATE['pending'], 'walError': WAL_STATE['error'],
         })
-        print(json.dumps({'ok': True, 'mode': mode, 'processed': processed,
-                          'added': plan['total_new'] if plan else processed,
-                          'seconds': int(time.time()) - started}, ensure_ascii=False))
+        result = {'ok': True, 'mode': mode, 'processed': processed,
+                  'added': plan['total_new'] if plan else processed,
+                  'total': total_after, 'walPending': WAL_STATE['pending'],
+                  'seconds': int(time.time()) - started}
+        if not quiet:
+            print(json.dumps(result, ensure_ascii=False))
+        return result
     except BaseException as exc:      # noqa: BLE001 - 任何失败都要落到状态文件
         if isinstance(exc, BadInput):
             message = str(exc)
@@ -1126,6 +1285,7 @@ def cmd_status(p, root=None, account=None):
         'db': file_info(p['db']),
         'index': dict(file_info(p['index']), accounts=index_accounts(p), **counts),
         'build': build,
+        'sync': read_sync_status(p),
         'key': os.path.exists(p['key']),
     }, ensure_ascii=False))
 
@@ -1179,6 +1339,75 @@ def cmd_prune(p, keep=DEFAULT_KEEP_ACCOUNTS):
     }, ensure_ascii=False))
 
 
+def cmd_autosync(p, root, account, keep=DEFAULT_KEEP_ACCOUNTS, search='fts'):
+    """One automatic sync tick, driven by a timer in the host.
+
+    Cheap and quiet by design: it never builds the first index, never rebuilds
+    when the live database (WAL included) is unchanged, steps aside while
+    another build holds the lock, and reports every outcome through
+    `sync-status.json` with exit code 0. A timer that exits non-zero would fill
+    the host log with a failure every interval.
+    """
+    now = int(time.time())
+    previous = read_sync_status(p)
+    base = {'checkedAt': now, 'lastSyncAt': int(previous.get('lastSyncAt') or 0)}
+
+    def report(**kwargs):
+        payload = dict(base, changed=False, skipped='', added=0, error='',
+                       walPending=False, mode='', total=0, account='')
+        payload.update(kwargs)
+        write_sync_status(p, payload)
+        print(json.dumps(payload, ensure_ascii=False))
+        return payload
+
+    if not os.path.exists(p['key']) or not os.path.exists(p['index']):
+        # The first index stays a manual action: building it takes a minute and
+        # is exactly what the page's banner asks for.
+        return report(skipped='no-index')
+    uin, dbdir, _, _ = q.find_account(root, account, strict=False)
+    if not uin:
+        return report(skipped='no-account', error='找不到 QQ 数据目录')
+    src = os.path.join(dbdir, 'nt_msg.db')
+    fingerprint = source_fingerprint(src)
+    if (str(previous.get('account') or '') == str(uin)
+            and previous.get('lastSyncAt')
+            and same_fingerprint(previous.get('db'), fingerprint)):
+        return report(skipped='unchanged', account=str(uin), db=fingerprint)
+
+    try:
+        lock = acquire_lock(p)
+    except BadInput:
+        # Do not record the fingerprint: the next tick must retry.
+        return report(skipped='busy', changed=True, account=str(uin))
+
+    # The message count is the honest "what arrived" number: a full rebuild
+    # (the fallback when the per-kind count check fails) reports every row as
+    # processed, which would otherwise toast "synced 322,724 messages".
+    before_total = index_counts(p['index'])[0].get('messages', 0)
+    stop_heartbeat = start_heartbeat(lock)
+    try:
+        result = run_build(p, root, account, True, lock, keep, search, quiet=True)
+    except SystemExit as exc:
+        return report(changed=True, account=str(uin),
+                      error=q.LAST_ERROR or ('exited with code %s' % exc.code))
+    except BadInput as exc:
+        return report(changed=True, account=str(uin), error=str(exc))
+    except Exception as exc:        # noqa: BLE001 - 定时任务不刷错误横幅
+        return report(changed=True, account=str(uin),
+                      error='%s: %s' % (exc.__class__.__name__, exc))
+    finally:
+        stop_heartbeat.set()
+        release_lock(lock)
+
+    after_total = index_counts(p['index'])[0].get('messages', 0)
+    return report(changed=True, account=str(uin), db=fingerprint,
+                  added=max(0, after_total - before_total),
+                  mode=result.get('mode', ''),
+                  total=after_total,
+                  walPending=bool(result.get('walPending')),
+                  lastSyncAt=now)
+
+
 # --------------------------------------------------------------------------
 def main(argv=None):
     # stdout is a pipe on Windows (cp936 by default); chat text commonly holds
@@ -1217,6 +1446,12 @@ def main(argv=None):
     s.add_argument('--keep', type=int, default=DEFAULT_KEEP_ACCOUNTS,
                    help='how many other accounts\' indexes to keep (0~%d)'
                         % MAX_KEEP_ACCOUNTS)
+    s = sub.add_parser('autosync')
+    s.add_argument('--keep', type=int, default=DEFAULT_KEEP_ACCOUNTS,
+                   help='how many other accounts\' indexes to cache (0~%d)'
+                        % MAX_KEEP_ACCOUNTS)
+    s.add_argument('--search', choices=('fts', 'like'), default='fts',
+                   help='keyword index: fts (trigram) or like (no index)')
 
     args = parser.parse_args(argv)
     p = paths(args.work)
@@ -1231,6 +1466,8 @@ def main(argv=None):
             cmd_select(p, args.account, args.keep)
         elif args.cmd == 'prune':
             cmd_prune(p, args.keep)
+        elif args.cmd == 'autosync':
+            cmd_autosync(p, root, args.account, clamp_keep(args.keep), args.search)
         elif args.cmd == 'status':
             cmd_status(p, root, args.account)
         elif args.cmd == 'sessions':

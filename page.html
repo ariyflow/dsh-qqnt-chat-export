@@ -171,6 +171,7 @@
   .field > span { font-weight: 600; }
   .field > small { grid-column: 2; color: var(--muted); font-size: 12px; }
   .field input, .field select { width: 100%; }
+  .field input[type=checkbox] { width: 16px; height: 16px; justify-self: start; }
   .settings-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
   .settings-actions .hint { margin-left: auto; color: var(--muted); font-size: 12px; }
   .hint { color: var(--muted); font-size: 13px; }
@@ -348,6 +349,16 @@
         </select>
         <small>修改后需要重建索引才会生效。</small>
       </label>
+      <label class="field">
+        <span>自动同步</span>
+        <input type="checkbox" id="setAutoSync" checked>
+        <small>DSH 运行期间定时检查 QQ 数据库，有变化就增量追新消息；没有密钥或索引时不会自动建库（首次建库仍需手动）。</small>
+      </label>
+      <label class="field">
+        <span>自动同步间隔</span>
+        <input type="number" id="setSyncInterval" min="5" max="1440" step="1" value="60">
+        <small>5~1440 分钟，默认 60。QQ 运行中最新消息可能还在 WAL 里，同步会连 WAL 一起复制。</small>
+      </label>
 
       <div class="settings-actions">
         <button class="primary" type="submit">保存设置</button>
@@ -441,7 +452,8 @@
     diagnostics: null,
     setupPoll: 0,
     keyJob: null,
-    keyPoll: 0
+    keyPoll: 0,
+    lastSyncAt: 0
   }
 
   var $ = function (id) { return document.getElementById(id) }
@@ -478,6 +490,35 @@
     el.classList.add('show')
     clearTimeout(el._timer)
     el._timer = setTimeout(function () { el.classList.remove('show') }, 3200)
+  }
+
+  /** "3 分钟前" for the last automatic sync, without pulling in a library. */
+  function ago(seconds) {
+    var diff = Math.max(0, Math.round(Date.now() / 1000 - Number(seconds)))
+    if (diff < 90) return diff + ' 秒前'
+    if (diff < 5400) return Math.round(diff / 60) + ' 分钟前'
+    if (diff < 172800) return Math.round(diff / 3600) + ' 小时前'
+    return Math.round(diff / 86400) + ' 天前'
+  }
+
+  /**
+   * Notice a background sync that happened while the page was open, and pull
+   * the new rows in. The first report after loading only records the baseline.
+   */
+  function noteSync(sync) {
+    if (!sync || !sync.lastSyncAt) return
+    var previous = state.lastSyncAt
+    if (!previous) {
+      state.lastSyncAt = sync.lastSyncAt
+      return
+    }
+    if (sync.lastSyncAt <= previous) return
+    state.lastSyncAt = sync.lastSyncAt
+    if (sync.added > 0) {
+      toast('已自动同步 ' + num(sync.added) + ' 条新消息')
+      loadSessions()
+      if (state.autoLoaded) loadMessages(true)
+    }
   }
 
   function api(path, init) {
@@ -537,6 +578,10 @@
       parts.push('没有数据副本')
     }
     if (status.key === false) parts.push('密钥未就绪')
+    var sync = status.sync || {}
+    if (sync.autoSync) parts.push('自动同步 ' + (sync.intervalMinutes || 60) + ' 分钟')
+    if (sync.lastSyncAt) parts.push('上次同步 ' + ago(sync.lastSyncAt))
+    if (sync.walPending) parts.push('WAL 待合并（QQ 运行中，最新消息稍后补齐）')
     if (status.port) parts.push('端口 ' + status.port)
     $('meta').textContent = parts.join(' · ')
 
@@ -702,6 +747,7 @@
     var wasBuilding = state.building
     return api('/api/status').then(function (status) {
       paintStatus(status)
+      noteSync(status.sync)
       maybeShowStartup(status)
       if (wasBuilding && !state.building && state.indexReady) {
         // A rebuild just finished: the sidebar and the message list still show
@@ -727,6 +773,18 @@
       $('meta').textContent = '无法读取状态：' + error.message
       showStartupFallback()
     })
+  }
+
+  /**
+   * Keep the status line (and the sync notice) alive while the page sits open.
+   * Five minutes is enough to notice a background sync without spawning the
+   * Python helper every minute.
+   */
+  function startStatusPoll() {
+    setInterval(function () {
+      if (document.hidden || state.building || state.loading) return
+      refreshStatus(true)
+    }, 300000)
   }
 
   function startBuild(refresh) {
@@ -1362,6 +1420,8 @@
       $('setAccount').value = s.account || ''
       $('setKeepIndexes').value = String(s.keepAccountIndexes)
       $('setSearchIndex').value = s.searchIndex || 'fts'
+      $('setAutoSync').checked = s.autoSync !== false
+      $('setSyncInterval').value = String(s.syncIntervalMinutes || 60)
       $('setPythonPath').placeholder = payload.defaults.python || ''
       $('setWorkDir').placeholder = payload.defaults.workDir || ''
       $('setTencentRoot').placeholder = payload.defaults.tencentRoot || '自动识别'
@@ -1404,6 +1464,11 @@
       toast('保留账号索引数必须是 0~5 的整数')
       return
     }
+    var interval = Number($('setSyncInterval').value)
+    if (!Number.isInteger(interval) || interval < 5 || interval > 1440) {
+      toast('自动同步间隔必须是 5~1440 的整数（分钟）')
+      return
+    }
     var patch = {
       webPort: port,
       workDir: $('setWorkDir').value.trim(),
@@ -1412,7 +1477,9 @@
       tencentRoot: $('setTencentRoot').value.trim(),
       account: $('setAccount').value.trim(),
       keepAccountIndexes: keep,
-      searchIndex: $('setSearchIndex').value
+      searchIndex: $('setSearchIndex').value,
+      autoSync: $('setAutoSync').checked,
+      syncIntervalMinutes: interval
     }
     api('/api/settings', { method: 'PUT', body: patch }).then(function (result) {
       state.settings = result
@@ -1594,6 +1661,7 @@
   })
 
   refreshStatus(false)
+  startStatusPoll()
   // `/api/status` spawns the Python helper; show the address/setup prompt even
   // if that helper is missing or slow.
   setTimeout(showStartupFallback, 1500)

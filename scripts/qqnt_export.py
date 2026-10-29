@@ -861,16 +861,20 @@ def _copy_is_fresh(src, dst, skip=HEADER_SIZE):
             and dst_stat.st_mtime_ns == src_stat.st_mtime_ns)
 
 
-def copy_db_file(src, dst, skip=HEADER_SIZE, quiet=True):
+def copy_db_file(src, dst, skip=HEADER_SIZE, quiet=True, force=False):
     """Copy *src* without its Tencent header into *dst*, atomically.
 
     QQ keeps writing the source while it runs, so the copy goes to a
     per-process temp file, is checked against the expected length, stamped with
     the source mtime, and only then renamed into place. A torn copy is retried
     once instead of being left behind as a plausible-looking database.
+
+    `force` skips the "already fresh" shortcut. A caller that copies the WAL
+    as well needs it: the main file can be unchanged while the WAL holds new
+    messages, so the size/mtime check would keep the older snapshot.
     """
     ensure_workdir(os.path.dirname(dst) or os.curdir)
-    if _copy_is_fresh(src, dst, skip):
+    if not force and _copy_is_fresh(src, dst, skip):
         return dst
     tmp = '%s.%d.tmp' % (dst, os.getpid())
     last_error = None

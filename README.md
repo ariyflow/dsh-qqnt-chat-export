@@ -143,7 +143,7 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 4. 回到网页，点「建立索引」，约 1 分钟；
 5. 之后随便查、随便导。
 
-**以后**：QQ 有新消息时点「从 QQ 同步」即可。只解密并追加 `msg_id` 高于水位的新消息，通常几秒到十几秒；没有新消息时直接提示「已是最新」。源库出现删除、回溯或换账号时会按数量校验退回全量重建。
+**以后**：默认每 60 分钟自动同步一次（设置页可关或改间隔），也可以随时点「从 QQ 同步」。同步会把 `nt_msg.db` 连同它的 `-wal`/`-shm` 一起复制到工作目录，用 SQLCipher 读写打开副本、让 SQLite 自己回放还没合并的 WAL 帧并 checkpoint，所以「QQ 一直开着、最近几条只在 WAL 里」也能同步到；回放失败会自动退回只复制主库，并在状态行标「WAL 待合并」。没有新消息时不重建索引。源库出现删除、回溯或换账号时会按数量校验退回全量重建。
 
 ## 启动提示与一键配置
 
@@ -182,6 +182,8 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 | QQ 号 | 多账号时指定；留空选择 `nt_msg.db` 最大的账号 |
 | 保留账号索引数 | `0~5`，默认 `2`。切换账号时把上一个账号的索引改名成 `index.<账号>.sqlite` 缓存，切回时增量更新；`0` 表示只留当前索引。每个索引约占 0.2~0.4 MB / 1000 条消息（含 FTS），按最久未用淘汰 |
 | 搜索索引 | `fts`（默认，trigram 关键词索引，占磁盘更多）或 `like`（不建关键词索引，省磁盘，关键词搜索需要扫描）。修改后需要重建索引才生效 |
+| 自动同步 | 默认开。DSH 运行期间定时检查 QQ 数据库，有变化就增量追新消息；没有密钥或索引时不会自动建库，首次建库仍然手动 |
+| 自动同步间隔 | `5~1440` 分钟，默认 `60`。第一次在启动 60 秒后，之后按间隔执行 |
 
 设置页还有「数据库密钥」卡片：显示是否已配置、提取/重新提取按钮、扫描进度和完整日志；密钥提取进行中会暂时禁止建索引、清理和修改设置。
 
@@ -204,6 +206,8 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 | `pythonVersion` | `3.12` | uv 创建环境时下载/使用的 Python 版本 |
 | `keepAccountIndexes` | `2` | 除当前账号外最多缓存几个账号的索引（`0~5`），按最久未用淘汰 |
 | `searchIndex` | `fts` | 关键词索引：`fts`（trigram 索引）或 `like`（不建索引）；重建索引后生效 |
+| `autoSync` | `true` | DSH 运行期间自动同步新消息；首次建索引仍需手动 |
+| `syncIntervalMinutes` | `60` | 自动同步间隔（`5~1440` 分钟） |
 | `legacyWorkDirDismissed` | 空 | 内部标记：点过迁移横幅的「继续使用」后为 `true`，之后不再提示迁移旧临时目录 |
 
 ## 怎么工作的
@@ -214,6 +218,7 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 4. **数据库在会话列上没有索引**，直接按会话过滤是整表扫描。所以第一次访问时会建一个明文旁路库 `index.sqlite`：120 万条消息约 1 分钟建好，之后所有查询和导出都只读它（单次查询 0.2~0.6 秒）。
 5. **账号索引缓存**：`index.sqlite` 始终是当前账号；其它账号的索引以 `index.<账号>.sqlite` 停放在同一目录。切换账号就是两次同目录改名，不复制文件、不改查询路径；构建开始前先尝试恢复缓存，命中就走增量追加。缓存数量由 `keepAccountIndexes` 限制，按文件 mtime 做 LRU。
 6. **关键词搜索走 FTS5 trigram 索引**（`message_fts`，随旁路库一起建）。trigram 按三字符切分，中文没有词边界也能做子串匹配，所以「搜一句话中间的一段」是索引查找而不是全表 `LIKE`。1~2 个字的查询 trigram 无法回答，自动退回 `LIKE`；如果当前 SQLite/SQLCipher 没编译 FTS5，建库时会跳过该表，搜索同样退回 `LIKE`，功能不受影响。
+7. **自动同步用 WAL 补齐新鲜度**：QQ 运行时新消息先进 `nt_msg.db-wal`，主库只在 checkpoint 时更新（实测主库比 WAL 旧几十秒到 15 分钟）。同步把主库剥头复制后再复制 `-wal`/`-shm`，用 SQLCipher **读写**打开这份可丢弃的副本，执行 `wal_checkpoint(TRUNCATE)` 让 WAL 帧落进副本，然后照常建索引；复制 WAL 前后会比对一次源库指纹，QQ 正在写入就重试。结论与实测见 [docs/wal-notes.md](docs/wal-notes.md)，回归用例在 `tests/test_wal.py`。
 
 ## 隐私与安全
 
@@ -232,7 +237,8 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 
 ## 已知限制
 
-- QQ 运行中复制主库可能缺最近几条（WAL 未合并）；点一次「从 QQ 同步」通常能补上。想要完整数据请先退出 QQ。
+- 自动同步会连 WAL 一起复制并回放，通常能拿到最新几条；只有 WAL 无法回放时才退回主库快照，状态行会标「WAL 待合并」，下个周期再试。
+- 自动同步在真实账号上经常退化为全量重建：`msg_id` 不是全局单调的（同一群里不同会话的 id 数量级可能差很多），计数校验会判定「有回溯」。32 万条的全量重建约 8 秒，数据量越大越慢；改进方向见 `docs/roadmap.md` §7（每会话水位）。
 - 增量同步按 `msg_id` 追加：QQ 侧删除消息或大量回溯时会按数量校验自动全量重建；同一条消息被编辑（`msg_id` 不变）不会更新索引，需要清理索引后重建。
 - 账号索引缓存会额外占磁盘：每份约等于当前索引（约 0.2~0.4 MB / 1000 条，含 FTS 时偏上限）。默认保留 2 份，可在设置里调成 `0`，或在「存储与清理」里单独删除缓存。
 - 从 0.6.x 升级后仍会先使用旧的临时工作目录（否则会突然找不到密钥和索引），网页横幅会提示迁移；迁移是「先复制、再切换设置、最后删除旧文件」，大索引需要几十秒，失败不会改动旧目录。
@@ -265,6 +271,7 @@ cordis.patch.yml      插件行与默认配置
 scripts/
   qqnt_export.py      密钥提取 / 解密 / Protobuf 解析 / 单群导出（Windows + Linux）
   qqnt_query.py       只读查询层：建索引、会话列表、分页查询、多格式导出
+  wal_spike.py        WAL 可读性手工诊断（只读源库，复制后回放）
 python/              可手工复现的 Python 环境声明（pyproject.toml、.python-version）
 locale/               en / zh 显示元数据
 tests/                Python / Node 回归测试

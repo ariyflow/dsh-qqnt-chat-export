@@ -1,5 +1,17 @@
 # 更新记录
 
+## 0.8.0
+
+- **自动同步（默认开启，60 分钟）**：DSH 运行期间定时跑 `qqnt_query.py autosync`，源库（含 WAL）没变化就直接返回、不重建索引；没有密钥或索引时跳过（首次建库仍然手动）；构建锁被占用时输出 `skipped: busy`，留给下一周期。定时器在插件加载时启动、改设置时重建，间隔 `5~1440` 分钟可调，可在设置页关闭。
+- **同步不再漏掉 WAL 里的新消息**：QQ 运行时新消息先写 `nt_msg.db-wal`，主库只在 checkpoint 时更新（实测主库比 WAL 旧 30 秒~15 分钟）。现在复制主库后连 `-wal`/`-shm` 一起复制，用 SQLCipher 读写打开副本并 `wal_checkpoint(TRUNCATE)` 回放，再建索引；复制前后比对源库指纹，QQ 正在写入就重试一次。回放失败自动退回只复制主库，状态里写 `walPending`，页面提示「WAL 待合并」。源库始终只读，验证见 `docs/wal-notes.md` 与 `tests/test_wal.py`（9 个用例，含撕裂/损坏 WAL、源文件 mtime 不变）。
+- 自动同步的结果写到 `sync-status.json`：`{account, db 指纹, changed, skipped, added, mode, total, walPending, checkedAt, lastSyncAt, error}`；`added` 取索引消息数的真实增量（全量重建时报新增量而不是总行数）。`status` 也带上 `sync`。
+- 页面：设置页新增「自动同步」开关与间隔；标题栏状态行显示「自动同步 60 分钟 · 上次同步 x 分钟前」，`walPending` 时追加提示；页面每 5 分钟刷新一次状态，发现新的自动同步就用 toast 提示「已自动同步 N 条新消息」并刷新会话列表。
+- 索引替换（`os.replace`）加 5 次 ×200ms 重试，Windows 上页面正在读索引时不会因为 EBUSY 直接失败；`build-status.json` / `sync-status.json` 的写入同样走重试。
+- 新增 `scripts/wal_spike.py`（手工诊断：只读源库、复制后回放、分别验证 main-only / +wal+shm / 截断 / 损坏四种情况）。
+- 已知限制（写进 README 与 roadmap）：真实账号的 `msg_id` 不是全局单调的，同步的数量校验经常判定「有回溯」而退回全量重建（32 万条约 8 秒）；改进方向是每会话水位或时间窗回读。
+- 测试：Python 49 个（新增 5 个 autosync、3 个 copy-with-wal），Node 27 个（新增自动同步设置校验、`/api/status.sync`）。
+- 版本升到 0.8.0。
+
 ## 0.7.1
 
 上线后修补，集中在「文档说的和代码做的不一致」的几处：

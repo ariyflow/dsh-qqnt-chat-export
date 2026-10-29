@@ -31,7 +31,7 @@ import {
   venvPython,
 } from './settings.js'
 import { buildRunning, cleanupStorage, migrateWorkDir, removeWorkDirEntries, storageSnapshot } from './storage.js'
-import { pruneAccountIndexes, startWebServer } from './web.js'
+import { pruneAccountIndexes, spawnAutosync, startWebServer } from './web.js'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'qqnt-chat-export'
@@ -53,6 +53,8 @@ const KEY_TIMEOUT_MS = 15 * 60_000
 const EXPORT_TIMEOUT_MS = 15 * 60_000
 /** Prompt placement after the built-in `tools:sdk` section. */
 const PROMPT_ORDER = 5000
+/** Wait before the first automatic sync so it does not race host startup. */
+const SYNC_FIRST_DELAY_MS = 60_000
 
 /** One-line probe: Python version, pointer width, and whether sqlcipher3 resolves. */
 const PYTHON_PROBE = "import json,struct,sys,importlib.util as u;print(json.dumps({'version':sys.version.split()[0],'bits':struct.calcsize('P')*8,'sqlcipher3':u.find_spec('sqlcipher3') is not None}))"
@@ -940,6 +942,8 @@ function isInsideDir(parent, child) {
 
       const previousServer = webServer
       const previousKeep = settings.keepAccountIndexes
+      const previousAutoSync = settings.autoSync
+      const previousInterval = settings.syncIntervalMinutes
       Object.assign(settings, next)
       if (portChanged) {
         webServer = candidate
@@ -951,6 +955,9 @@ function isInsideDir(parent, child) {
       // Lowering the limit must shrink the cache now, not after the next build.
       if (next.keepAccountIndexes !== previousKeep && !buildRunning(settings.workDir)) {
         pruneAccountIndexes(settings, next.keepAccountIndexes)
+      }
+      if (next.autoSync !== previousAutoSync || next.syncIntervalMinutes !== previousInterval) {
+        restartSyncLoop()
       }
       return {
         ...publicSettings(settings, currentDefaults(), { url: webUrl, file: settingsFile() }),
@@ -1347,6 +1354,51 @@ function isInsideDir(parent, child) {
     return keyJobSnapshot()
   }
 
+  let stopSyncLoop = null
+
+  /**
+   * One ticks worth of automatic sync. Everything cheap is checked here so an
+   * idle database costs no Python start: the helper would also refuse quickly,
+   * but a timer should not fork every interval for nothing.
+   */
+  function syncTick() {
+    if (settings.autoSync === false) return
+    if (keyJob.state === 'running' || setup.state === 'running') return
+    if (!existsSync(path.join(settings.workDir, 'key.txt'))) return
+    if (!existsSync(path.join(settings.workDir, 'index.sqlite'))) return
+    if (buildRunning(settings.workDir)) return
+    spawnAutosync(settings, {
+      keep: settings.keepAccountIndexes,
+      search: settings.searchIndex,
+    })
+  }
+
+  /** (Re)arm the timer: first run after a minute, then every interval. */
+  function restartSyncLoop() {
+    if (stopSyncLoop) {
+      stopSyncLoop()
+      stopSyncLoop = null
+    }
+    if (settings.autoSync === false) return
+    const interval = Math.max(1, settings.syncIntervalMinutes || 60) * 60_000
+    const tick = () => {
+      try {
+        syncTick()
+      } catch (error) {
+        console.warn(`[qqnt-chat-export] automatic sync tick failed: ${error.message}`)
+      }
+    }
+    const first = setTimeout(tick, SYNC_FIRST_DELAY_MS)
+    const timer = setInterval(tick, interval)
+    // The host keeps the process alive; these timers must not hold it open.
+    first.unref?.()
+    timer.unref?.()
+    stopSyncLoop = () => {
+      clearTimeout(first)
+      clearInterval(timer)
+    }
+  }
+
   const startWeb = () => {
     if (!settings.webPort) {
       webUrl = ''
@@ -1373,7 +1425,12 @@ function isInsideDir(parent, child) {
   if (typeof ctx.effect === 'function') {
     ctx.effect(() => {
       startWeb()
+      restartSyncLoop()
       return () => {
+        if (stopSyncLoop) {
+          stopSyncLoop()
+          stopSyncLoop = null
+        }
         setupAbort?.abort()
         keyJobAbort?.abort()
         const server = webServer
@@ -1384,6 +1441,7 @@ function isInsideDir(parent, child) {
     })
   } else {
     startWeb()
+    restartSyncLoop()
   }
 
   ctx.systemPrompt.section({
