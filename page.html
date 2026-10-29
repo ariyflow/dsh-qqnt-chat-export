@@ -331,8 +331,10 @@
 
   <section class="content">
     <form class="filters" id="filters">
-      <input id="keyword" placeholder="关键词 / from: since: in: has: -排除" style="width:210px"
+      <input id="keyword" list="keywordHistory" placeholder="关键词 / from: since: in: has: -排除"
+             style="width:210px"
              title="支持 from:昵称或QQ、since:YYYY-MM-DD、until:YYYY-MM-DD、in:群名或群号、has:image|file|voice|video，以及 -词 排除">
+      <datalist id="keywordHistory"></datalist>
       <span class="scope hidden" id="scopeHint" title="当前查询只在这个会话里">
         <span id="scopeName"></span>
         <button class="ghost" type="button" id="scopeClear" title="回到全部会话">×</button>
@@ -531,6 +533,8 @@
   var state = {
     sessions: [],
     selection: {},
+    keywordHistory: [],
+    lastSyncCheck: 0,
     kind: 'all',
     sessionKind: '',
     chatId: '',
@@ -617,7 +621,14 @@
    * the new rows in. The first report after loading only records the baseline.
    */
   function noteSync(sync) {
-    if (!sync || !sync.lastSyncAt) return
+    if (!sync) return
+    // A failed automatic sync leaves `lastSyncAt` untouched, so it needs its
+    // own check; otherwise the user only sees a stale "last synced" time.
+    if (sync.error && sync.checkedAt && sync.checkedAt !== state.lastSyncCheck) {
+      state.lastSyncCheck = sync.checkedAt
+      toast('自动同步失败：' + String(sync.error).slice(0, 80))
+    }
+    if (!sync.lastSyncAt) return
     var previous = state.lastSyncAt
     if (!previous) {
       state.lastSyncAt = sync.lastSyncAt
@@ -692,6 +703,7 @@
     var sync = status.sync || {}
     if (sync.autoSync) parts.push('自动同步 ' + (sync.intervalMinutes || 60) + ' 分钟')
     if (sync.lastSyncAt) parts.push('上次同步 ' + ago(sync.lastSyncAt))
+    if (sync.error) parts.push('同步失败：' + String(sync.error).slice(0, 60))
     if (sync.walPending) parts.push('WAL 待合并（QQ 运行中，最新消息稍后补齐）')
     if (status.port) parts.push('端口 ' + status.port)
     $('meta').textContent = parts.join(' · ')
@@ -1061,12 +1073,57 @@
     return new URLSearchParams(args).toString()
   }
 
+  // ---------------------------------------------------------------- 搜索历史
+  var HISTORY_KEY = 'qqnt-keyword-history'
+  var HISTORY_MAX = 20
+
+  function loadHistory() {
+    var list = []
+    try {
+      var raw = localStorage.getItem(HISTORY_KEY)
+      var parsed = raw ? JSON.parse(raw) : []
+      if (Array.isArray(parsed)) {
+        list = parsed.filter(function (item) {
+          return typeof item === 'string' && item.trim() !== '' && item.length <= 120
+        }).slice(0, HISTORY_MAX)
+      }
+    } catch (error) {
+      list = []
+    }
+    state.keywordHistory = list
+    renderHistory()
+  }
+
+  function renderHistory() {
+    var host = $('keywordHistory')
+    if (!host) return
+    host.innerHTML = state.keywordHistory.map(function (term) {
+      return '<option value="' + esc(term) + '"></option>'
+    }).join('')
+  }
+
+  function rememberKeyword(term) {
+    term = (term || '').trim()
+    if (!term || term.length > 120) return
+    var list = [term].concat(state.keywordHistory.filter(function (item) {
+      return item !== term
+    })).slice(0, HISTORY_MAX)
+    state.keywordHistory = list
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(list))
+    } catch (error) {
+      // Private mode / quota: history is a convenience, not a requirement.
+    }
+    renderHistory()
+  }
+
   function loadMessages(reset) {
     if (!state.indexReady) { toast('先建立索引'); return }
     if (!reset && state.loading) return
     if (reset) {
       // 记住本次查询的筛选条件：翻页与高亮都用它，不受之后输入框改动影响
       state.filters = currentFilters()
+      if (state.filters.keyword) rememberKeyword(state.filters.keyword)
       state.offset = 0
       state.rows = 0
       $('messages').innerHTML = ''
@@ -2064,6 +2121,7 @@
   })
 
   updateScope()
+  loadHistory()
   pollTasks()
   refreshStatus(false)
   startStatusPoll()
