@@ -91,6 +91,8 @@
   }
   .aside-head { padding: 10px; border-bottom: 1px solid var(--line); display: grid; gap: 8px; }
   .tabs { display: flex; gap: 6px; }
+  .account-line { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .account-line select { flex: 1; min-width: 0; font-size: 12px; padding: 3px 4px; }
   .tab { flex: 1; padding: 4px 0; font-size: 13px; }
   .tab.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
   .sessions { overflow: auto; flex: 1; }
@@ -104,6 +106,14 @@
   .session .name { font-weight: 600; display: flex; align-items: center; gap: 6px; min-width: 0; }
   .session .name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .session .pick { flex: none; margin: 0; }
+  .session-tools { display: none; margin-left: auto; gap: 2px; flex: none; }
+  .session:hover .session-tools, .session:focus-within .session-tools { display: inline-flex; }
+  .session-tools button {
+    border: 1px solid var(--line); background: var(--bg); color: var(--muted);
+    font-size: 10px; line-height: 1; padding: 2px 4px; border-radius: 4px; cursor: pointer;
+  }
+  .session-tools button:hover { color: var(--accent); border-color: var(--accent); }
+  .session.pinned .name::before { content: '📌'; font-size: 10px; }
   .batch { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
   .batch button { font-size: 12px; padding: 3px 8px; }
   .batch span { margin-right: 2px; }
@@ -159,6 +169,19 @@
   .stat-row b { color: var(--muted); font-weight: 500; white-space: nowrap; }
   .stat-row i { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--accent); opacity: .5; }
   .stats-empty { color: var(--muted); font-size: 13px; }
+  .chat-hits { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 16px; border-bottom: 1px solid var(--line); }
+  .chat-hits .chip { font-size: 12px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--text); cursor: pointer; }
+  .chat-hits .chip:hover { border-color: var(--accent); color: var(--accent); }
+  .saved { border-bottom: 1px solid var(--line); font-size: 12px; }
+  .saved summary { padding: 8px 12px; cursor: pointer; color: var(--muted); user-select: none; }
+  .saved .saved-list { padding: 0 12px 8px; display: flex; flex-direction: column; gap: 3px; max-height: 180px; overflow: auto; }
+  .saved .saved-item { display: flex; gap: 6px; align-items: center; }
+  .saved .saved-item .apply { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; background: none; color: var(--text); cursor: pointer; font-size: 12px; padding: 2px 0; }
+  .saved .saved-item .apply:hover { color: var(--accent); }
+  .saved .saved-item .del { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; }
+  .heat { display: grid; grid-template-columns: 34px repeat(24, 1fr); gap: 2px; font-size: 10px; align-items: center; }
+  .heat .lbl { color: var(--muted); white-space: nowrap; }
+  .heat .cell { aspect-ratio: 1; border-radius: 2px; background: var(--panel); }
   .messages { overflow: auto; flex: 1; padding: 4px 0; }
   .row { display: grid; grid-template-columns: 132px 150px 1fr auto; gap: 12px; padding: 5px 16px; border-bottom: 1px solid transparent; }
   .row:hover { background: var(--panel); }
@@ -345,7 +368,17 @@
         <button class="primary" type="button" id="batchExport">导出选中（ZIP）</button>
         <button class="ghost" type="button" id="batchClear">清空</button>
       </div>
+      <label class="account-line" title="切换账号索引；只读写插件生成的索引，不修改 QQ 数据">
+        账号 <select id="accountSelect"><option value="">读取中…</option></select>
+      </label>
+      <label class="check" style="font-size:12px;color:var(--muted)">
+        <input type="checkbox" id="showHidden"> 显示已隐藏
+      </label>
     </div>
+    <details class="saved" id="savedBox">
+      <summary>保存的搜索 <span id="savedCount"></span></summary>
+      <div class="saved-list" id="savedList"></div>
+    </details>
     <div class="sessions" id="sessions"></div>
   </aside>
 
@@ -367,6 +400,7 @@
       <label>到 <input type="date" id="until"></label>
       <button class="primary" type="submit">查询</button>
       <button class="ghost" type="button" id="clear">清空</button>
+      <button class="ghost" type="button" id="saveSearch" title="把当前筛选条件保存到本机浏览器，之后一键重放">保存搜索</button>
       <span class="spacer"></span>
       <select id="format">
         <option value="txt">纯文本 .txt</option>
@@ -407,6 +441,7 @@
       <button class="primary" type="button" id="download">下载</button>
     </form>
     <div class="summary" id="summary">选择左侧的会话，直接输入关键词可跨全部会话查询。</div>
+    <div class="chat-hits hidden" id="chatHits"></div>
     <div class="stats-panel hidden" id="statsPanel">
       <div class="stats-head">
         <strong>统计</strong>
@@ -571,6 +606,18 @@
   <div class="gallery-more"><button class="ghost hidden" type="button" id="galleryMore">加载更多</button></div>
 </dialog>
 
+<dialog class="confirm-dialog" id="saveSearchDialog">
+  <form method="dialog">
+    <h3>保存这次搜索</h3>
+    <p>保存当前关键词、发送者、日期、正则开关与会话范围，之后在左侧「保存的搜索」里一键重放。</p>
+    <input id="saveSearchName" maxlength="60" placeholder="名称，例如：班级群图片" style="width:100%">
+    <div class="settings-actions">
+      <button class="primary" type="button" id="saveSearchConfirm">保存</button>
+      <button class="ghost" value="cancel">取消</button>
+    </div>
+  </form>
+</dialog>
+
 <section class="task-panel hidden" id="taskPanel" aria-live="polite">
   <header>
     <strong>导出任务</strong>
@@ -590,6 +637,10 @@
     sessions: [],
     selection: {},
     keywordHistory: [],
+    saved: [],
+    byChat: [],
+    account: '',
+    hiddenVisible: false,
     lastSyncCheck: 0,
     statsData: null,
     gallery: null,
@@ -734,10 +785,37 @@
   }
 
   // ---------------------------------------------------------------- 状态与索引
+  /** Sidebar account picker: the live index plus any parked caches. */
+  function renderAccountSelect(status) {
+    var select = $('accountSelect')
+    var indexed = (status.index && status.index.account) || ''
+    var current = status.account || indexed || ''
+    if (!current) {
+      select.innerHTML = '<option value="">未检测到账号</option>'
+      select.disabled = true
+      return
+    }
+    var options = [{ value: current, label: current + '（当前）' }]
+    var seen = {}
+    seen[current] = true
+    ;(status.index && status.index.accounts || []).forEach(function (item) {
+      var account = String((item && item.account) || '')
+      if (!account || seen[account]) return
+      seen[account] = true
+      options.push({ value: account, label: account + (item.current ? '（当前）' : '（缓存）') })
+    })
+    select.innerHTML = options.map(function (item) {
+      return '<option value="' + esc(item.value) + '">' + esc(item.label) + '</option>'
+    }).join('')
+    select.value = indexed || current
+    select.disabled = options.length < 2 || state.building
+  }
+
   function paintStatus(status) {
     var parts = []
     var currentAccount = status.account || ''
     var indexedAccount = (status.index && status.index.account) || ''
+    state.account = indexedAccount || currentAccount
     if (status.index && status.index.exists) {
       parts.push('索引 ' + num(status.index.messages || 0) + ' 条')
       if (status.index.chats) parts.push(num(status.index.chats) + ' 个会话')
@@ -862,14 +940,18 @@
   /** Switch to an account whose index is parked in workDir (no rebuild). */
   function selectAccountIndex(account) {
     var action = $('bannerAction')
+    var select = $('accountSelect')
     action.disabled = true
+    select.disabled = true
     api('/api/index/select', { method: 'POST', body: { account: account } }).then(function (result) {
       action.disabled = false
       if (!result.switched && !result.current) {
+        select.disabled = false
         toast(result.error || '没有可用的缓存索引，需要重新同步。')
         return
       }
       toast('已切换到账号 ' + account + ' 的索引')
+      state.account = account
       state.sessions = []
       state.chatId = ''
       state.chatName = ''
@@ -877,6 +959,7 @@
       refreshStatus(false)
     }).catch(function (error) {
       action.disabled = false
+      select.disabled = false
       toast('切换失败：' + error.message)
     })
   }
@@ -928,6 +1011,7 @@
     var wasBuilding = state.building
     return api('/api/status').then(function (status) {
       paintStatus(status)
+      renderAccountSelect(status)
       noteSync(status.sync)
       maybeShowStartup(status)
       if (wasBuilding && !state.building && state.indexReady) {
@@ -987,7 +1071,7 @@
 
   // ---------------------------------------------------------------- 会话
   function loadSessions() {
-    return api('/api/sessions').then(function (payload) {
+    return api('/api/sessions' + (state.hiddenVisible ? '?hidden=1' : '')).then(function (payload) {
       state.sessions = payload.sessions || []
       renderSessions()
     }).catch(function (error) { toast(error.message) })
@@ -1007,7 +1091,7 @@
       shown += 1
       var active = item.kind === state.sessionKind && item.id === state.chatId
       var row = document.createElement('div')
-      row.className = 'session' + (active ? ' active' : '')
+      row.className = 'session' + (active ? ' active' : '') + (item.pinned ? ' pinned' : '')
       row.tabIndex = 0
       row.setAttribute('role', 'button')
       row.setAttribute('aria-current', active ? 'true' : 'false')
@@ -1015,7 +1099,13 @@
       var picked = Object.prototype.hasOwnProperty.call(state.selection, key)
       row.innerHTML =
         '<div class="name"><input type="checkbox" class="pick"' + (picked ? ' checked' : '') +
-        ' aria-label="选择会话"><span>' + esc(item.name) + '</span></div>' +
+        ' aria-label="选择会话"><span>' + esc(item.name) + '</span>' +
+        '<span class="session-tools">' +
+        '<button type="button" class="pin" title="' + (item.pinned ? '取消置顶' : '置顶') + '">' +
+        (item.pinned ? '取消' : '置顶') + '</button>' +
+        '<button type="button" class="rename" title="重命名（只改插件里的显示名）">改名</button>' +
+        '<button type="button" class="hide" title="隐藏（可勾选「显示已隐藏」恢复）">隐藏</button>' +
+        '</span></div>' +
         '<div class="count">' + num(item.messages) + '</div>' +
         '<div class="sub"><span class="badge ' + (item.kind === 'private' ? 'private' : '') + '">' +
         (item.kind === 'private' ? '私聊' : '群聊') + '</span><span>' +
@@ -1039,6 +1129,22 @@
         pickSession(item)
         $('keyword').focus()
       }
+      row.querySelector('.pin').onclick = function (event) {
+        event.stopPropagation()
+        setChatState(item, { pinned: !item.pinned })
+      }
+      row.querySelector('.rename').onclick = function (event) {
+        event.stopPropagation()
+        var name = window.prompt('会话显示名（留空恢复原名）', item.alias || '')
+        if (name === null) return
+        setChatState(item, { alias: name.trim().slice(0, 80) })
+      }
+      row.querySelector('.hide').onclick = function (event) {
+        event.stopPropagation()
+        setChatState(item, { hidden: true }).then(function () {
+          toast('已隐藏「' + item.name + '」，勾选「显示已隐藏」可恢复')
+        })
+      }
       row.addEventListener('keydown', function (event) {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault()
@@ -1053,9 +1159,20 @@
     updateBatchBar()
   }
 
+  /** Persist an alias/pin/hide flag; the server merges it into /api/sessions. */
+  function setChatState(item, patch) {
+    return api('/api/chats/state', {
+      method: 'POST',
+      body: { kind: item.kind, id: item.id, patch: patch }
+    }).then(function () {
+      return loadSessions()
+    }).catch(function (error) {
+      toast('保存会话设置失败：' + error.message)
+    })
+  }
+
   /** The batch bar only appears while at least one chat is ticked. */
-  function updateBatchBar() {
-    var count = Object.keys(state.selection).length
+  function updateBatchBar() {    var count = Object.keys(state.selection).length
     $('batchBar').classList.toggle('hidden', count === 0)
     if (count) $('batchCount').textContent = '已选 ' + count + ' 个会话'
   }
@@ -1176,6 +1293,164 @@
     renderHistory()
   }
 
+  // ---------------------------------------------------------------- 保存搜索
+  var SAVED_KEY = 'qqnt-saved-searches'
+  var SAVED_MAX = 30
+
+  function loadSaved() {
+    var list = []
+    try {
+      var parsed = JSON.parse(localStorage.getItem(SAVED_KEY) || '[]')
+      if (Array.isArray(parsed)) {
+        list = parsed.filter(function (item) {
+          return item && typeof item.name === 'string' && item.name.trim() !== '' &&
+            item.filters && typeof item.filters === 'object'
+        }).slice(0, SAVED_MAX)
+      }
+    } catch (error) {
+      list = []
+    }
+    state.saved = list
+    renderSaved()
+  }
+
+  function persistSaved() {
+    try {
+      localStorage.setItem(SAVED_KEY, JSON.stringify(state.saved.slice(0, SAVED_MAX)))
+    } catch (error) {
+      // Private mode / quota: saved searches simply do not persist.
+    }
+  }
+
+  function describeFilters(filters) {
+    var parts = []
+    if (filters.keyword) parts.push('「' + filters.keyword + '」')
+    if (filters.sender) {
+      parts.push('发送者 ' + filters.sender + (filters.senderRegex ? '（正则）' : ''))
+    }
+    if (filters.since) parts.push('从 ' + filters.since)
+    if (filters.until) parts.push('到 ' + filters.until)
+    if (filters.chatKind && filters.chatId) {
+      parts.push((filters.chatKind === 'private' ? '私聊 ' : '群 ') + filters.chatId)
+    }
+    return parts.join(' · ') || '全部会话'
+  }
+
+  function renderSaved() {
+    var list = state.saved || []
+    $('savedCount').textContent = list.length ? '（' + list.length + '）' : ''
+    var host = $('savedList')
+    host.innerHTML = ''
+    if (!list.length) {
+      host.innerHTML = '<div class="empty" style="padding:6px 0">还没有保存的搜索</div>'
+      return
+    }
+    list.forEach(function (item, index) {
+      var row = document.createElement('div')
+      row.className = 'saved-item'
+      var apply = document.createElement('button')
+      apply.type = 'button'
+      apply.className = 'apply'
+      apply.textContent = item.name
+      apply.title = '重放：' + describeFilters(item.filters)
+      apply.onclick = function () { applySaved(item) }
+      var del = document.createElement('button')
+      del.type = 'button'
+      del.className = 'del'
+      del.title = '删除这个保存的搜索'
+      del.textContent = '×'
+      del.onclick = function () {
+        state.saved.splice(index, 1)
+        persistSaved()
+        renderSaved()
+      }
+      row.appendChild(apply)
+      row.appendChild(del)
+      host.appendChild(row)
+    })
+  }
+
+  function applySaved(item) {
+    var filters = item.filters || {}
+    $('keyword').value = filters.keyword || ''
+    $('sender').value = filters.sender || ''
+    $('senderRegex').checked = !!filters.senderRegex
+    $('since').value = filters.since || ''
+    $('until').value = filters.until || ''
+    state.chatId = filters.chatId || ''
+    state.sessionKind = filters.chatKind || ''
+    state.chatName = ''
+    if (state.chatId) {
+      var match = state.sessions.filter(function (row) {
+        return row.kind === state.sessionKind && row.id === state.chatId
+      })[0]
+      state.chatName = match ? match.name : state.chatId
+    }
+    state.around = 0
+    renderSessions()
+    updateScope()
+    loadMessages(true)
+    toast('已应用保存的搜索：' + item.name)
+  }
+
+  function openSaveSearch() {
+    var filters = currentFilters()
+    var suggestion = filters.keyword || filters.sender ||
+      (state.chatId ? (state.chatName || state.chatId) : '全部会话')
+    $('saveSearchName').value = suggestion.slice(0, 60)
+    $('saveSearchDialog').showModal()
+    $('saveSearchName').focus()
+    $('saveSearchName').select()
+  }
+
+  function confirmSaveSearch() {
+    var name = $('saveSearchName').value.trim().slice(0, 60)
+    if (!name) {
+      toast('给这个搜索起个名字')
+      return
+    }
+    var filters = currentFilters()
+    Object.keys(filters).forEach(function (key) {
+      if (filters[key] === '' || filters[key] == null) delete filters[key]
+    })
+    state.saved = [{ name: name, filters: filters, at: Date.now() }]
+      .concat(state.saved.filter(function (item) { return item.name !== name }))
+      .slice(0, SAVED_MAX)
+    persistSaved()
+    renderSaved()
+    $('saveSearchDialog').close()
+    toast('已保存搜索：' + name)
+  }
+
+  function renderChatHits(payload) {
+    var host = $('chatHits')
+    host.innerHTML = ''
+    var rows = (payload && payload.byChat) || []
+    if (!payload || state.chatId || rows.length < 2) {
+      host.classList.add('hidden')
+      return
+    }
+    host.classList.remove('hidden')
+    rows.forEach(function (row) {
+      var chip = document.createElement('button')
+      chip.type = 'button'
+      chip.className = 'chip'
+      chip.textContent = (row.kind === 'private' ? '私聊 ' : '群 ') +
+        row.name + ' · ' + num(row.count)
+      chip.title = '只看这个会话里的命中'
+      chip.onclick = function () {
+        state.sessionKind = row.kind
+        state.chatId = row.id
+        state.chatName = row.name
+        state.around = 0
+        renderSessions()
+        updateScope()
+        loadMessages(true)
+      }
+      host.appendChild(chip)
+    })
+  }
+
   function loadMessages(reset) {
     if (!state.indexReady) { toast('先建立索引'); return }
     if (!reset && state.loading) return
@@ -1227,6 +1502,7 @@
         $('summary').textContent = '「' + (state.chatName || state.chatId) +
           '」上下文 · 共 ' + num(state.total) + ' 条'
         $('more').classList.add('hidden')
+        renderChatHits(null)
         return
       }
       var scope = state.chatId ? '「' + state.chatName + '」' : '全部会话'
@@ -1237,6 +1513,7 @@
         ' · 共 ' + num(state.total) + ' 条' +
         (state.rows && state.rows < state.total ? '，已显示 ' + num(state.rows) + ' 条' : '')
       $('more').classList.toggle('hidden', state.offset >= state.total)
+      renderChatHits(payload)
     }).catch(function (error) {
       if (seq !== state.reqSeq) return
       state.loading = false
@@ -1450,6 +1727,31 @@
     var chats = (data.topChats || []).map(function (row) {
       return { name: (row.kind === 'private' ? '私聊 ' : '群 ') + row.name, count: row.count }
     })
+    var dayNames = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+    var heat = data.heat || []
+    var heatMax = 1
+    heat.forEach(function (row) {
+      (row || []).forEach(function (value) { if (value > heatMax) heatMax = value })
+    })
+    var heatHtml = ''
+    for (var day = 0; day < 7; day++) {
+      heatHtml += '<div class="lbl">' + dayNames[day] + '</div>'
+      for (var hour = 0; hour < 24; hour++) {
+        var value = (heat[day] && heat[day][hour]) || 0
+        var level = value ? 0.12 + 0.88 * Math.sqrt(value / heatMax) : 0
+        heatHtml += '<div class="cell" title="' + dayNames[day] + ' ' +
+          String(hour).padStart(2, '0') + ':00：' + num(value) + ' 条"' +
+          (value ? ' style="background:var(--accent);opacity:' + level.toFixed(2) + '"' : '') +
+          '></div>'
+      }
+    }
+    var daily = (data.daily || []).map(function (row) {
+      return { label: row.date.slice(5), count: row.count }
+    })
+    var maxDay = 1
+    daily.forEach(function (row) { if (row.count > maxDay) maxDay = row.count })
+    daily.forEach(function (row) { row.max = maxDay })
+    var dayStep = daily.length > 20 ? 5 : (daily.length > 10 ? 2 : 1)
     $('statsBody').innerHTML =
       '<div class="stats-kpis">' +
       '<span><b>' + num(data.total) + '</b> 条消息</span>' +
@@ -1465,6 +1767,14 @@
       hours.map(function (row) {
         return statColumn(row, row.hour % 4 === 0, row.label)
       }).join('') + '</div></section>' +
+      (daily.length
+        ? '<section class="stats-sec" style="grid-column:1/-1"><h4>最近 30 天</h4>' +
+          '<div class="chart">' + daily.map(function (row, index) {
+            return statColumn(row, index % dayStep === 0, row.label)
+          }).join('') + '</div></section>'
+        : '') +
+      '<section class="stats-sec" style="grid-column:1/-1"><h4>周 × 小时热力图</h4>' +
+      '<div class="heat">' + heatHtml + '</div></section>' +
       '<section class="stats-sec"><h4>发言人排行（前 10）</h4>' +
       statList(senders, '没有发送者数据') + '</section>' +
       '<section class="stats-sec"><h4>活跃会话（前 10）</h4>' +
@@ -1485,6 +1795,9 @@
     })
     ;(data.hourly || []).forEach(function (count, hour) {
       rows.push(['小时', String(hour).padStart(2, '0') + ':00', count])
+    })
+    ;(data.daily || []).forEach(function (row) {
+      rows.push(['每日', row.date, row.count])
     })
     ;(data.topSenders || []).forEach(function (row) {
       rows.push(['发言人', row.name + (row.qq ? ' (' + row.qq + ')' : ''), row.count])
@@ -2283,6 +2596,14 @@
     updateScope()
     loadMessages(true)
   })
+  $('saveSearch').addEventListener('click', openSaveSearch)
+  $('saveSearchConfirm').addEventListener('click', confirmSaveSearch)
+  $('saveSearchName').addEventListener('keydown', function (event) {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      confirmSaveSearch()
+    }
+  })
   $('format').addEventListener('change', syncFormatOptions)
   $('download').addEventListener('click', download)
   $('statsBtn').addEventListener('click', openStats)
@@ -2305,6 +2626,21 @@
   $('more').addEventListener('click', function () { loadMessages(false) })
   $('reload').addEventListener('click', function () { refreshStatus(false) })
   $('sync').addEventListener('click', function () { startBuild(true) })
+  $('accountSelect').addEventListener('change', function () {
+    var target = this.value
+    var previous = state.account || ''
+    if (!target || target === previous) return
+    if (!confirm('切换到账号 ' + target + ' 的索引？只会读写插件生成的索引，不修改 QQ 数据。')) {
+      this.value = previous
+      return
+    }
+    this.value = previous
+    selectAccountIndex(target)
+  })
+  $('showHidden').addEventListener('change', function () {
+    state.hiddenVisible = this.checked
+    loadSessions()
+  })
   $('sessionFilter').addEventListener('input', renderSessions)
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (tab) {
     tab.addEventListener('click', function () {
@@ -2361,6 +2697,7 @@
   updateScope()
   syncFormatOptions()
   loadHistory()
+  loadSaved()
   pollTasks()
   refreshStatus(false)
   startStatusPoll()

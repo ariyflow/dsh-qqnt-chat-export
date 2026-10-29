@@ -582,6 +582,52 @@ test('the gallery route forwards the chat scope to the helper', {
   }
 })
 
+test('session aliases, pins and hidden chats merge in the web layer', {
+  skip: process.platform === 'win32' ? 'needs a POSIX shell wrapper' : false,
+}, async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  const sessions = {
+    sessions: [
+      { kind: 'group', id: 'g2', name: '群二', qq: '', messages: 2, lastTime: '2024-01-02' },
+      { kind: 'group', id: 'g1', name: '群一', qq: '', messages: 1, lastTime: '2024-01-01' },
+      { kind: 'private', id: 'p1', name: '私聊一', qq: '2', messages: 3, lastTime: '2024-01-03' },
+    ],
+  }
+  const wrapper = path.join(dir, 'py')
+  await writeFile(wrapper,
+    '#!/bin/sh\n' + `echo '${JSON.stringify(sessions)}'\n`, { mode: 0o755 })
+  await writeFile(path.join(work, 'chats-state.json'), JSON.stringify({
+    'group:g1': { alias: '别名群', pinned: true },
+    'private:p1': { hidden: true },
+  }))
+  const { server, base } = await startServer({ python: wrapper, workDir: work }, {})
+  try {
+    let payload = await (await fetch(`${base}/api/sessions`)).json()
+    assert.deepEqual(payload.sessions.map((row) => row.id), ['g1', 'g2'])
+    assert.equal(payload.sessions[0].name, '别名群')
+    assert.equal(payload.sessions[0].pinned, true)
+
+    payload = await (await fetch(`${base}/api/sessions?hidden=1`)).json()
+    assert.deepEqual(payload.sessions.map((row) => row.id), ['g1', 'g2', 'p1'])
+    assert.equal(payload.sessions[2].hidden, true)
+
+    const response = await fetch(`${base}/api/chats/state`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-qqnt-action': '1' },
+      body: JSON.stringify({ kind: 'group', id: 'g2', patch: { alias: '二号群', pinned: true } }),
+    })
+    assert.equal(response.status, 200)
+    payload = await (await fetch(`${base}/api/sessions`)).json()
+    assert.deepEqual(payload.sessions.map((row) => row.id), ['g2', 'g1'])
+    assert.equal(payload.sessions[0].name, '二号群')
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('the served page contains the startup checklist and key action', async () => {
   const dir = await tempDir()
   const { server, base } = await startServer({ python: process.execPath, workDir: dir }, {})
@@ -608,6 +654,12 @@ test('the served page contains the startup checklist and key action', async () =
     assert.match(html, /id="galleryBtn"/)
     assert.match(html, /id="galleryDialog"/)
     assert.match(html, /id="mediaDialog"/)
+    // 0.10.1 saved searches, per-chat hit chips and the stats heatmap.
+    assert.match(html, /id="savedBox"/)
+    assert.match(html, /id="saveSearch"/)
+    assert.match(html, /id="chatHits"/)
+    assert.match(html, /class="heat"/)
+    assert.match(html, /id="accountSelect"/)
   } finally {
     await server.close()
     await rm(dir, { recursive: true, force: true })

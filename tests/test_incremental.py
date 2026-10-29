@@ -689,6 +689,16 @@ class IncrementalBuildTests(unittest.TestCase):
         self.assertEqual(stats['topSenders'][0]['count'], 2)
         self.assertEqual(stats['topChats'][0]['id'], 'g1')
         self.assertTrue(stats['firstTime'])
+        # Week × hour matrix covers the same rows; the daily trend is capped.
+        self.assertEqual(len(stats['heat']), 7)
+        self.assertTrue(all(len(row) == 24 for row in stats['heat']))
+        self.assertEqual(sum(sum(row) for row in stats['heat']), 2)
+        self.assertEqual(len(stats['daily']), 1)
+        self.assertEqual(stats['daily'][0]['count'], 2)
+        got = self.run_cli('messages', '--json',
+                           json.dumps({'keyword': '条消息', 'limit': 10}))
+        self.assertEqual(got['byChat'][0]['id'], 'g1')
+        self.assertEqual(got['byChat'][0]['count'], 2)
         # An empty selection is a valid answer, not an error.
         stats = self.run_cli('stats', '--json',
                              json.dumps({'keyword': '没有这个关键词xyz'}))

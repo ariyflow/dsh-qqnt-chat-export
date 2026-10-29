@@ -11,7 +11,7 @@
  * decrypted data out of the agent surface.
  */
 import { spawn } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, createReadStream } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, createReadStream, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -324,6 +324,48 @@ function fileInfo(file) {
   } catch {
     return { path: file, exists: false, size: 0, mtime: 0 }
   }
+}
+
+/** Per-chat alias/pin/hide flags; kept beside the index, never inside it. */
+function chatStateFile(workDir) {
+  return path.join(workDir, 'chats-state.json')
+}
+
+function readChatState(workDir) {
+  try {
+    const value = JSON.parse(readFileSync(chatStateFile(workDir), 'utf8'))
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeChatState(workDir, value) {
+  const file = chatStateFile(workDir)
+  const tmp = `${file}.tmp`
+  writeFileSync(tmp, JSON.stringify(value, null, 2))
+  renameSync(tmp, file)
+}
+
+/** Merge aliases/pins/hides into the helper's session list (pinned first). */
+function mergeChatState(workDir, sessions, includeHidden) {
+  const states = readChatState(workDir)
+  const out = []
+  for (const session of Array.isArray(sessions) ? sessions : []) {
+    const patch = states[`${session.kind}:${session.id}`] || {}
+    if (patch.hidden && !includeHidden) continue
+    out.push({
+      ...session,
+      name: typeof patch.alias === 'string' && patch.alias.trim()
+        ? patch.alias.trim() : session.name,
+      alias: typeof patch.alias === 'string' ? patch.alias : '',
+      pinned: patch.pinned === true,
+      hidden: patch.hidden === true,
+    })
+  }
+  // V8 sorts stably, so pinned chats keep their newest-first order.
+  out.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0))
+  return out
 }
 
 /** The helper's progress file; `{ state: 'idle' }` before the first build. */
@@ -678,8 +720,46 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
     }
     if (req.method === 'GET' && pathname === '/api/sessions') {
       runJson(settings, 'sessions')
-        .then((payload) => sendJson(res, 200, payload))
+        .then((payload) => sendJson(res, 200, {
+          sessions: mergeChatState(settings.workDir, payload.sessions,
+            params.get('hidden') === '1'),
+        }))
         .catch((error) => sendJson(res, 500, { error: error.message }))
+      return
+    }
+    if (req.method === 'POST' && pathname === '/api/chats/state') {
+      if (!isTrustedMutation(req)) {
+        sendJson(res, 403, { error: 'cross-origin requests are refused' })
+        return
+      }
+      readJsonBody(req)
+        .then((body) => {
+          const kind = body.kind
+          const id = String(body.id ?? '').trim()
+          if (!['group', 'private'].includes(kind) || id === '') {
+            throw Object.assign(new Error('kind 与 id 都是必需的'), { status: 400 })
+          }
+          const patch = body.patch && typeof body.patch === 'object' ? body.patch : {}
+          const allowed = {}
+          if (typeof patch.alias === 'string') allowed.alias = patch.alias.trim().slice(0, 80)
+          if (typeof patch.pinned === 'boolean') allowed.pinned = patch.pinned
+          if (typeof patch.hidden === 'boolean') allowed.hidden = patch.hidden
+          if (!Object.keys(allowed).length) {
+            throw Object.assign(new Error('没有可保存的字段'), { status: 400 })
+          }
+          const states = readChatState(settings.workDir)
+          const key = `${kind}:${id}`
+          const next = { ...(states[key] || {}), ...allowed }
+          if (!next.alias) delete next.alias
+          if (next.pinned === false) delete next.pinned
+          if (next.hidden === false) delete next.hidden
+          if (Object.keys(next).length) states[key] = next
+          else delete states[key]
+          writeChatState(settings.workDir, states)
+          return { key, state: states[key] || {} }
+        })
+        .then((result) => sendJson(res, 200, result))
+        .catch((error) => sendJson(res, error.status ?? 500, { error: error.message }))
       return
     }
     if (req.method === 'GET' && pathname === '/api/stats') {

@@ -1438,6 +1438,14 @@ def cmd_stats(p, args):
             "FROM messages m LEFT JOIN chats c "
             "ON c.chat_kind = m.chat_kind AND c.chat_id = m.chat_id" + where +
             ' GROUP BY 1, 2 ORDER BY n DESC LIMIT 10', params).fetchall()
+        heat = conn.execute(
+            "SELECT cast(strftime('%w', m.ts, 'unixepoch', 'localtime') AS INTEGER), "
+            "cast(strftime('%H', m.ts, 'unixepoch', 'localtime') AS INTEGER), "
+            'count(*) FROM messages m' + where + ' GROUP BY 1, 2', params).fetchall()
+        daily = conn.execute(
+            "SELECT strftime('%Y-%m-%d', m.ts, 'unixepoch', 'localtime'), count(*) "
+            'FROM messages m' + where + ' GROUP BY 1 ORDER BY 1 DESC LIMIT 30',
+            params).fetchall()
     finally:
         conn.close()
     hours = [0] * 24
@@ -1448,6 +1456,9 @@ def cmd_stats(p, args):
         fallback = ('群 %s' % chat_id) if kind == GROUP_KIND else ('QQ %s' % chat_id)
         chats_out.append({'kind': kind, 'id': str(chat_id),
                           'name': (name or '').strip() or fallback, 'count': count})
+    matrix = [[0] * 24 for _ in range(7)]
+    for dow, hour, count in heat:
+        matrix[int(dow or 0) % 7][int(hour or 0) % 24] += count
     print(json.dumps({
         'total': total, 'chats': chats, 'senders': senders,
         'first': q.as_seconds(first) if first else 0,
@@ -1456,6 +1467,9 @@ def cmd_stats(p, args):
         'lastTime': fmt_time(last) if last else '',
         'monthly': [{'month': month, 'count': count} for month, count in monthly if month],
         'hourly': hours,
+        'daily': [{'date': day, 'count': count}
+                  for day, count in reversed(daily) if day],
+        'heat': matrix,
         'topSenders': [{'name': name or '?', 'qq': qq or '', 'count': count}
                        for name, qq, count in top_senders],
         'topChats': chats_out,
@@ -1466,6 +1480,11 @@ def messages_page(conn, args):
     """One page of matches, newest first unless `order=asc`."""
     where, params = build_where(conn, args)
     total = conn.execute('SELECT count(*) FROM messages m' + ' ' + where, params).fetchone()[0]
+    by_chat = conn.execute(
+        "SELECT m.chat_kind, m.chat_id, coalesce(c.name, ''), count(*) AS n "
+        "FROM messages m LEFT JOIN chats c "
+        "ON c.chat_kind = m.chat_kind AND c.chat_id = m.chat_id" + where +
+        ' GROUP BY 1, 2 ORDER BY n DESC LIMIT 20', params).fetchall()
     limit, offset = page_args(args)
     order = 'ASC' if str(args.get('order', '')).lower() == 'asc' else 'DESC'
     rows = conn.execute(
@@ -1473,6 +1492,10 @@ def messages_page(conn, args):
         % (MSG_COLUMNS, MSG_FROM, where, order, order),
         params + [limit, offset]).fetchall()
     return {'total': total, 'offset': offset, 'limit': limit,
+            'byChat': [{'kind': kind, 'id': str(chat_id),
+                        'name': (name or '').strip() or str(chat_id),
+                        'count': count}
+                       for kind, chat_id, name, count in by_chat],
             'rows': [message_json(r) for r in rows]}
 
 
