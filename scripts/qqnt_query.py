@@ -1254,6 +1254,61 @@ def cmd_sessions(p):
     print(json.dumps({'sessions': sessions}, ensure_ascii=False))
 
 
+def cmd_stats(p, args):
+    """Aggregates for the local stats panel; never leaves the machine."""
+    conn = open_index(p)
+    try:
+        args = merge_query_args(args)
+        where, params = build_where(conn, args)
+        total, first, last = conn.execute(
+            'SELECT count(*), min(m.ts), max(m.ts) FROM messages m' + where,
+            params).fetchone()
+        chats = conn.execute(
+            'SELECT count(*) FROM (SELECT 1 FROM messages m' + where +
+            ' GROUP BY m.chat_kind, m.chat_id)', params).fetchone()[0]
+        senders = conn.execute(
+            "SELECT count(*) FROM (SELECT 1 FROM messages m" + where +
+            " GROUP BY coalesce(nullif(m.sender_qq, ''), m.sender_name))",
+            params).fetchone()[0]
+        monthly = conn.execute(
+            "SELECT strftime('%Y-%m', m.ts, 'unixepoch', 'localtime'), count(*) "
+            'FROM messages m' + where + ' GROUP BY 1 ORDER BY 1', params).fetchall()
+        hourly = conn.execute(
+            "SELECT cast(strftime('%H', m.ts, 'unixepoch', 'localtime') AS INTEGER), "
+            'count(*) FROM messages m' + where + ' GROUP BY 1', params).fetchall()
+        top_senders = conn.execute(
+            "SELECT coalesce(nullif(m.sender_name, ''), m.sender_qq, m.sender_uid, '?'), "
+            "coalesce(m.sender_qq, ''), count(*) AS n FROM messages m" + where +
+            ' GROUP BY 1, 2 ORDER BY n DESC LIMIT 10', params).fetchall()
+        top_chats = conn.execute(
+            "SELECT m.chat_kind, m.chat_id, coalesce(c.name, ''), count(*) AS n "
+            "FROM messages m LEFT JOIN chats c "
+            "ON c.chat_kind = m.chat_kind AND c.chat_id = m.chat_id" + where +
+            ' GROUP BY 1, 2 ORDER BY n DESC LIMIT 10', params).fetchall()
+    finally:
+        conn.close()
+    hours = [0] * 24
+    for hour, count in hourly:
+        hours[int(hour or 0) % 24] += count
+    chats_out = []
+    for kind, chat_id, name, count in top_chats:
+        fallback = ('群 %s' % chat_id) if kind == GROUP_KIND else ('QQ %s' % chat_id)
+        chats_out.append({'kind': kind, 'id': str(chat_id),
+                          'name': (name or '').strip() or fallback, 'count': count})
+    print(json.dumps({
+        'total': total, 'chats': chats, 'senders': senders,
+        'first': q.as_seconds(first) if first else 0,
+        'last': q.as_seconds(last) if last else 0,
+        'firstTime': fmt_time(first) if first else '',
+        'lastTime': fmt_time(last) if last else '',
+        'monthly': [{'month': month, 'count': count} for month, count in monthly if month],
+        'hourly': hours,
+        'topSenders': [{'name': name or '?', 'qq': qq or '', 'count': count}
+                       for name, qq, count in top_senders],
+        'topChats': chats_out,
+    }, ensure_ascii=False))
+
+
 def messages_page(conn, args):
     """One page of matches, newest first unless `order=asc`."""
     where, params = build_where(conn, args)
@@ -1990,6 +2045,8 @@ def main(argv=None):
     s = sub.add_parser('sessions')
     s = sub.add_parser('messages')
     s.add_argument('--json', default='{}')
+    s = sub.add_parser('stats')
+    s.add_argument('--json', default='{}')
     s = sub.add_parser('export')
     s.add_argument('--json', default='{}')
     s = sub.add_parser('build')
@@ -2037,6 +2094,8 @@ def main(argv=None):
             cmd_sessions(p)
         elif args.cmd == 'messages':
             cmd_messages(p, json.loads(args.json))
+        elif args.cmd == 'stats':
+            cmd_stats(p, json.loads(args.json))
         elif args.cmd == 'export':
             cmd_export(p, json.loads(args.json))
     except BadInput as exc:

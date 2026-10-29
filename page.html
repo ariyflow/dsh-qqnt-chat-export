@@ -140,6 +140,24 @@
   }
   .session:hover .search-this, .session:focus-within .search-this { visibility: visible; }
   .summary { padding: 8px 16px; color: var(--muted); font-size: 13px; border-bottom: 1px solid var(--line); }
+  .stats-panel { padding: 12px 16px 14px; border-bottom: 1px solid var(--line); background: var(--panel); max-height: 60vh; overflow: auto; }
+  .stats-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .stats-head .stats-scope { flex: 1; color: var(--muted); font-size: 12px; }
+  .stats-kpis { display: flex; flex-wrap: wrap; gap: 18px; font-size: 13px; margin-bottom: 12px; }
+  .stats-kpis b { font-size: 17px; color: var(--accent); }
+  .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 980px) { .stats-grid { grid-template-columns: 1fr; } }
+  .stats-sec h4 { margin: 0 0 6px; font-size: 12px; color: var(--muted); font-weight: 600; }
+  .chart { display: flex; align-items: flex-end; gap: 2px; height: 120px; }
+  .chart .col { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 2px; min-width: 0; }
+  .chart .bar { width: 100%; min-height: 1px; background: var(--accent); opacity: .75; border-radius: 2px 2px 0 0; }
+  .chart .col:hover .bar { opacity: 1; }
+  .chart .col span { font-size: 10px; color: var(--muted); height: 12px; white-space: nowrap; }
+  .stat-row { position: relative; display: flex; justify-content: space-between; gap: 10px; font-size: 12px; padding: 3px 0 4px; border-bottom: 1px dashed var(--line); }
+  .stat-row .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stat-row b { color: var(--muted); font-weight: 500; white-space: nowrap; }
+  .stat-row i { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--accent); opacity: .5; }
+  .stats-empty { color: var(--muted); font-size: 13px; }
   .messages { overflow: auto; flex: 1; padding: 4px 0; }
   .row { display: grid; grid-template-columns: 132px 150px 1fr auto; gap: 12px; padding: 5px 16px; border-bottom: 1px solid transparent; }
   .row:hover { background: var(--panel); }
@@ -345,9 +363,18 @@
       <label class="check" title="把图片内嵌进 HTML，生成可直接分享的单文件；只支持单个会话">
         <input type="checkbox" id="embed"> 内嵌图片
       </label>
+      <button class="ghost" type="button" id="statsBtn" title="本机统计：时间分布、发言人、活跃会话">统计</button>
       <button class="primary" type="button" id="download">下载</button>
     </form>
     <div class="summary" id="summary">选择左侧的会话，直接输入关键词可跨全部会话查询。</div>
+    <div class="stats-panel hidden" id="statsPanel">
+      <div class="stats-head">
+        <strong>统计</strong>
+        <span class="stats-scope" id="statsScope"></span>
+        <button class="ghost" type="button" id="statsClose">关闭</button>
+      </div>
+      <div class="stats-body" id="statsBody"></div>
+    </div>
     <div class="messages" id="messages"></div>
     <div class="more"><button class="ghost hidden" id="more">加载更多</button></div>
   </section>
@@ -1162,6 +1189,88 @@
     return row
   }
 
+  // ---------------------------------------------------------------- 统计
+  function statColumn(item, showLabel, label) {
+    var height = Math.round(item.count / (item.max || 1) * 100)
+    var title = label + '：' + num(item.count) + ' 条'
+    return '<div class="col" title="' + esc(title) + '">' +
+      '<i class="bar" style="height:' + height + '%"></i>' +
+      '<span>' + (showLabel ? esc(item.label) : '') + '</span></div>'
+  }
+
+  function statList(rows, emptyText) {
+    if (!rows.length) return '<div class="stats-empty">' + esc(emptyText) + '</div>'
+    var max = rows[0].count || 1
+    return rows.map(function (row) {
+      var width = Math.max(2, Math.round(row.count / max * 100))
+      return '<div class="stat-row"><span class="nm">' + esc(row.name) + '</span>' +
+        '<b>' + num(row.count) + '</b><i style="width:' + width + '%"></i></div>'
+    }).join('')
+  }
+
+  function renderStats(data) {
+    $('statsPanel').classList.remove('hidden')
+    $('statsScope').textContent = (state.chatId
+      ? '会话：' + (state.chatName || state.chatId)
+      : '全部会话') +
+      (data.firstTime ? ' · ' + data.firstTime.slice(0, 10) + ' ~ ' +
+        data.lastTime.slice(0, 10) : '')
+    if (!data.total) {
+      $('statsBody').innerHTML = '<div class="stats-empty">当前查询没有消息</div>'
+      return
+    }
+    var monthly = (data.monthly || []).map(function (row) {
+      return { label: row.month.slice(2), count: row.count }
+    })
+    var maxMonth = 1
+    monthly.forEach(function (row) { if (row.count > maxMonth) maxMonth = row.count })
+    monthly.forEach(function (row) { row.max = maxMonth })
+    var hours = (data.hourly || []).map(function (count, hour) {
+      return { label: String(hour).padStart(2, '0'), count: count, hour: hour }
+    })
+    var maxHour = 1
+    hours.forEach(function (row) { if (row.count > maxHour) maxHour = row.count })
+    hours.forEach(function (row) { row.max = maxHour })
+    var monthStep = monthly.length > 12 ? 3 : (monthly.length > 8 ? 2 : 1)
+    var senders = (data.topSenders || []).map(function (row) {
+      return { name: row.name + (row.qq ? '（' + row.qq + '）' : ''), count: row.count }
+    })
+    var chats = (data.topChats || []).map(function (row) {
+      return { name: (row.kind === 'private' ? '私聊 ' : '群 ') + row.name, count: row.count }
+    })
+    $('statsBody').innerHTML =
+      '<div class="stats-kpis">' +
+      '<span><b>' + num(data.total) + '</b> 条消息</span>' +
+      '<span><b>' + num(data.chats) + '</b> 个会话</span>' +
+      '<span><b>' + num(data.senders) + '</b> 位发言人</span>' +
+      '</div>' +
+      '<div class="stats-grid">' +
+      '<section class="stats-sec"><h4>每月消息量</h4><div class="chart">' +
+      monthly.map(function (row, index) {
+        return statColumn(row, index % monthStep === 0, row.label)
+      }).join('') + '</div></section>' +
+      '<section class="stats-sec"><h4>24 小时分布</h4><div class="chart">' +
+      hours.map(function (row) {
+        return statColumn(row, row.hour % 4 === 0, row.label)
+      }).join('') + '</div></section>' +
+      '<section class="stats-sec"><h4>发言人排行（前 10）</h4>' +
+      statList(senders, '没有发送者数据') + '</section>' +
+      '<section class="stats-sec"><h4>活跃会话（前 10）</h4>' +
+      statList(chats, '没有会话数据') + '</section>' +
+      '</div>'
+  }
+
+  function openStats() {
+    var filters = state.filters || currentFilters()
+    var params = new URLSearchParams()
+    Object.keys(filters).forEach(function (key) {
+      if (filters[key]) params.set(key, filters[key])
+    })
+    api('/api/stats?' + params.toString())
+      .then(renderStats)
+      .catch(function (error) { toast('读取统计失败：' + error.message) })
+  }
+
   // ---------------------------------------------------------------- 下载
   function download() {
     if (!state.indexReady) { toast('先建立索引'); return }
@@ -1880,6 +1989,10 @@
     loadMessages(true)
   })
   $('download').addEventListener('click', download)
+  $('statsBtn').addEventListener('click', openStats)
+  $('statsClose').addEventListener('click', function () {
+    $('statsPanel').classList.add('hidden')
+  })
   $('batchExport').addEventListener('click', downloadSelected)
   $('batchClear').addEventListener('click', clearSelection)
   $('taskClose').addEventListener('click', function () {

@@ -450,6 +450,46 @@ test('messages around and query syntax reach the helper verbatim', {
   }
 })
 
+test('the stats route forwards the current filters to the helper', {
+  skip: process.platform === 'win32' ? 'needs a POSIX shell wrapper' : false,
+}, async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  const calls = path.join(dir, 'calls')
+  const wrapper = path.join(dir, 'py')
+  await writeFile(wrapper,
+    '#!/bin/sh\necho "$@" >> "' + calls + '"\n' +
+    'echo \'{"total":3,"chats":1,"senders":2,"monthly":[],"hourly":[],"topSenders":[],"topChats":[]}\'\n',
+    { mode: 0o755 })
+  const { server, base } = await startServer({ python: wrapper, workDir: work }, {})
+  const lastCall = async () => {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      try {
+        const lines = (await readFile(calls, 'utf8')).trim().split('\n').filter(Boolean)
+        if (lines.length) return lines[lines.length - 1]
+      } catch {
+        // Not written yet.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    return ''
+  }
+  try {
+    const response = await fetch(
+      `${base}/api/stats?chatKind=group&chatId=1&since=2024-01-01`)
+    assert.equal(response.status, 200)
+    assert.equal((await response.json()).total, 3)
+    const call = await lastCall()
+    assert.match(call, /stats --json/)
+    assert.match(call, /"chatId":"1"/)
+    assert.match(call, /"since":"2024-01-01"/)
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('the served page contains the startup checklist and key action', async () => {
   const dir = await tempDir()
   const { server, base } = await startServer({ python: process.execPath, workDir: dir }, {})
@@ -458,6 +498,14 @@ test('the served page contains the startup checklist and key action', async () =
     assert.match(html, /id="startupKeyBtn"/)
     assert.match(html, /id="startupSetup"/)
     assert.match(html, /location\.origin/)
+    // 0.9.0 controls: batch selection, redaction, media and the stats panel.
+    assert.match(html, /id="batchBar"/)
+    assert.match(html, /id="batchExport"/)
+    assert.match(html, /id="redact"/)
+    assert.match(html, /id="media"/)
+    assert.match(html, /id="embed"/)
+    assert.match(html, /id="statsBtn"/)
+    assert.match(html, /id="statsPanel"/)
   } finally {
     await server.close()
     await rm(dir, { recursive: true, force: true })

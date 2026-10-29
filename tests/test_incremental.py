@@ -500,6 +500,23 @@ class IncrementalBuildTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn('会话参数不完整', json.loads(proc.stdout)['error'])
 
+    def test_stats_counts_buckets_and_people(self):
+        self.run_cli('build')
+        stats = self.run_cli('stats', '--json', json.dumps(
+            {'chatKind': 'group', 'chatId': 'g1'}))
+        self.assertEqual(stats['total'], 2)
+        self.assertEqual(stats['chats'], 1)
+        self.assertEqual(sum(row['count'] for row in stats['monthly']), 2)
+        self.assertEqual(len(stats['hourly']), 24)
+        self.assertEqual(sum(stats['hourly']), 2)
+        self.assertEqual(stats['topSenders'][0]['count'], 2)
+        self.assertEqual(stats['topChats'][0]['id'], 'g1')
+        self.assertTrue(stats['firstTime'])
+        # An empty selection is a valid answer, not an error.
+        stats = self.run_cli('stats', '--json',
+                             json.dumps({'keyword': '没有这个关键词xyz'}))
+        self.assertEqual(stats['total'], 0)
+
     def test_around_rejects_an_unknown_id(self):
         self.run_cli('build')
         proc = subprocess.run(

@@ -181,7 +181,7 @@ function runJson(settings, command, args = {}, { signal } = {}) {
     if (settings.tencentRoot) argv.push('--root', settings.tencentRoot)
     if (settings.account) argv.push('--account', String(settings.account))
     argv.push(command)
-    if (command === 'messages' || command === 'export') {
+    if (command === 'messages' || command === 'export' || command === 'stats') {
       argv.push('--json', JSON.stringify(args))
     }
     if (command === 'select') {
@@ -674,6 +674,12 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       runJson(settings, 'sessions')
         .then((payload) => sendJson(res, 200, payload))
         .catch((error) => sendJson(res, 500, { error: error.message }))
+      return
+    }
+    if (req.method === 'GET' && pathname === '/api/stats') {
+      runJson(settings, 'stats', filtersFrom(params))
+        .then((payload) => sendJson(res, 200, payload))
+        .catch((error) => sendJson(res, error.status ?? 500, { error: error.message }))
       return
     }
     if (req.method === 'GET' && pathname === '/api/messages') {
