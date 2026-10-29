@@ -6,12 +6,14 @@
 - `messages` 新增显式自增 `id` 作为主键与 FTS 的行号，`(chat_kind, msg_id)` 改为唯一约束；索引版本升到 `3`，旧索引在下次同步时自动全量重建。增量同步会把新消息同时写入 `message_fts`。
 - `/api/status` 不再每次轮询都启动 Python：构建进行中直接读 `build-status.json`，其余情况按 5 秒 + 索引 mtime 复用上次报告。构建期间网页每 1.2 秒轮询一次，现在不再和构建抢磁盘。
 - 状态接口在 Node 侧重算 `db`/`index` 的大小与 mtime、`key.txt` 是否存在，密钥刚提取完就能看到变化，不必等缓存过期。
-- 新增测试：trigram 子串匹配、引号字面量、FTS/LIKE 分支选择、合成库端到端关键词查询，以及 `/api/status` 的复用逻辑（18 个 Python 用例 + 12 个 Node 用例；状态缓存用例需要 POSIX shell 包装器，Windows 上自动跳过）。
+- 新增测试：trigram 子串匹配、引号字面量、FTS/LIKE 分支选择、合成库端到端关键词查询，以及 `/api/status` 的复用逻辑（22 个 Python 用例 + 12 个 Node 用例；状态缓存用例需要 POSIX shell 包装器，Windows 上自动跳过）。
 - 导出改为「写临时文件 + 原子改名」：中途失败或磁盘写满不会再留下半截 txt/csv/json/md/html/sqlite，临时文件在异常时删除；导入完成后统一 `0600`。
 - 修复 Markdown 导出：表格单元格里的 `|`、反斜杠和换行现在会转义（发送者、标题同样处理），群昵称带竖线时不再把表格拆坏。
 - 修复 SQLite 导出：消息表不再用 `msg_id` 做主键。导出整个账号时，群聊和私聊可能共用同一个 `msg_id`，原来的主键会让其中一行被 `INSERT OR REPLACE` 覆盖丢失。
 - 修复导出/群列表命令的连接泄漏：`group_names`、`member_names`、`cmd_groups` 在异常路径上也会关闭数据库连接。
-- 新增导出回归测试：MD 转义、HTML 转义、SQLite 全量保留、无残留临时文件、POSIX 权限（21 个 Python 用例）。
+- 新增导出回归测试：MD 转义、HTML 转义、SQLite 全量保留、无残留临时文件、POSIX 权限。
+- 新增「没有 FTS5 的 SQLCipher」端到端用例：全量建库、关键词退回 `LIKE`、以及后续增量同步都不会生成或依赖 `message_fts`。
+- CI 在 Ubuntu/Windows 上安装 `sqlcipher3-wheels`（装不上就跳过），加密库相关用例现在会真正执行，而不是一律 skip。
 
 ## 0.5.5
 

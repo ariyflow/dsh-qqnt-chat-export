@@ -245,7 +245,7 @@ python -m unittest discover -s tests -v
 node --test tests/*.test.mjs
 ```
 
-测试不需要 `sqlcipher3`，也不会读取真实 QQ 数据；加密库相关的增量同步验证使用临时合成库，见 `tests/test_incremental.py`；没有安装 `sqlcipher3` 时会自动跳过。
+测试不会读取真实 QQ 数据；增量同步、FTS 与「没有 FTS5」的用例使用临时合成库（`tests/test_incremental.py`），它们需要 `sqlcipher3`，没装时自动跳过。CI 会在 Ubuntu/Windows 上安装 `sqlcipher3-wheels` 让这些用例真正执行；本地想跑全套，把解释器指向插件的私有虚拟环境即可。
 
 ## 已知问题 / 注意
 

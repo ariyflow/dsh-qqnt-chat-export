@@ -6,6 +6,8 @@ directory with the Windows account layout and a fake 1 KB Tencent header.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -164,6 +166,30 @@ class IncrementalBuildTests(unittest.TestCase):
         rows = self.run_cli('messages', '--json', '{"limit":100}')['rows']
         self.assertNotIn('第二条消息', {row['text'] for row in rows})
         self.assertEqual(self.count('第二条'), 0)
+
+    def test_keyword_search_falls_back_without_fts5(self):
+        """The build must stay usable when SQLCipher has no FTS5/trigram."""
+        import qqnt_query as qqq
+
+        original = qqq.create_fts
+        qqq.create_fts = lambda conn: False
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                qqq.cmd_build(qqq.paths(self.work), self.root, '12345', False)
+        finally:
+            qqq.create_fts = original
+        self.assertEqual(self.meta().get('fts'), '0')
+        # Three characters, but there is no keyword table: LIKE answers it.
+        self.assertEqual(self.count('条消息'), 2)
+        self.assertEqual(self.count('第一条'), 1)
+
+        # An incremental sync on a no-FTS index must not start using one.
+        self.add('group_msg_table', 3, 1700001000, '第三条消息', 'g2')
+        self.publish()
+        self.run_cli('build', '--refresh')
+        self.assertEqual(self.count('第三条'), 1)
+        self.assertEqual(self.meta().get('fts'), '0')
 
 
 if __name__ == '__main__':
