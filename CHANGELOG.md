@@ -14,6 +14,12 @@
 - 新增导出回归测试：MD 转义、HTML 转义、SQLite 全量保留、无残留临时文件、POSIX 权限。
 - 新增「没有 FTS5 的 SQLCipher」端到端用例：全量建库、关键词退回 `LIKE`、以及后续增量同步都不会生成或依赖 `message_fts`。
 - CI 在 Ubuntu/Windows 上安装 `sqlcipher3-wheels`（装不上就跳过），加密库相关用例现在会真正执行，而不是一律 skip。
+- 新增三个读旁路索引的模型工具，补上私聊与跨会话搜索：
+  - `qqnt_list_chats`：列出全部会话（群聊 + 私聊），带类型、id、名称、消息数、最后活动时间；
+  - `qqnt_search`：关键词跨会话搜索，可按会话、发送者、日期过滤，结果带会话/发送者/时间；
+  - `qqnt_export_chat`：按 `chatKind` + `chatId` 导出任意会话为 txt/csv/json/md/html/sqlite，文件落到用户指定目录（默认下载目录），从 `workDir/exports` 原子搬出。
+- 索引缺失时三个新工具直接返回可读提示（含网页地址），不会抛栈；`/api/messages` 和 JSON 导出的每条消息附带 `chatKind` / `chatId`。
+- 新增 4 个工具用例（需要本机 Python，缺失时跳过），Node 用例增至 16 个。
 
 ## 0.5.5
 

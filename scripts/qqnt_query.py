@@ -667,10 +667,16 @@ def fmt_time(ts):
 
 
 def row_json(row):
-    msg_id, ts, sender, qq, is_out, text, kinds = row
-    return {'id': str(msg_id), 'ts': q.as_seconds(ts), 'time': fmt_time(ts),
+    msg_id, ts, sender, qq, is_out, text, kinds = row[:7]
+    item = {'id': str(msg_id), 'ts': q.as_seconds(ts), 'time': fmt_time(ts),
             'sender': sender or '', 'qq': qq or '', 'out': bool(is_out),
             'text': text or '', 'kinds': kinds or ''}
+    # Newer queries also select the chat, so a cross-chat search result can say
+    # where it came from.
+    if len(row) > 7:
+        item['chatKind'] = row[7] or ''
+        item['chatId'] = str(row[8] or '')
+    return item
 
 
 def cmd_sessions(p):
@@ -709,7 +715,8 @@ def cmd_messages(p, args):
         raise BadInput('limit / offset 必须是整数')
     order = 'ASC' if str(args.get('order', '')).lower() == 'asc' else 'DESC'
     rows = conn.execute(
-        'SELECT msg_id, ts, sender_name, sender_qq, is_out, text, seg_kinds '
+        'SELECT msg_id, ts, sender_name, sender_qq, is_out, text, seg_kinds, '
+        'chat_kind, chat_id '
         'FROM messages' + where + ' ORDER BY ts %s, msg_id %s LIMIT ? OFFSET ?' % (order, order),
         params + [limit, offset]).fetchall()
     conn.close()
@@ -784,7 +791,8 @@ def cmd_export(p, args):
     try:
         where, params = build_where(conn, args)
         cur = conn.execute(
-            'SELECT msg_id, ts, sender_name, sender_qq, is_out, text, seg_kinds '
+            'SELECT msg_id, ts, sender_name, sender_qq, is_out, text, seg_kinds, '
+            'chat_kind, chat_id '
             'FROM messages' + where + ' ORDER BY ts ASC, msg_id ASC', params)
 
         head = ('# %s\n# 账号 %s   导出时间 %s\n'

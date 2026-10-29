@@ -9,10 +9,12 @@
  * secret redaction, and result shaping.
  *
  * It also serves a local browsing UI on its own port (see `web.js`), which reads
- * the same data through `scripts/qqnt_query.py`.
+ * the same data through `scripts/qqnt_query.py`. Three more tools
+ * (`qqnt_list_chats`, `qqnt_search`, `qqnt_export_chat`) read the sidecar index
+ * that UI builds, so private chats and cross-chat keyword search work too.
  */
 import { spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -37,6 +39,7 @@ export const inject = ['tools', 'systemPrompt']
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const CLI = path.join(HERE, 'scripts', 'qqnt_export.py')
+const QUERY_CLI = path.join(HERE, 'scripts', 'qqnt_query.py')
 
 const DEFAULT_FORMATS = ['txt', 'sqlite', 'csv']
 /** One-click setup can use the default PyPI or the Tsinghua mirror. */
@@ -108,6 +111,10 @@ function run(command, argv, { signal, cwd }) {
     let size = 0
     let truncated = false
     let foldedNoise = 0
+    // Raw stdout for callers that parse JSON; the merged `lines` above are for
+    // humans and are capped far lower.
+    let rawStdout = ''
+    const RAW_LIMIT = 8 * 1024 * 1024
     const pending = { out: '', err: '' }
 
     const keepLine = (raw) => {
@@ -144,7 +151,10 @@ function run(command, argv, { signal, cwd }) {
     signal?.addEventListener('abort', onAbort, { once: true })
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
-    child.stdout.on('data', (chunk) => consume(chunk, 'out'))
+    child.stdout.on('data', (chunk) => {
+      if (rawStdout.length < RAW_LIMIT) rawStdout += chunk
+      consume(chunk, 'out')
+    })
     child.stderr.on('data', (chunk) => consume(chunk, 'err'))
     child.on('error', (error) => {
       signal?.removeEventListener('abort', onAbort)
@@ -161,7 +171,7 @@ function run(command, argv, { signal, cwd }) {
       if (foldedNoise > 0) notes.push(`[已折叠 ${foldedNoise} 条 SQLCipher 逐候选项报错]`)
       if (truncated) notes.push(`[输出过长，仅保留前 ${MAX_OUTPUT_CHARS / 1024} KB]`)
       const output = [body, ...notes].filter((part) => part !== '').join('\n')
-      resolve({ code: code ?? -1, output })
+      resolve({ code: code ?? -1, output, stdout: rawStdout })
     })
   })
 }
@@ -201,6 +211,59 @@ async function runCli(settings, argv, exec) {
     cwd: settings.workDir,
   })
   return { code: result.code, output: redactSecrets(result.output, path.join(settings.workDir, 'key.txt')) }
+}
+
+/**
+ * Run one query-layer command and parse its single JSON result.
+ *
+ * `qqnt_query.py` prints one JSON object for `sessions`, `messages`, and
+ * `export`; failures print `{"error": ...}` and still exit non-zero, so the
+ * caller decides whether a parseable error is enough.
+ */
+async function runQueryJson(settings, argv, exec) {
+  if (!existsSync(QUERY_CLI)) throw new Error(`bundled helper is missing: ${QUERY_CLI}`)
+  mkdirSync(settings.workDir, { recursive: true, mode: 0o700 })
+  const result = await run(settings.python, ['-X', 'utf8', QUERY_CLI, '--work', settings.workDir, ...argv], {
+    signal: exec.signal,
+    cwd: settings.workDir,
+  })
+  const text = result.stdout.trim()
+  if (text === '') throw new Error(result.output || `查询层没有输出（exit code ${result.code}）`)
+  let payload
+  try {
+    payload = JSON.parse(text.split('\n').pop())
+  } catch {
+    throw new Error(`查询层输出无法解析（exit code ${result.code}）：${text.slice(0, 400)}`)
+  }
+  return { code: result.code, payload }
+}
+
+function indexPath(settings) {
+  return path.join(settings.workDir, 'index.sqlite')
+}
+
+/** The index-reading tools cannot fall back to the encrypted database. */
+function missingIndex(settings, extra = {}) {
+  const port = settings.webPort
+  const where = port ? `http://127.0.0.1:${port}/` : '插件网页'
+  return {
+    ok: false,
+    exitCode: 1,
+    output: `还没有索引（${indexPath(settings)}）。先在 ${where} 点「从 QQ 同步」建立索引，再调用这个工具。`,
+    ...extra,
+  }
+}
+
+/** A chat name is also a file name; strip what Windows/Linux cannot store. */
+function fileStem(text, fallback) {
+  const stem = String(text).replace(/[\\/:*?"<>|\r\n\t]+/g, '_').replace(/^\.+/, '').trim().slice(0, 60)
+  return stem || fallback
+}
+
+function fileStamp() {
+  const now = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`
 }
 
 /** Parse the exporter's fixed-width group table; a best-effort convenience. */
@@ -310,6 +373,164 @@ function exportTool(settings) {
       ]
       const { code, output } = await runCli(settings, argv, exec)
       return { ok: code === 0, exitCode: code, output, outDir }
+    },
+  }
+}
+
+/** Lists every chat in the sidecar index, groups and private chats alike. */
+export function listChatsTool(settings) {
+  return {
+    name: 'qqnt_list_chats',
+    description: 'List every chat in the local QQ message index — group chats and private conversations — with its kind, id, display name, message count, and last message time. Requires the sidecar index; the web UI builds it.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        limit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 1000,
+          description: 'Maximum chats to return, most recent first. Defaults to 200.',
+        },
+      },
+    },
+    output: { schema: outputSchema(), render: renderReport },
+    async execute(args, exec) {
+      if (!existsSync(indexPath(settings))) return missingIndex(settings)
+      const { code, payload } = await runQueryJson(settings, ['sessions'], exec)
+      if (code !== 0 || !Array.isArray(payload.sessions)) {
+        return { ok: false, exitCode: code, output: payload.error || '无法读取会话列表' }
+      }
+      const limit = Math.min(Math.max(Number(args.limit) || 200, 1), 1000)
+      const chats = payload.sessions.slice(0, limit)
+      const lines = chats.map((chat) =>
+        `${chat.kind} ${chat.id} ${chat.name || '(未命名)'} — ${chat.messages} 条，最后 ${chat.lastTime || '-'}`)
+      if (payload.sessions.length > chats.length) {
+        lines.push(`…共 ${payload.sessions.length} 个会话，只显示前 ${chats.length} 个`)
+      }
+      lines.push('', '传 chatKind + chatId 给 qqnt_search / qqnt_export_chat；私聊的 chatId 是对方 uid。')
+      return { ok: true, exitCode: 0, output: lines.join('\n') }
+    },
+  }
+}
+
+/** Full-text search over the sidecar index. */
+export function searchTool(settings) {
+  return {
+    name: 'qqnt_search',
+    description: 'Search local QQ messages by keyword (substring match, Chinese included), optionally restricted to one chat, one sender, or a date range. Returns matching rows with their chat, sender, and time. Requires the sidecar index.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['keyword'],
+      properties: {
+        keyword: { type: 'string', minLength: 1, description: 'Substring to look for; 1-2 characters fall back to a slower scan.' },
+        chatKind: { type: 'string', enum: ['group', 'private'] },
+        chatId: { type: 'string', description: 'Group number, or the other party\'s uid for a private chat.' },
+        sender: { type: 'string', description: 'Sender name fragment or exact QQ number.' },
+        since: { type: 'string', description: 'Start date (`YYYY-MM-DD`) or Unix seconds.' },
+        until: { type: 'string', description: 'End date (`YYYY-MM-DD`) or Unix seconds.' },
+        limit: { type: 'integer', minimum: 1, maximum: 100, description: 'Rows to return. Defaults to 20.' },
+        offset: { type: 'integer', minimum: 0, description: 'Rows to skip, for paging.' },
+        order: { type: 'string', enum: ['asc', 'desc'], description: 'Time order. Defaults to newest first.' },
+      },
+    },
+    output: { schema: outputSchema(), render: renderReport },
+    async execute(args, exec) {
+      if (!existsSync(indexPath(settings))) return missingIndex(settings)
+      const keyword = String(args.keyword ?? '').trim()
+      if (keyword === '') return { ok: false, exitCode: 1, output: 'keyword 不能为空' }
+      const payloadArgs = { keyword }
+      for (const key of ['chatKind', 'chatId', 'sender', 'since', 'until', 'order']) {
+        const value = args[key]
+        if (typeof value === 'string' && value.trim() !== '') payloadArgs[key] = value.trim()
+      }
+      payloadArgs.limit = Math.min(Math.max(Number(args.limit) || 20, 1), 100)
+      const offset = Number(args.offset)
+      if (Number.isInteger(offset) && offset > 0) payloadArgs.offset = offset
+      const { code, payload } = await runQueryJson(
+        settings, ['messages', '--json', JSON.stringify(payloadArgs)], exec)
+      if (code !== 0) return { ok: false, exitCode: code, output: payload.error || '搜索失败' }
+      const rows = Array.isArray(payload.rows) ? payload.rows : []
+      const lines = [`命中 ${payload.total} 条，返回第 ${payload.offset + 1}-${payload.offset + rows.length} 条`]
+      for (const row of rows) {
+        const text = String(row.text ?? '').replace(/\r?\n/g, ' \\n ')
+        const qq = row.qq ? ` (${row.qq})` : ''
+        lines.push(`[${row.time}] ${row.chatKind || '?'}/${row.chatId || '?'} ${row.sender}${qq}: ${text}`)
+      }
+      return { ok: true, exitCode: 0, output: lines.join('\n') }
+    },
+  }
+}
+
+/** Exports one chat (group or private) from the sidecar index to a file. */
+export function exportChatTool(settings) {
+  return {
+    name: 'qqnt_export_chat',
+    description: 'Export one chat — group or private — from the local QQ index to txt, csv, json, md, html, or sqlite, and return the written file path. Requires the sidecar index.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['chatKind', 'chatId'],
+      properties: {
+        chatKind: { type: 'string', enum: ['group', 'private'] },
+        chatId: { type: 'string', description: 'Group number, or the other party\'s uid for a private chat.' },
+        format: { type: 'string', enum: ['txt', 'csv', 'json', 'md', 'html', 'sqlite'], description: 'Defaults to txt.' },
+        outDir: { type: 'string', description: 'Absolute output directory. Defaults to QQ导出_<chat> inside the user\'s downloads folder.' },
+        label: { type: 'string', description: 'Chat name used in the file name and heading. Defaults to the name in the index.' },
+      },
+    },
+    output: { schema: outputSchema({ outPath: { type: 'string' } }), render: renderReport },
+    timeoutMs: EXPORT_TIMEOUT_MS,
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      if (!existsSync(indexPath(settings))) return missingIndex(settings, { outPath: '' })
+      const kind = String(args.chatKind ?? '')
+      const chatId = String(args.chatId ?? '').trim()
+      if (!['group', 'private'].includes(kind) || chatId === '') {
+        return { ok: false, exitCode: 1, outPath: '', output: 'chatKind 必须是 group 或 private，且 chatId 不能为空' }
+      }
+      const format = typeof args.format === 'string' ? args.format : 'txt'
+      if (!['txt', 'csv', 'json', 'md', 'html', 'sqlite'].includes(format)) {
+        return { ok: false, exitCode: 1, outPath: '', output: `不支持的格式: ${format}` }
+      }
+      // Prefer the name the index knows; the label also names the file.
+      let label = typeof args.label === 'string' ? args.label.trim() : ''
+      if (label === '') {
+        try {
+          const sessions = await runQueryJson(settings, ['sessions'], exec)
+          const match = (sessions.payload.sessions || [])
+            .find((item) => item.kind === kind && String(item.id) === chatId)
+          label = (match && match.name) || chatId
+        } catch {
+          label = chatId
+        }
+      }
+      const outDir = typeof args.outDir === 'string' && args.outDir.trim() !== ''
+        ? path.resolve(args.outDir.trim())
+        : path.join(defaultDownloadDir(), `QQ导出_${fileStem(label, chatId)}`)
+      mkdirSync(outDir, { recursive: true, mode: 0o700 })
+      // The query layer may only write inside workDir/exports; stage there and
+      // move the finished file to the directory the user asked for.
+      const staging = path.join(settings.workDir, 'exports',
+        `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${format}`)
+      const payloadArgs = { chatKind: kind, chatId, format, label, out: staging }
+      const { code, payload } = await runQueryJson(
+        settings, ['export', '--json', JSON.stringify(payloadArgs)], exec)
+      if (code !== 0) return { ok: false, exitCode: code, outPath: '', output: payload.error || '导出失败' }
+      const target = path.join(outDir, `${fileStem(label, chatId)}_${fileStamp()}.${format}`)
+      try {
+        renameSync(payload.path, target)
+      } catch (error) {
+        if (error.code !== 'EXDEV') throw error
+        copyFileSync(payload.path, target)
+        try {
+          rmSync(payload.path)
+        } catch {
+          // Leaving the staged copy is harmless; it is inside workDir.
+        }
+      }
+      return { ok: true, exitCode: 0, outPath: target, output: `已导出 ${payload.rows} 条到 ${target}` }
     },
   }
 }
@@ -448,7 +669,7 @@ The qqnt_* tools read the message database of the NTQQ client installed on this 
 
 /** Appended only while the browsing UI is actually listening. */
 function webGuidance(url) {
-  return ` The same data, including private chats and keyword search across every chat, is browsable at ${url} in a browser tab; that page also downloads the current query as txt, csv, json, markdown, html, or sqlite. The page opens with a startup checklist that names this URL, checks Python/sqlcipher3 and the cached key, and offers a one-click setup that creates a private virtualenv and installs sqlcipher3-wheels into it. The same checklist and the settings page have a 提取密钥 button that runs key extraction with visible progress and logs; when the user is working in the browser, point them there instead of asking them to run a tool. Never install Python packages into the global/system interpreter; use that one-click setup or another virtualenv and point the Python interpreter setting at it.`
+  return ` The same data, including private chats and keyword search across every chat, is browsable at ${url} in a browser tab; that page also downloads the current query as txt, csv, json, markdown, html, or sqlite. The page opens with a startup checklist that names this URL, checks Python/sqlcipher3 and the cached key, and offers a one-click setup that creates a private virtualenv and installs sqlcipher3-wheels into it. The same checklist and the settings page have a 提取密钥 button that runs key extraction with visible progress and logs; when the user is working in the browser, point them there instead of asking them to run a tool. Never install Python packages into the global/system interpreter; use that one-click setup or another virtualenv and point the Python interpreter setting at it. For private chats or cross-chat search, the sidecar index must exist first: qqnt_list_chats, qqnt_search, and qqnt_export_chat read it, and they explain how to build it in the web UI when it is missing.`
 }
 
 /** One-shot Python/sqlcipher3 probe used by the settings page. */
@@ -524,6 +745,11 @@ export function apply(ctx, config) {
   ctx.tools.register(keyTool(settings, () => keyJob.state === 'running'))
   ctx.tools.register(groupsTool(settings))
   ctx.tools.register(exportTool(settings))
+  // Index-backed tools: they cover private chats and cross-chat search, which
+  // the group exporter above cannot reach.
+  ctx.tools.register(listChatsTool(settings))
+  ctx.tools.register(searchTool(settings))
+  ctx.tools.register(exportChatTool(settings))
 
   let webUrl = ''
   let webServer = null

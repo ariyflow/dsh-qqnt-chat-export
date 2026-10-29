@@ -18,6 +18,11 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
 | `qqnt_extract_key` | 从**已登录**的 QQ 进程内存里取出数据库密钥并缓存 |
 | `qqnt_list_groups` | 群列表：消息数、时间范围、群名 |
 | `qqnt_export_group` | 导出单个群为 txt / sqlite / csv |
+| `qqnt_list_chats` | 索引里的**全部会话**（群聊 + 私聊）：类型、id、名称、消息数、最后时间 |
+| `qqnt_search` | 跨会话关键词搜索（可限定会话、发送者、日期），返回会话/发送者/时间 |
+| `qqnt_export_chat` | 按 `chatKind` + `chatId` 导出任意会话为 txt / csv / json / md / html / sqlite |
+
+后三个工具读的是网页建立的旁路索引，因此能覆盖私聊和跨会话搜索；没有索引时会提示先去网页点「从 QQ 同步」。
 
 **网页界面（`http://127.0.0.1:46728`）**
 
