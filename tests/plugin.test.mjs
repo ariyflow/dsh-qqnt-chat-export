@@ -504,6 +504,7 @@ test('the served page contains the startup checklist and key action', async () =
     assert.match(html, /id="redact"/)
     assert.match(html, /id="media"/)
     assert.match(html, /id="embed"/)
+    assert.match(html, /id="split"/)
     assert.match(html, /id="statsBtn"/)
     assert.match(html, /id="statsPanel"/)
   } finally {

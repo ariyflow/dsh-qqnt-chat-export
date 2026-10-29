@@ -712,20 +712,28 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
           const chats = chatsFromBody(body.chats)
           const media = body.media === true
           const embed = body.embed === true
+          const split = body.split === 'day' ? 'day' : ''
+          if (body.split && body.split !== 'day') {
+            throw Object.assign(new Error('split 只支持 day'), { status: 400 })
+          }
           if (embed && innerFormat !== 'html') {
             throw Object.assign(new Error('内嵌图片只支持 html 格式'), { status: 400 })
           }
           if (embed && chats.length > 1) {
             throw Object.assign(new Error('内嵌图片只支持单个会话'), { status: 400 })
           }
+          if (embed && split) {
+            throw Object.assign(new Error('内嵌图片不能和按天分文件同时使用'), { status: 400 })
+          }
           const container = embed ? innerFormat
-            : (chats.length > 0 || media ? 'zip' : innerFormat)
+            : (chats.length > 0 || media || split ? 'zip' : innerFormat)
           const label = String(body.label || (chats.length > 1
             ? `批量导出 ${chats.length} 个会话` : 'QQ聊天记录')).slice(0, 120)
           const args = filtersFromBody(body)
           if (chats.length > 0) args.chats = chats
           if (media || embed) args.media = true
           if (embed) args.embed = true
+          if (split) args.split = 'day'
           const queued = queue.enqueue(args, { label, format: container, innerFormat })
           if (!queued) {
             throw Object.assign(new Error(

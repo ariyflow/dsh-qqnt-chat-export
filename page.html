@@ -363,6 +363,9 @@
       <label class="check" title="把图片内嵌进 HTML，生成可直接分享的单文件；只支持单个会话">
         <input type="checkbox" id="embed"> 内嵌图片
       </label>
+      <label class="check" title="每个会话按日期拆成多个文件，再打包成 ZIP">
+        <input type="checkbox" id="split"> 按天分文件
+      </label>
       <button class="ghost" type="button" id="statsBtn" title="本机统计：时间分布、发言人、活跃会话">统计</button>
       <button class="primary" type="button" id="download">下载</button>
     </form>
@@ -1279,6 +1282,8 @@
     if (!state.indexReady) { toast('先建立索引'); return }
     if (!state.total) { toast('当前没有可导出的消息'); return }
     var embed = $('embed').checked
+    var split = $('split').checked
+    if (embed && split) { toast('内嵌图片和按天分文件不能同时使用'); return }
     var withMedia = $('media').checked || embed
     if (embed && $('format').value !== 'html') {
       toast('内嵌图片需要把导出格式选为 HTML')
@@ -1300,7 +1305,8 @@
     api('/api/export/queue', {
       method: 'POST',
       body: Object.assign({}, filters, {
-        format: format, label: label, redact: redact, media: withMedia, embed: embed
+        format: format, label: label, redact: redact, media: withMedia, embed: embed,
+        split: split ? 'day' : ''
       })
     }).then(function (result) {
       toast('已加入导出队列：' + format.toUpperCase())
@@ -1324,7 +1330,7 @@
       body: {
         chats: chats, format: format, label: '批量导出 ' + chats.length + ' 个会话',
         redact: $('redact').value, media: $('media').checked,
-        embed: $('embed').checked
+        embed: $('embed').checked, split: $('split').checked ? 'day' : ''
       }
     }).then(function () {
       toast('已加入导出队列：' + chats.length + ' 个会话（ZIP）')

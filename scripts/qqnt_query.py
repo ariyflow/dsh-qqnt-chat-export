@@ -1699,6 +1699,7 @@ def export_bundle(conn, args, out, label, chats, src=None, datadir=''):
     """Many chats (or one chat plus media) in one zip with a manifest."""
     fmt = args['format']
     mode = str(args.get('redact') or '')
+    split = str(args.get('split') or '').lower()
     media_enabled = bool(args.get('media'))
     media_stats = {'files': 0, 'bytes': 0, 'missing': [], 'missingCount': 0,
                    'skipped': [], 'skippedCount': 0}
@@ -1734,11 +1735,50 @@ def export_bundle(conn, args, out, label, chats, src=None, datadir=''):
             stem = '%03d-%s' % (index, safe_stem(name, 'chat'))
             refs = None
             if media_enabled and src is not None:
-                items = media_mod.collect(src, conn, kind, chat_id)
+                where, where_params = build_where(conn, scope_args)
+                selected = {int(row[0]) for row in conn.execute(
+                    'SELECT m.msg_id FROM messages m' + where, where_params)}
+                items = media_mod.collect(src, conn, kind, chat_id, selected)
                 refs, part = media_mod.copy_files(
                     items, os.path.join(workdir, 'media', stem),
                     'media/' + stem, datadir, redactor, cache, budget)
                 media_mod.merge_stats(media_stats, part)
+            if split == 'day':
+                where, where_params = build_where(conn, scope_args)
+                days = [row[0] for row in conn.execute(
+                    "SELECT DISTINCT date(m.ts, 'unixepoch', 'localtime') AS day "
+                    'FROM messages m' + where + ' ORDER BY day', where_params)]
+                files = []
+                used_names = set()
+                for day in days:
+                    if not day:
+                        continue
+                    # ts=0 rows from QQ show up as 1970; call that "unknown"
+                    # instead of shipping a folder full of 1970 files.
+                    label = day if day >= '2000-01-01' else '未知'
+                    base = '%s-%s' % (stem, label)
+                    candidate = base
+                    suffix = 2
+                    while candidate in used_names:
+                        candidate = '%s-%d' % (base, suffix)
+                        suffix += 1
+                    used_names.add(candidate)
+                    day_args = dict(scope_args, since=day, until=day)
+                    filename = candidate + '.' + fmt
+                    count = write_export_file(
+                        conn, day_args, os.path.join(workdir, filename),
+                        '%s · %s' % (name, label), redactor, refs)
+                    if count:
+                        files.append({'file': filename, 'rows': count, 'day': day,
+                                      'label': label})
+                        total += count
+                entry['rows'] = sum(item['rows'] for item in files)
+                if files:
+                    entry['files'] = files
+                    entries.append(entry)
+                else:
+                    skipped.append(entry)
+                continue
             path = os.path.join(workdir, stem + '.' + fmt)
             rows = write_export_file(conn, scope_args, path, name, redactor, refs)
             total += rows
@@ -1763,6 +1803,7 @@ def export_bundle(conn, args, out, label, chats, src=None, datadir=''):
             'account': Redactor(mode).number(str(args.get('account') or '')),
             'label': manifest_label,
             'format': fmt,
+            'split': split,
             'redacted': mode,
             'total': total,
             'chats': entries,
@@ -1813,8 +1854,13 @@ def cmd_export(p, args):
     if len(chats) > MAX_BATCH_CHATS:
         raise BadInput('一次最多导出 %d 个会话' % MAX_BATCH_CHATS)
     embed = bool(args.get('embed'))
+    split = str(args.get('split') or '').lower()
+    if split and split != 'day':
+        raise BadInput('split 只支持 day')
+    if embed and split:
+        raise BadInput('内嵌图片不能和按天分文件同时使用')
     media_enabled = bool(args.get('media')) or embed
-    zip_mode = (bool(chats) or media_enabled) and not embed
+    zip_mode = (bool(chats) or media_enabled or split == 'day') and not embed
     if zip_mode and not out.lower().endswith('.zip'):
         raise BadInput('批量或媒体导出必须输出 .zip')
     if embed:
@@ -1866,7 +1912,10 @@ def cmd_export(p, args):
             datadir = (read_meta(p['index']) or {}).get('datadir', '')
             key = read_key(p, args.get('account') or None)
             src = q.open_encrypted(p['db'], key, readonly=True)
-            items = media_mod.collect(src, conn, kind, chat_id)
+            where, where_params = build_where(conn, scope_args)
+            selected = {int(row[0]) for row in conn.execute(
+                'SELECT m.msg_id FROM messages m' + where, where_params)}
+            items = media_mod.collect(src, conn, kind, chat_id, selected)
             refs, part = media_mod.embed_images(items, datadir)
             rows = write_export_file(conn, scope_args, out, label, redactor, refs)
             q.private_file(out)

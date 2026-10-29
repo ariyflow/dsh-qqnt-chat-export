@@ -118,10 +118,10 @@ class IncrementalBuildTests(unittest.TestCase):
     def add(self, table, msg_id, ts, text, chat='g1'):
         self.add_blob(table, msg_id, ts, _message_blob(text), chat)
 
-    def add_blob(self, table, msg_id, ts, blob, chat='g1'):
+    def add_blob(self, table, msg_id, ts, blob, chat='g1', uid='u', qq=0):
         conn = self._connect()
         conn.execute('INSERT OR REPLACE INTO %s VALUES (?,?,?,?,?,?,?,?,?)' % table,
-                     (msg_id, ts, 'u', 0, 1, 1, '', blob, chat))
+                     (msg_id, ts, uid, qq, 1, 1, '', blob, chat))
         conn.commit()
         conn.close()
 
@@ -399,6 +399,32 @@ class IncrementalBuildTests(unittest.TestCase):
             self.assertEqual(manifest['media']['files'], 1)
             self.assertEqual(manifest['media']['missingCount'], 0)
 
+    def test_media_export_only_copies_exported_messages(self):
+        datadir = os.path.join(self.root, '12345', 'nt_qq', 'nt_data')
+        ori = os.path.join(datadir, 'Pic', '2024-01', 'Ori')
+        os.makedirs(ori)
+        first = os.path.join(ori, 'a' * 32 + '.jpg')
+        second = os.path.join(ori, 'b' * 32 + '.jpg')
+        for path, content in ((first, b'first'), (second, b'second')):
+            with open(path, 'wb') as f:
+                f.write(content)
+        self.add_blob('group_msg_table', 9, 1700003000,
+                      _image_blob(first, md5='a' * 32), qq=111)
+        self.add_blob('group_msg_table', 10, 1700003100,
+                      _image_blob(second, md5='b' * 32), qq=222)
+        self.publish()
+        self.run_cli('build', '--refresh')
+        out = os.path.join(self.work, 'exports', 'media-filtered.zip')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        result = self.run_cli('export', '--json', json.dumps({
+            'format': 'html', 'out': out, 'label': 'g1', 'chatKind': 'group',
+            'chatId': 'g1', 'media': True, 'sender': '111'}))
+        self.assertEqual(result['media']['files'], 1)
+        with zipfile.ZipFile(out) as archive:
+            media = [name for name in archive.namelist() if name.startswith('media/')]
+        self.assertEqual(len(media), 1, 'the filtered-out picture must not be copied')
+        self.assertIn('a' * 32, media[0])
+
     def test_media_export_reports_a_missing_file_without_failing(self):
         self.add_blob('group_msg_table', 9, 1700003000,
                       _image_blob('/nonexistent/qqnt/pic.jpg'))
@@ -469,6 +495,44 @@ class IncrementalBuildTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn('需要指定会话', json.loads(proc.stdout)['error'])
+
+    def test_split_export_writes_one_file_per_day(self):
+        self.run_cli('build')
+        # 1700086400 is the next local day after the fixture's 2023-11-15.
+        self.add('group_msg_table', 4, 1700086400, '第二天消息', 'g1')
+        self.publish()
+        self.run_cli('build', '--refresh')
+        out = os.path.join(self.work, 'exports', 'split.zip')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        result = self.run_cli('export', '--json', json.dumps({
+            'format': 'txt', 'out': out, 'label': 'g1', 'chatKind': 'group',
+            'chatId': 'g1', 'split': 'day'}))
+        self.assertEqual(result['rows'], 3)
+        with zipfile.ZipFile(out) as archive:
+            names = archive.namelist()
+            manifest = json.loads(archive.read('manifest.json'))
+        self.assertEqual(manifest['split'], 'day')
+        entry = manifest['chats'][0]
+        self.assertEqual(entry['rows'], 3)
+        self.assertEqual([item['day'] for item in entry['files']], ['2023-11-15', '2023-11-16'])
+        self.assertEqual([item['rows'] for item in entry['files']], [2, 1])
+        self.assertTrue(any('2023-11-15' in name for name in names))
+        self.assertTrue(any('2023-11-16' in name for name in names))
+        self.assertEqual(len(names), 3, 'two daily files plus the manifest')
+
+    def test_split_rejects_an_unknown_unit(self):
+        self.run_cli('build')
+        out = os.path.join(self.work, 'exports', 'split-bad.zip')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        proc = subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
+             '--root', self.root, '--account', '12345', '--work', self.work,
+             'export', '--json', json.dumps({
+                 'format': 'txt', 'out': out, 'split': 'week'})],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn('split', json.loads(proc.stdout)['error'])
 
     def test_batch_export_requires_a_zip_target(self):
         self.run_cli('build')

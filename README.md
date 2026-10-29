@@ -35,6 +35,7 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
 - **批量导出**：在会话列表勾选多个群聊/私聊，一次打成 ZIP（每个会话一份文件 + `manifest.json`），最多 200 个会话；
 - **脱敏分享**：导出时可选「昵称打码 / QQ 号打码 / 全部」，发送者变成 `成员1…`、会话名变成 `群聊1/私聊1`，QQ 号和群号清空；正文保持原样（改动会破坏对话）；
 - **含媒体**：可选把本机已下载的图片、文件、语音、视频一起打包（ZIP 布局 `media/<会话>/…`）；缺失的媒体只记录不报错，单文件 100 MB、单次 1 GB 上限；**内嵌图片**把图片 base64 放进单个 HTML，方便直接分享（单会话、10 MB/图、200 MB/次）；
+- **按天分文件**：勾选后每个会话按日期拆成多个文件再打包成 ZIP，`manifest.json` 列出每天的文件和条数；可以和脱敏、媒体一起用；
 - 「从 QQ 同步」复制最新数据库后**增量追新消息**；消息总数对不上（删除/回溯/换账号）时自动全量重建；
 - **启动提示**：网页打开后显示一次启动横幅，告知默认访问地址，并检查 Python / sqlcipher3 / 密钥；缺依赖时可一键创建独立虚拟环境并安装（默认源或清华镜像）；
 - **密钥提取**：启动横幅和设置页都有「提取密钥」按钮，网页内显示扫描进度、日志和结果；已配置时可重新提取；点击前后都会提示查找密钥耗时较长（通常 1~3 分钟），请耐心等待；
@@ -206,7 +207,7 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `pythonPath` | Windows `python` / Linux `python3` | 64 位 Python 3 的路径，需装 `sqlcipher3`；用虚拟环境时填 `<venv>/bin/python` 绝对路径（支持 `~`） |
-| `workDir` | Windows `%LOCALAPPDATA%\dsh-qqnt-chat-export\work`；Linux `$XDG_DATA_HOME/dsh-qqnt-chat-export/work`；macOS `~/Library/Application Support/dsh-qqnt-chat-export/work` | 密钥、解密副本、索引、账号索引缓存、导出临时文件。0.6 及更早默认在系统临时目录，升级后若旧目录仍有数据会继续使用并提示迁移 |
+| `workDir` | Windows `%LOCALAPPDATA%\dsh-qqnt-chat-export\work`；Linux `$XDG_DATA_HOME/dsh-qqnt-chat-export/work` | 密钥、解密副本、索引、账号索引缓存、导出临时文件。0.6 及更早默认在系统临时目录，升级后若旧目录仍有数据会继续使用并提示迁移 |
 | `tencentRoot` | Windows `%USERPROFILE%\Documents\Tencent Files`；Linux `~/.config/QQ` | QQ 数据根目录；Linux 会自动尝试 Flatpak/Snap/`Documents/Tencent Files` |
 | `account` | 最大的库 | 多账号时指定 QQ 号；Linux 识别不出 QQ 号时也可以传数据目录的哈希 |
 | `webPort` | `46728` | 网页端口，`0` 关闭网页 |

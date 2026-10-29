@@ -160,9 +160,15 @@ def media_msg_ids(index_conn, chat_kind, chat_id):
     return out
 
 
-def collect(src_conn, index_conn, chat_kind, chat_id):
-    """`{msg_id: [media, ...]}` for one chat, read from the source copy."""
+def collect(src_conn, index_conn, chat_kind, chat_id, only=None):
+    """`{msg_id: [media, ...]}` for the exported rows of one chat.
+
+    `only` is the set of msg_ids the export actually writes; without it the
+    media folder would include files for messages the filters excluded.
+    """
     needed = media_msg_ids(index_conn, chat_kind, chat_id)
+    if only is not None:
+        needed &= {int(value) for value in only}
     if not needed:
         return {}
     table = 'group_msg_table' if chat_kind == 'group' else 'c2c_msg_table'
