@@ -46,6 +46,7 @@
     "icon.svg",
     "scripts/*.py",
     "docs/screenshot.png",
+    "docs/screenshot-stats.png",
     "docs/wal-notes.md",
     "docs/media-notes.md",
     "CHANGELOG.md",

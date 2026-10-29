@@ -42,6 +42,10 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
 - **多账号索引缓存**：切换 QQ 账号时把上一个账号的索引留在 `workDir` 里（默认保留 2 个），切回时直接增量更新，不再整库重建；
 - **存储与清理**：分类列出插件生成的明文文件及大小（含各账号的缓存索引），二次确认后删除，不碰 QQ 原始数据。
 
+统计面板按当前筛选（会话 / 关键词 / 日期）计算，全部在本机完成：
+
+![统计面板](docs/screenshot-stats.png)
+
 ## 要求
 
 - Windows 10/11 或 Linux（x86_64 / arm64）
@@ -288,7 +292,8 @@ scripts/
 python/              可手工复现的 Python 环境声明（pyproject.toml、.python-version）
 locale/               en / zh 显示元数据
 tests/                Python / Node 回归测试
-docs/screenshot.png   界面截图（虚构数据）
+docs/screenshot.png        界面截图（虚构数据）
+docs/screenshot-stats.png  统计面板截图（虚构数据）
 ```
 
 ## 开发与测试

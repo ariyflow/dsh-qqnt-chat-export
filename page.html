@@ -1220,7 +1220,10 @@
       return
     }
     var monthly = (data.monthly || []).map(function (row) {
-      return { label: row.month.slice(2), count: row.count }
+      // QQ stores a handful of rows with ts=0; they belong in an "unknown"
+      // bucket instead of a bar labelled 1970.
+      var label = row.month.slice(0, 4) < '2000' ? '未知' : row.month.slice(2)
+      return { label: label, count: row.count }
     })
     var maxMonth = 1
     monthly.forEach(function (row) { if (row.count > maxMonth) maxMonth = row.count })
