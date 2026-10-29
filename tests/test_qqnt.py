@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import sqlite3
 import sys
@@ -247,6 +248,70 @@ class AccountTests(unittest.TestCase):
             self.assertEqual(uin, '12345')
             self.assertEqual(found, dbdir)
             self.assertEqual(size, 2048)
+
+
+
+class ExportTests(unittest.TestCase):
+    """Export formats must escape hostile text and never leave half files."""
+
+    def setUp(self):
+        import qqnt_query as qq
+        self.qq = qq
+        self.tmp = tempfile.TemporaryDirectory()
+        self.paths = qq.paths(self.tmp.name)
+        qq.q.ensure_workdir(self.paths['exports'])
+        conn = sqlite3.connect(self.paths['index'])
+        conn.executescript(qq.SCHEMA)
+        conn.executemany('INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', [
+            (1, 7, qq.GROUP_KIND, 'g1', 1700000000, 'u', '1', '甲|乙', 0, 1, 1, '',
+             'a|b\\c'),
+            (2, 7, qq.PRIVATE_KIND, 'p1', 1700000001, 'u', '2', '丙<script>', 0, 1, 1, '',
+             'x\ny'),
+        ])
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def export(self, fmt, label='聊天|记录'):
+        out = os.path.join(self.paths['exports'], 'out.' + fmt)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.qq.cmd_export(self.paths, {'format': fmt, 'out': out, 'label': label})
+        result = json.loads(buf.getvalue())
+        self.assertEqual(result['rows'], 2)
+        self.assertFalse([n for n in os.listdir(self.paths['exports']) if '.part.' in n])
+        if os.name != 'nt':
+            self.assertEqual(os.stat(out).st_mode & 0o777, 0o600)
+        return out, result
+
+    def test_markdown_escapes_pipes_backslashes_and_newlines(self):
+        out, _ = self.export('md')
+        with open(out, encoding='utf-8') as f:
+            body = f.read()
+        self.assertIn(r'# 聊天\|记录', body)
+        self.assertIn(r'甲\|乙', body)
+        self.assertIn(r'a\|b\\c', body)
+        self.assertIn('x<br>y', body)
+        self.assertNotIn('x\ny', body)          # a newline would end the table
+
+    def test_html_escapes_message_text(self):
+        out, _ = self.export('html')
+        with open(out, encoding='utf-8') as f:
+            body = f.read()
+        self.assertIn('丙&lt;script&gt;', body)
+        self.assertNotIn('<script>', body)
+
+    def test_sqlite_export_keeps_every_row(self):
+        out, _ = self.export('sqlite')
+        conn = sqlite3.connect(out)
+        try:
+            self.assertEqual(conn.execute('SELECT count(*) FROM messages').fetchone()[0], 2)
+            self.assertEqual(
+                conn.execute('SELECT count(*) FROM messages WHERE msg_id=7').fetchone()[0], 2)
+        finally:
+            conn.close()
 
 
 if __name__ == '__main__':

@@ -1058,12 +1058,16 @@ def group_names(dbdir, key, work):
             copy_shared(src, dst, skip=HEADER_SIZE)
         except OSError:
             return {}
+    conn = None
     try:
         conn = open_encrypted(dst, key)
         return {int(r[0]): (r[1] or '') for r in
                 conn.execute('SELECT [60001],[60007] FROM group_list')}
     except Exception:
         return {}
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def member_names(dbdir, key, work, gid):
@@ -1072,6 +1076,7 @@ def member_names(dbdir, key, work, gid):
     dst = os.path.join(work, 'group_info.db')
     if not os.path.exists(dst):
         return {}
+    conn = None
     try:
         conn = open_encrypted(dst, key)
         out = {}
@@ -1083,6 +1088,9 @@ def member_names(dbdir, key, work, gid):
         return out
     except Exception:
         return {}
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 # --------------------------------------------------------------------------
@@ -1129,7 +1137,13 @@ def cmd_groups(args):
     clear = strip_db(os.path.join(dbdir, 'nt_msg.db'), args.work)
     names = group_names(dbdir, key, args.work)
     conn = open_encrypted(clear, key)
+    try:
+        _print_group_list(uin, conn, names)
+    finally:
+        conn.close()
 
+
+def _print_group_list(uin, conn, names):
     print('账号 %s 的群聊（按消息数排序）\n' % uin)
     print('%-14s %-9s %-12s %-12s %s' % ('群号', '消息数', '最早', '最晚', '群名'))
     rows = conn.execute(

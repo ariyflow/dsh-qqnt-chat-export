@@ -23,6 +23,7 @@ it touches is opened read-only.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import json
 import os
@@ -724,6 +725,32 @@ def html_escape(text):
             .replace('>', '&gt;').replace('"', '&quot;'))
 
 
+def md_cell(value):
+    r"""Escape one Markdown table cell: backslashes, pipes, and line breaks.
+
+    A raw `|` would split the row, a trailing `\` would escape the cell
+    separator, and a newline would end the table.
+    """
+    text = str(value).replace('\r\n', '\n').replace('\r', '\n')
+    return text.replace('\\', '\\\\').replace('|', '\\|').replace('\n', '<br>')
+
+
+@contextlib.contextmanager
+def atomic_out(target):
+    """Write beside the target and rename, so a failed export leaves no half file."""
+    tmp = '%s.part.%d' % (target, os.getpid())
+    try:
+        yield tmp
+        q.private_file(tmp)
+        os.replace(tmp, target)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
 def exports_target(p, out):
     """Keep generated downloads inside workDir/exports.
 
@@ -754,110 +781,111 @@ def cmd_export(p, args):
     q.ensure_private_dir(os.path.dirname(out) or '.')
 
     conn = open_index(p)
-    where, params = build_where(conn, args)
-    cur = conn.execute(
-        'SELECT msg_id, ts, sender_name, sender_qq, is_out, text, seg_kinds '
-        'FROM messages' + where + ' ORDER BY ts ASC, msg_id ASC', params)
+    try:
+        where, params = build_where(conn, args)
+        cur = conn.execute(
+            'SELECT msg_id, ts, sender_name, sender_qq, is_out, text, seg_kinds '
+            'FROM messages' + where + ' ORDER BY ts ASC, msg_id ASC', params)
 
-    head = ('# %s\n# 账号 %s   导出时间 %s\n'
-            % (label, args.get('account') or read_status(p).get('account', ''),
-               datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-    if fmt == 'txt':
-        with open(out, 'w', encoding='utf-8', newline='\n') as f:
-            f.write(head)
-            f.write('=' * 70 + '\n\n')
-            count = 0
-            for row in cur:
-                item = row_json(row)
-                f.write('[%s] %s: %s\n' % (item['time'], item['sender'],
-                                           item['text'].replace('\n', ' \\n ')))
-                count += 1
-    elif fmt == 'csv':
-        import csv
-        with open(out, 'w', encoding='utf-8-sig', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['时间', '发送者', 'QQ号', '方向', '类型', '内容'])
-            count = 0
-            for row in cur:
-                item = row_json(row)
-                writer.writerow([q.csv_cell(item['time']), q.csv_cell(item['sender']),
-                                 q.csv_cell(item['qq']), '我' if item['out'] else '对方',
-                                 q.csv_cell(item['kinds']), q.csv_cell(item['text'])])
-                count += 1
-    elif fmt == 'json':
-        with open(out, 'w', encoding='utf-8', newline='\n') as f:
-            f.write('{"chat": %s, "exportedAt": %s, "messages": ['
-                    % (json.dumps(label, ensure_ascii=False),
-                       json.dumps(fmt_time(time.time()))))
-            count = 0
-            for row in cur:
-                if count:
-                    f.write(',')
-                f.write(json.dumps(row_json(row), ensure_ascii=False))
-                count += 1
-            f.write(']}\n')
-    elif fmt == 'md':
-        with open(out, 'w', encoding='utf-8', newline='\n') as f:
-            f.write('# %s\n\n| 时间 | 发送者 | 内容 |\n|---|---|---|\n' % label)
-            count = 0
-            for row in cur:
-                item = row_json(row)
-                text = item['text'].replace('|', '\\|').replace('\n', '<br>')
-                f.write('| %s | %s | %s |\n' % (item['time'], item['sender'], text))
-                count += 1
-            f.write('\n共 %d 条。\n' % count)
-    elif fmt == 'html':
-        with open(out, 'w', encoding='utf-8', newline='\n') as f:
-            f.write('<!doctype html><meta charset="utf-8"><title>%s</title>'
-                    '<style>body{font:14px/1.6 "Segoe UI",system-ui,sans-serif;'
-                    'margin:24px;color:#1f2328}h1{font-size:18px}table{border-collapse:collapse;'
-                    'width:100%%}th,td{border-bottom:1px solid #e3e6ea;padding:6px 8px;'
-                    'vertical-align:top;text-align:left}th{background:#f6f8fa;'
-                    'position:sticky;top:0}td.t{white-space:nowrap;color:#57606a;width:150px}'
-                    'td.s{white-space:nowrap;width:140px;color:#0969da}'
-                    '.out td.s{color:#1a7f37}</style><h1>%s</h1>'
-                    % (html_escape(label), html_escape(label)))
-            f.write('<table><thead><tr><th>时间</th><th>发送者</th><th>内容</th></tr></thead><tbody>')
-            count = 0
-            for row in cur:
-                item = row_json(row)
-                cls = ' class="out"' if item['out'] else ''
-                f.write('<tr%s><td class="t">%s</td><td class="s">%s</td><td>%s</td></tr>'
-                        % (cls, html_escape(item['time']), html_escape(item['sender']),
-                           html_escape(item['text']).replace('\n', '<br>')))
-                count += 1
-            f.write('</tbody></table>')
-    else:                                   # sqlite
-        try:
-            os.remove(out)
-        except OSError:
-            pass
-        db = sqlite3.connect(out)
-        db.execute('PRAGMA journal_mode=OFF')
-        db.execute('PRAGMA synchronous=OFF')
-        db.execute('''CREATE TABLE messages(
-            msg_id INTEGER PRIMARY KEY, ts INTEGER, time TEXT, sender_name TEXT,
-            sender_qq TEXT, is_out INTEGER, seg_kinds TEXT, text TEXT)''')
-        db.execute('CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT)')
+        head = ('# %s\n# 账号 %s   导出时间 %s\n'
+                % (label, args.get('account') or read_status(p).get('account', ''),
+                   datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         count = 0
-        batch = []
-        for row in cur:
-            item = row_json(row)
-            batch.append((int(item['id']), item['ts'], item['time'], item['sender'],
-                          item['qq'], 1 if item['out'] else 0, item['kinds'], item['text']))
-            count += 1
-            if len(batch) >= BATCH:
-                db.executemany('INSERT OR REPLACE INTO messages VALUES (?,?,?,?,?,?,?,?)', batch)
-                batch.clear()
-        if batch:
-            db.executemany('INSERT OR REPLACE INTO messages VALUES (?,?,?,?,?,?,?,?)', batch)
-        db.execute('CREATE INDEX idx_ts ON messages(ts)')
-        db.executemany('INSERT OR REPLACE INTO meta VALUES (?,?)',
-                       [('label', label), ('exportedAt', fmt_time(time.time())),
-                        ('count', str(count))])
-        db.commit()
-        db.close()
-    conn.close()
+        if fmt == 'txt':
+            with atomic_out(out) as tmp, open(tmp, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(head)
+                f.write('=' * 70 + '\n\n')
+                for row in cur:
+                    item = row_json(row)
+                    f.write('[%s] %s: %s\n' % (item['time'], item['sender'],
+                                               item['text'].replace('\n', ' \\n ')))
+                    count += 1
+        elif fmt == 'csv':
+            import csv
+            with atomic_out(out) as tmp, open(tmp, 'w', encoding='utf-8-sig', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['时间', '发送者', 'QQ号', '方向', '类型', '内容'])
+                for row in cur:
+                    item = row_json(row)
+                    writer.writerow([q.csv_cell(item['time']), q.csv_cell(item['sender']),
+                                     q.csv_cell(item['qq']), '我' if item['out'] else '对方',
+                                     q.csv_cell(item['kinds']), q.csv_cell(item['text'])])
+                    count += 1
+        elif fmt == 'json':
+            with atomic_out(out) as tmp, open(tmp, 'w', encoding='utf-8', newline='\n') as f:
+                f.write('{"chat": %s, "exportedAt": %s, "messages": ['
+                        % (json.dumps(label, ensure_ascii=False),
+                           json.dumps(fmt_time(time.time()))))
+                for row in cur:
+                    if count:
+                        f.write(',')
+                    f.write(json.dumps(row_json(row), ensure_ascii=False))
+                    count += 1
+                f.write(']}\n')
+        elif fmt == 'md':
+            with atomic_out(out) as tmp, open(tmp, 'w', encoding='utf-8', newline='\n') as f:
+                f.write('# %s\n\n| 时间 | 发送者 | 内容 |\n|---|---|---|\n'
+                        % md_cell(label.replace('\n', ' ')))
+                for row in cur:
+                    item = row_json(row)
+                    f.write('| %s | %s | %s |\n'
+                            % (md_cell(item['time']), md_cell(item['sender']),
+                               md_cell(item['text'])))
+                    count += 1
+                f.write('\n共 %d 条。\n' % count)
+        elif fmt == 'html':
+            with atomic_out(out) as tmp, open(tmp, 'w', encoding='utf-8', newline='\n') as f:
+                f.write('<!doctype html><meta charset="utf-8"><title>%s</title>'
+                        '<style>body{font:14px/1.6 "Segoe UI",system-ui,sans-serif;'
+                        'margin:24px;color:#1f2328}h1{font-size:18px}table{border-collapse:collapse;'
+                        'width:100%%}th,td{border-bottom:1px solid #e3e6ea;padding:6px 8px;'
+                        'vertical-align:top;text-align:left}th{background:#f6f8fa;'
+                        'position:sticky;top:0}td.t{white-space:nowrap;color:#57606a;width:150px}'
+                        'td.s{white-space:nowrap;width:140px;color:#0969da}'
+                        '.out td.s{color:#1a7f37}</style><h1>%s</h1>'
+                        % (html_escape(label), html_escape(label)))
+                f.write('<table><thead><tr><th>时间</th><th>发送者</th><th>内容</th></tr></thead><tbody>')
+                for row in cur:
+                    item = row_json(row)
+                    cls = ' class="out"' if item['out'] else ''
+                    f.write('<tr%s><td class="t">%s</td><td class="s">%s</td><td>%s</td></tr>'
+                            % (cls, html_escape(item['time']), html_escape(item['sender']),
+                               html_escape(item['text']).replace('\n', '<br>')))
+                    count += 1
+                f.write('</tbody></table>')
+        else:                                   # sqlite
+            with atomic_out(out) as tmp:
+                db = sqlite3.connect(tmp)
+                try:
+                    db.execute('PRAGMA journal_mode=OFF')
+                    db.execute('PRAGMA synchronous=OFF')
+                    # No primary key: a whole-database export can hold the same
+                    # msg_id for a group and a private chat, and a PK would
+                    # silently drop one of them.
+                    db.execute('''CREATE TABLE messages(
+                        msg_id INTEGER, ts INTEGER, time TEXT, sender_name TEXT,
+                        sender_qq TEXT, is_out INTEGER, seg_kinds TEXT, text TEXT)''')
+                    db.execute('CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT)')
+                    batch = []
+                    for row in cur:
+                        item = row_json(row)
+                        batch.append((int(item['id']), item['ts'], item['time'], item['sender'],
+                                      item['qq'], 1 if item['out'] else 0, item['kinds'], item['text']))
+                        count += 1
+                        if len(batch) >= BATCH:
+                            db.executemany('INSERT INTO messages VALUES (?,?,?,?,?,?,?,?)', batch)
+                            batch.clear()
+                    if batch:
+                        db.executemany('INSERT INTO messages VALUES (?,?,?,?,?,?,?,?)', batch)
+                    db.execute('CREATE INDEX idx_ts ON messages(ts)')
+                    db.executemany('INSERT OR REPLACE INTO meta VALUES (?,?)',
+                                   [('label', label), ('exportedAt', fmt_time(time.time())),
+                                    ('count', str(count))])
+                    db.commit()
+                finally:
+                    db.close()
+    finally:
+        conn.close()
 
     q.private_file(out)
     size = os.path.getsize(out) if os.path.exists(out) else 0
