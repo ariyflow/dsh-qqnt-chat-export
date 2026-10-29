@@ -1508,6 +1508,10 @@ def export_writer(conn, args, label, redactor=None, media=None):
                     cls = ' class="out"' if item['out'] else ''
                     body = html_escape(item['text']).replace('\n', '<br>')
                     for ref in refs_for(item):
+                        if ref.get('data'):
+                            body += ('<div class="media"><img src="%s" alt="图片"></div>'
+                                     % html_escape(ref['data']))
+                            continue
                         rel = html_escape(ref['file'])
                         if ref['kind'] == 'image':
                             body += ('<div class="media"><a href="%s">'
@@ -1706,10 +1710,20 @@ def cmd_export(p, args):
         raise BadInput('chats 必须是数组')
     if len(chats) > MAX_BATCH_CHATS:
         raise BadInput('一次最多导出 %d 个会话' % MAX_BATCH_CHATS)
-    media_enabled = bool(args.get('media'))
-    zip_mode = bool(chats) or media_enabled
+    embed = bool(args.get('embed'))
+    media_enabled = bool(args.get('media')) or embed
+    zip_mode = (bool(chats) or media_enabled) and not embed
     if zip_mode and not out.lower().endswith('.zip'):
         raise BadInput('批量或媒体导出必须输出 .zip')
+    if embed:
+        if fmt != 'html':
+            raise BadInput('内嵌图片只支持 html 格式')
+        if len(chats) > 1:
+            raise BadInput('内嵌图片只支持单个会话')
+        if not out.lower().endswith('.html'):
+            raise BadInput('内嵌图片必须输出 .html')
+        if not chats and not args.get('chatKind'):
+            raise BadInput('内嵌图片需要指定一个会话')
     if media_enabled:
         if not chats and not args.get('chatKind'):
             raise BadInput('媒体导出需要指定会话：单个会话，或在会话列表里勾选多个')
@@ -1729,6 +1743,37 @@ def cmd_export(p, args):
                 key = read_key(p, args.get('account') or None)
                 src = q.open_encrypted(p['db'], key, readonly=True)
             payload = export_bundle(conn, args, out, label, chats, src, datadir)
+        elif embed:
+            redactor = Redactor(mode)
+            scope_args = dict(args)
+            if chats:
+                scope = chats[0]
+                kind = str(scope.get('kind') or '')
+                chat_id = str(scope.get('id') or '')
+                if kind not in (GROUP_KIND, PRIVATE_KIND) or not chat_id:
+                    raise BadInput('会话参数不完整: %r' % (scope,))
+                scope_args['chatKind'] = kind
+                scope_args['chatId'] = chat_id
+                name, _qq = chat_meta(conn, kind, chat_id)
+                label = redactor.chat_label(kind, name or label, 1)
+            else:
+                kind = str(args.get('chatKind') or '')
+                chat_id = str(args.get('chatId') or '')
+                if redactor.hide_names:
+                    label = redactor.chat_label(kind, label, 1)
+            datadir = (read_meta(p['index']) or {}).get('datadir', '')
+            key = read_key(p, args.get('account') or None)
+            src = q.open_encrypted(p['db'], key, readonly=True)
+            items = media_mod.collect(src, conn, kind, chat_id)
+            refs, part = media_mod.embed_images(items, datadir)
+            rows = write_export_file(conn, scope_args, out, label, redactor, refs)
+            q.private_file(out)
+            payload = {'path': out, 'format': 'html', 'rows': rows,
+                       'bytes': os.path.getsize(out) if os.path.exists(out) else 0,
+                       'label': label, 'embed': True,
+                       'media': {'files': part['files'], 'bytes': part['bytes'],
+                                 'missing': part['missingCount'],
+                                 'skipped': part['skippedCount']}}
         else:
             redactor = Redactor(mode)
             kind = str(args.get('chatKind') or '')

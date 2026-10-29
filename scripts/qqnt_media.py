@@ -20,7 +20,9 @@ are reported per message instead of failing the export.
 """
 from __future__ import annotations
 
+import base64
 import glob
+import mimetypes
 import os
 import shutil
 
@@ -34,6 +36,9 @@ KIND_LABELS = {'image': '图片', 'file': '文件', 'voice': '语音', 'video': 
 # the disk; the total cap keeps a full media archive predictable.
 MAX_FILE_BYTES = 100 * 1024 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024 * 1024
+# A self-contained HTML has to stay mailable: one 10 MB photo is already a lot.
+MAX_EMBED_FILE_BYTES = 10 * 1024 * 1024
+MAX_EMBED_TOTAL_BYTES = 200 * 1024 * 1024
 MAX_MISSING_REPORTED = 200
 
 
@@ -265,6 +270,78 @@ def copy_files(items_by_msg, target_dir, rel_prefix, datadir, redactor=None,
                 'thumbnail': bool(found.get('thumbnail')),
                 'name': ('媒体' if redactor is not None and redactor.hide_names
                          else (item.get('name') or '')),
+            })
+    return refs, stats
+
+
+def embed_images(items_by_msg, datadir, cache=None, budget=None):
+    """Inline picture elements as data URIs for a single-file HTML export.
+
+    Non-picture media cannot be inlined usefully, so they are reported as
+    skipped; the caller still tells the user how many there were.
+    """
+    stats = {'files': 0, 'bytes': 0, 'missing': [], 'missingCount': 0,
+             'skipped': [], 'skippedCount': 0}
+    if budget is None:
+        budget = {'left': MAX_EMBED_TOTAL_BYTES}
+    refs = {}
+    for msg_id in sorted(items_by_msg):
+        for item in items_by_msg[msg_id]:
+            if item['kind'] != 'image':
+                stats['skippedCount'] += 1
+                stats['skipped'].append({
+                    'msgId': msg_id, 'kind': item['kind'],
+                    'name': item.get('name') or '', 'reason': 'not-inline',
+                })
+                continue
+            found = locate(item, datadir, cache)
+            if not found.get('path'):
+                stats['missingCount'] += 1
+                if len(stats['missing']) < MAX_MISSING_REPORTED:
+                    stats['missing'].append({
+                        'msgId': msg_id, 'kind': item['kind'],
+                        'name': item.get('name') or '',
+                        'reason': found.get('reason') or 'missing',
+                    })
+                continue
+            try:
+                size = os.path.getsize(found['path'])
+            except OSError:
+                size = 0
+            reason = ''
+            if size > MAX_EMBED_FILE_BYTES:
+                reason = 'too-large'
+            elif size > budget['left']:
+                reason = 'total-limit'
+            if reason:
+                stats['skippedCount'] += 1
+                stats['skipped'].append({
+                    'msgId': msg_id, 'kind': item['kind'],
+                    'name': item.get('name') or '', 'bytes': size, 'reason': reason,
+                })
+                continue
+            try:
+                with open(found['path'], 'rb') as f:
+                    payload = f.read()
+            except OSError:
+                stats['missingCount'] += 1
+                if len(stats['missing']) < MAX_MISSING_REPORTED:
+                    stats['missing'].append({
+                        'msgId': msg_id, 'kind': item['kind'],
+                        'name': item.get('name') or '', 'reason': 'unreadable',
+                    })
+                continue
+            mime = mimetypes.guess_type(found['path'])[0] or 'image/jpeg'
+            budget['left'] -= len(payload)
+            stats['files'] += 1
+            stats['bytes'] += len(payload)
+            refs.setdefault(msg_id, []).append({
+                'kind': 'image',
+                'file': '',
+                'data': 'data:%s;base64,%s' % (mime, base64.b64encode(payload).decode('ascii')),
+                'bytes': len(payload),
+                'thumbnail': bool(found.get('thumbnail')),
+                'name': '',
             })
     return refs, stats
 

@@ -203,6 +203,49 @@ class CopyTests(unittest.TestCase):
         self.assertNotIn('张三', refs[3][0]['file'])
 
 
+class EmbedTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def put(self, *parts, content=b'x'):
+        path = os.path.join(self.data, *parts)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'wb') as f:
+            f.write(content)
+        return path
+
+    def test_a_picture_becomes_a_data_uri(self):
+        path = self.put('Pic', '2024-01', 'Ori', MD5 + '.png', content=b'\x89PNG')
+        items = {5: [{'kind': 'image', 'md5': MD5, 'path': path,
+                      'server': '', 'name': 'x.png'}]}
+        refs, stats = media.embed_images(items, self.data)
+        self.assertEqual(stats['files'], 1)
+        self.assertEqual(stats['bytes'], 4)
+        self.assertTrue(refs[5][0]['data'].startswith('data:image/png;base64,'))
+        self.assertEqual(refs[5][0]['file'], '')
+
+    def test_non_picture_media_is_not_inlined(self):
+        path = self.put('Ptt', '2024-01', 'Ori', MD5 + '.amr')
+        items = {6: [{'kind': 'voice', 'md5': MD5, 'path': '', 'server': '',
+                      'name': MD5 + '.amr'}]}
+        refs, stats = media.embed_images(items, self.data)
+        self.assertEqual(refs, {})
+        self.assertEqual(stats['skippedCount'], 1)
+        self.assertEqual(stats['skipped'][0]['reason'], 'not-inline')
+
+    def test_oversized_images_are_reported(self):
+        path = self.put('Pic', '2024-01', 'Ori', MD5 + '.jpg', content=b'x' * 10)
+        items = {7: [{'kind': 'image', 'md5': MD5, 'path': path,
+                      'server': '', 'name': 'x.jpg'}]}
+        refs, stats = media.embed_images(items, self.data, budget={'left': 4})
+        self.assertEqual(refs, {})
+        self.assertEqual(stats['skipped'][0]['reason'], 'total-limit')
+
+
 class _Redactor:
     hide_names = True
 

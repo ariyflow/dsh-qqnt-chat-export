@@ -342,6 +342,9 @@
       <label class="check" title="把本机已下载的图片/文件/语音/视频一起打包成 ZIP">
         <input type="checkbox" id="media"> 含媒体
       </label>
+      <label class="check" title="把图片内嵌进 HTML，生成可直接分享的单文件；只支持单个会话">
+        <input type="checkbox" id="embed"> 内嵌图片
+      </label>
       <button class="primary" type="button" id="download">下载</button>
     </form>
     <div class="summary" id="summary">选择左侧的会话，直接输入关键词可跨全部会话查询。</div>
@@ -1163,7 +1166,12 @@
   function download() {
     if (!state.indexReady) { toast('先建立索引'); return }
     if (!state.total) { toast('当前没有可导出的消息'); return }
-    var withMedia = $('media').checked
+    var embed = $('embed').checked
+    var withMedia = $('media').checked || embed
+    if (embed && $('format').value !== 'html') {
+      toast('内嵌图片需要把导出格式选为 HTML')
+      return
+    }
     if (withMedia && !state.chatId) {
       toast('含媒体导出需要先选定一个会话，或在左侧勾选多个会话批量导出')
       return
@@ -1180,7 +1188,7 @@
     api('/api/export/queue', {
       method: 'POST',
       body: Object.assign({}, filters, {
-        format: format, label: label, redact: redact, media: withMedia
+        format: format, label: label, redact: redact, media: withMedia, embed: embed
       })
     }).then(function (result) {
       toast('已加入导出队列：' + format.toUpperCase())
@@ -1194,12 +1202,17 @@
   function downloadSelected() {
     var chats = Object.keys(state.selection).map(function (key) { return state.selection[key] })
     if (!chats.length) { toast('先勾选要导出的会话'); return }
+    if ($('embed').checked && chats.length !== 1) {
+      toast('内嵌图片只支持单个会话')
+      return
+    }
     var format = $('format').value
     api('/api/export/queue', {
       method: 'POST',
       body: {
         chats: chats, format: format, label: '批量导出 ' + chats.length + ' 个会话',
-        redact: $('redact').value, media: $('media').checked
+        redact: $('redact').value, media: $('media').checked,
+        embed: $('embed').checked
       }
     }).then(function () {
       toast('已加入导出队列：' + chats.length + ' 个会话（ZIP）')

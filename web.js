@@ -705,12 +705,21 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
           }
           const chats = chatsFromBody(body.chats)
           const media = body.media === true
-          const container = chats.length > 0 || media ? 'zip' : innerFormat
+          const embed = body.embed === true
+          if (embed && innerFormat !== 'html') {
+            throw Object.assign(new Error('内嵌图片只支持 html 格式'), { status: 400 })
+          }
+          if (embed && chats.length > 1) {
+            throw Object.assign(new Error('内嵌图片只支持单个会话'), { status: 400 })
+          }
+          const container = embed ? innerFormat
+            : (chats.length > 0 || media ? 'zip' : innerFormat)
           const label = String(body.label || (chats.length > 1
             ? `批量导出 ${chats.length} 个会话` : 'QQ聊天记录')).slice(0, 120)
           const args = filtersFromBody(body)
           if (chats.length > 0) args.chats = chats
-          if (media) args.media = true
+          if (media || embed) args.media = true
+          if (embed) args.embed = true
           const queued = queue.enqueue(args, { label, format: container, innerFormat })
           if (!queued) {
             throw Object.assign(new Error(

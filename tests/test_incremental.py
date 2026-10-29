@@ -391,6 +391,44 @@ class IncrementalBuildTests(unittest.TestCase):
             self.assertEqual(manifest['media']['missing'][0]['msgId'], 9)
             self.assertEqual(manifest['media']['missing'][0]['reason'], 'not-downloaded')
 
+    def test_embedded_html_inlines_the_picture(self):
+        datadir = os.path.join(self.root, '12345', 'nt_qq', 'nt_data')
+        ori = os.path.join(datadir, 'Pic', '2024-01', 'Ori')
+        os.makedirs(ori)
+        pic = os.path.join(ori, 'a1b2c3d4e5f60718293a4b5c6d7e8f90.png')
+        with open(pic, 'wb') as f:
+            f.write(b'\x89PNG\r\n')
+        self.add_blob('group_msg_table', 9, 1700003000, _image_blob(pic))
+        self.publish()
+        self.run_cli('build', '--refresh')
+        out = os.path.join(self.work, 'exports', 'embed.html')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        result = self.run_cli('export', '--json', json.dumps({
+            'format': 'html', 'out': out, 'label': 'g1',
+            'chatKind': 'group', 'chatId': 'g1', 'media': True, 'embed': True}))
+        self.assertEqual(result['format'], 'html')
+        self.assertTrue(result['embed'])
+        self.assertEqual(result['media']['files'], 1)
+        with open(out, encoding='utf-8') as f:
+            page = f.read()
+        self.assertIn('src="data:image/png;base64,', page)
+        self.assertIn('iVBORw0K', page)      # the PNG signature, base64-encoded
+
+    def test_embedding_requires_html_and_one_chat(self):
+        self.run_cli('build')
+        out = os.path.join(self.work, 'exports', 'embed.txt')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        proc = subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
+             '--root', self.root, '--account', '12345', '--work', self.work,
+             'export', '--json', json.dumps({
+                 'format': 'txt', 'out': out, 'chatKind': 'group', 'chatId': 'g1',
+                 'embed': True})],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn('html', json.loads(proc.stdout)['error'])
+
     def test_media_export_requires_a_specific_chat(self):
         self.run_cli('build')
         out = os.path.join(self.work, 'exports', 'media-all.zip')
