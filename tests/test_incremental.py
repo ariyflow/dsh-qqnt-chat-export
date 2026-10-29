@@ -38,18 +38,28 @@ def _varint(value):
             return out
 
 
+def _bytes_field(number, value):
+    return _varint(number << 3 | 2) + _varint(len(value)) + value
+
+
 def _message_blob(text):
     """Encode one text segment the way the exporter's render() expects."""
     data = text.encode()
     segment = (_varint(45002 << 3) + _varint(1)
                + _varint(45101 << 3 | 2) + _varint(len(data)) + data)
-    return _varint(40800 << 3 | 2) + _varint(len(segment)) + segment
+    return _bytes_field(40800, segment)
 
 
-def _image_blob():
+def _image_blob(path='', md5='a1b2c3d4e5f60718293a4b5c6d7e8f90',
+                name='pic.jpg', size=1234):
     """Encode one image segment (45002 = 2), rendered as `[图片]`."""
-    segment = _varint(45002 << 3) + _varint(2)
-    return _varint(40800 << 3 | 2) + _varint(len(segment)) + segment
+    segment = (_varint(45002 << 3) + _varint(2)
+               + _bytes_field(45402, name.encode())
+               + _varint(45405 << 3) + _varint(size)
+               + _bytes_field(45406, bytes.fromhex(md5)))
+    if path:
+        segment += _bytes_field(45812, path.encode())
+    return _bytes_field(40800, segment)
 
 
 @unittest.skipIf(sqlcipher is None, 'sqlcipher3-wheels is not installed')
@@ -106,9 +116,12 @@ class IncrementalBuildTests(unittest.TestCase):
             dst.write(HEADER + src.read())
 
     def add(self, table, msg_id, ts, text, chat='g1'):
+        self.add_blob(table, msg_id, ts, _message_blob(text), chat)
+
+    def add_blob(self, table, msg_id, ts, blob, chat='g1'):
         conn = self._connect()
         conn.execute('INSERT OR REPLACE INTO %s VALUES (?,?,?,?,?,?,?,?,?)' % table,
-                     (msg_id, ts, 'u', 0, 1, 1, '', _message_blob(text), chat))
+                     (msg_id, ts, 'u', 0, 1, 1, '', blob, chat))
         conn.commit()
         conn.close()
 
@@ -330,6 +343,67 @@ class IncrementalBuildTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn('redact', json.loads(proc.stdout)['error'])
+
+    def test_media_export_copies_the_file_and_links_it(self):
+        datadir = os.path.join(self.root, '12345', 'nt_qq', 'nt_data')
+        ori = os.path.join(datadir, 'Pic', '2024-01', 'Ori')
+        os.makedirs(ori)
+        pic = os.path.join(ori, 'a1b2c3d4e5f60718293a4b5c6d7e8f90.jpg')
+        with open(pic, 'wb') as f:
+            f.write(b'\xff\xd8pic')
+        self.add_blob('group_msg_table', 9, 1700003000, _image_blob(pic))
+        self.publish()
+        self.run_cli('build', '--refresh')
+        out = os.path.join(self.work, 'exports', 'media.zip')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        result = self.run_cli('export', '--json', json.dumps({
+            'format': 'html', 'out': out, 'label': 'g1',
+            'chatKind': 'group', 'chatId': 'g1', 'media': True}))
+        self.assertEqual(result['media']['files'], 1)
+        with zipfile.ZipFile(out) as archive:
+            names = archive.namelist()
+            media = [name for name in names if name.startswith('media/')]
+            self.assertEqual(len(media), 1)
+            self.assertEqual(archive.read(media[0]), b'\xff\xd8pic')
+            page = archive.read([name for name in names if name.endswith('.html')][0]).decode()
+            self.assertIn(media[0], page)
+            manifest = json.loads(archive.read('manifest.json'))
+            self.assertTrue(manifest['media']['enabled'])
+            self.assertEqual(manifest['media']['files'], 1)
+            self.assertEqual(manifest['media']['missingCount'], 0)
+
+    def test_media_export_reports_a_missing_file_without_failing(self):
+        self.add_blob('group_msg_table', 9, 1700003000,
+                      _image_blob('/nonexistent/qqnt/pic.jpg'))
+        self.publish()
+        self.run_cli('build', '--refresh')
+        out = os.path.join(self.work, 'exports', 'media-missing.zip')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        result = self.run_cli('export', '--json', json.dumps({
+            'format': 'txt', 'out': out, 'label': 'g1',
+            'chatKind': 'group', 'chatId': 'g1', 'media': True}))
+        self.assertEqual(result['media']['files'], 0)
+        self.assertEqual(result['media']['missing'], 1)
+        with zipfile.ZipFile(out) as archive:
+            self.assertEqual([name for name in archive.namelist()
+                              if name.startswith('media/')], [])
+            manifest = json.loads(archive.read('manifest.json'))
+            self.assertEqual(manifest['media']['missing'][0]['msgId'], 9)
+            self.assertEqual(manifest['media']['missing'][0]['reason'], 'not-downloaded')
+
+    def test_media_export_requires_a_specific_chat(self):
+        self.run_cli('build')
+        out = os.path.join(self.work, 'exports', 'media-all.zip')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        proc = subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
+             '--root', self.root, '--account', '12345', '--work', self.work,
+             'export', '--json', json.dumps({
+                 'format': 'txt', 'out': out, 'media': True})],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn('需要指定会话', json.loads(proc.stdout)['error'])
 
     def test_batch_export_requires_a_zip_target(self):
         self.run_cli('build')

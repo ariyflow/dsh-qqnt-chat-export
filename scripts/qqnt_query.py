@@ -38,6 +38,7 @@ import urllib.parse
 import zipfile
 
 import qqnt_export as q
+import qqnt_media as media_mod
 
 GROUP_KIND = 'group'
 PRIVATE_KIND = 'private'
@@ -1398,7 +1399,7 @@ class Redactor:
         return ('群聊%d' if kind == GROUP_KIND else '私聊%d') % index
 
 
-def export_writer(conn, args, label, redactor=None):
+def export_writer(conn, args, label, redactor=None, media=None):
     """Rows and a `write(target)` for one export, so bundles reuse the writers."""
     fmt = str(args.get('format') or 'txt').lower()
     where, params = build_where(conn, args)
@@ -1415,6 +1416,22 @@ def export_writer(conn, args, label, redactor=None):
         item = row_json(row)
         return redactor.apply(item) if redactor is not None else item
 
+    def refs_for(item):
+        if not media:
+            return []
+        try:
+            return media.get(int(item.get('id'))) or []
+        except (TypeError, ValueError):
+            return []
+
+    def md_links(refs):
+        out = []
+        for ref in refs:
+            label = '图片' if ref['kind'] == 'image' else ref.get('name') or '文件'
+            prefix = '!' if ref['kind'] == 'image' else ''
+            out.append('%s[%s](%s)' % (prefix, label, ref['file']))
+        return out
+
     def write(out):
         count = 0
         if fmt == 'txt':
@@ -1423,8 +1440,12 @@ def export_writer(conn, args, label, redactor=None):
                 f.write('=' * 70 + '\n\n')
                 for row in cur:
                     item = record(row)
-                    f.write('[%s] %s: %s\n' % (item['time'], item['sender'],
-                                               item['text'].replace('\n', ' \\n ')))
+                    line = '[%s] %s: %s' % (item['time'], item['sender'],
+                                            item['text'].replace('\n', ' \\n '))
+                    refs = refs_for(item)
+                    if refs:
+                        line += '  [媒体] ' + ', '.join(ref['file'] for ref in refs)
+                    f.write(line + '\n')
                     count += 1
         elif fmt == 'csv':
             import csv
@@ -1445,7 +1466,11 @@ def export_writer(conn, args, label, redactor=None):
                 for row in cur:
                     if count:
                         f.write(',')
-                    f.write(json.dumps(record(row), ensure_ascii=False))
+                    item = record(row)
+                    refs = refs_for(item)
+                    if refs:
+                        item['media'] = refs
+                    f.write(json.dumps(item, ensure_ascii=False))
                     count += 1
                 f.write(']}\n')
         elif fmt == 'md':
@@ -1454,9 +1479,13 @@ def export_writer(conn, args, label, redactor=None):
                         % md_cell(label.replace('\n', ' ')))
                 for row in cur:
                     item = record(row)
+                    text = item['text']
+                    refs = refs_for(item)
+                    if refs:
+                        text += '\n' + ' '.join(md_links(refs))
                     f.write('| %s | %s | %s |\n'
                             % (md_cell(item['time']), md_cell(item['sender']),
-                               md_cell(item['text'])))
+                               md_cell(text)))
                     count += 1
                 f.write('\n共 %d 条。\n' % count)
         elif fmt == 'html':
@@ -1468,15 +1497,28 @@ def export_writer(conn, args, label, redactor=None):
                         'vertical-align:top;text-align:left}th{background:#f6f8fa;'
                         'position:sticky;top:0}td.t{white-space:nowrap;color:#57606a;width:150px}'
                         'td.s{white-space:nowrap;width:140px;color:#0969da}'
-                        '.out td.s{color:#1a7f37}</style><h1>%s</h1>'
+                        '.out td.s{color:#1a7f37}'
+                        '.media{margin-top:6px}.media img{max-width:320px;max-height:320px;'
+                        'border-radius:4px;display:block}'
+                        '.media a{color:#0969da}</style><h1>%s</h1>'
                         % (html_escape(label), html_escape(label)))
                 f.write('<table><thead><tr><th>时间</th><th>发送者</th><th>内容</th></tr></thead><tbody>')
                 for row in cur:
                     item = record(row)
                     cls = ' class="out"' if item['out'] else ''
+                    body = html_escape(item['text']).replace('\n', '<br>')
+                    for ref in refs_for(item):
+                        rel = html_escape(ref['file'])
+                        if ref['kind'] == 'image':
+                            body += ('<div class="media"><a href="%s">'
+                                     '<img src="%s" alt="图片" loading="lazy"></a></div>'
+                                     % (rel, rel))
+                        else:
+                            body += ('<div class="media"><a href="%s">%s</a></div>'
+                                     % (rel, html_escape(ref.get('name') or '文件')))
                     f.write('<tr%s><td class="t">%s</td><td class="s">%s</td><td>%s</td></tr>'
                             % (cls, html_escape(item['time']), html_escape(item['sender']),
-                               html_escape(item['text']).replace('\n', '<br>')))
+                               body))
                     count += 1
                 f.write('</tbody></table>')
         else:                                   # sqlite
@@ -1516,15 +1558,13 @@ def export_writer(conn, args, label, redactor=None):
     return write, state
 
 
-def write_export_file(conn, args, out, label, redactor=None):
-    write, _state = export_writer(conn, args, label, redactor)
+def write_export_file(conn, args, out, label, redactor=None, media=None):
+    write, _state = export_writer(conn, args, label, redactor, media)
     return write(out)
 
 
 def safe_stem(text, fallback='export'):
-    """A file-name-safe stem; Windows forbids more characters than POSIX."""
-    stem = re.sub(r'[\\/:*?"<>|\r\n\t\x00-\x1f]+', '_', str(text or '')).strip(' .')
-    return stem[:60] or fallback
+    return q.file_stem(text, fallback)
 
 
 def chat_meta(conn, kind, chat_id):
@@ -1554,10 +1594,15 @@ def write_zip(directory, target):
                 pass
 
 
-def export_bundle(conn, args, out, label, chats):
+def export_bundle(conn, args, out, label, chats, src=None, datadir=''):
     """Many chats (or one chat plus media) in one zip with a manifest."""
     fmt = args['format']
     mode = str(args.get('redact') or '')
+    media_enabled = bool(args.get('media'))
+    media_stats = {'files': 0, 'bytes': 0, 'missing': [], 'missingCount': 0,
+                   'skipped': [], 'skippedCount': 0}
+    budget = {'left': media_mod.MAX_TOTAL_BYTES}
+    cache = {}
     workdir = tempfile.mkdtemp(prefix='.bundle-', dir=os.path.dirname(out) or '.')
     entries, skipped = [], []
     total = 0
@@ -1585,8 +1630,16 @@ def export_bundle(conn, args, out, label, chats):
                 name = redactor.chat_label(kind, name, index)
             entry = {'kind': kind, 'id': redactor.number(chat_id),
                      'name': name, 'rows': 0, 'file': ''}
-            path = os.path.join(workdir, '%03d-%s.%s' % (index, safe_stem(name, 'chat'), fmt))
-            rows = write_export_file(conn, scope_args, path, name, redactor)
+            stem = '%03d-%s' % (index, safe_stem(name, 'chat'))
+            refs = None
+            if media_enabled and src is not None:
+                items = media_mod.collect(src, conn, kind, chat_id)
+                refs, part = media_mod.copy_files(
+                    items, os.path.join(workdir, 'media', stem),
+                    'media/' + stem, datadir, redactor, cache, budget)
+                media_mod.merge_stats(media_stats, part)
+            path = os.path.join(workdir, stem + '.' + fmt)
+            rows = write_export_file(conn, scope_args, path, name, redactor, refs)
             total += rows
             entry['rows'] = rows
             if rows:
@@ -1608,7 +1661,15 @@ def export_bundle(conn, args, out, label, chats):
             'total': total,
             'chats': entries,
             'skipped': skipped,
-            'media': {'enabled': False},
+            'media': {
+                'enabled': media_enabled,
+                'files': media_stats['files'],
+                'bytes': media_stats['bytes'],
+                'missingCount': media_stats['missingCount'],
+                'missing': media_stats['missing'],
+                'skipped': media_stats['skipped'],
+                'skippedCount': media_stats['skippedCount'],
+            },
         }
         with open(os.path.join(workdir, 'manifest.json'), 'w', encoding='utf-8') as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
@@ -1619,7 +1680,10 @@ def export_bundle(conn, args, out, label, chats):
     q.private_file(out)
     size = os.path.getsize(out) if os.path.exists(out) else 0
     return {'path': out, 'format': 'zip', 'rows': total, 'bytes': size,
-            'label': label, 'chats': len(entries), 'skipped': len(skipped)}
+            'label': label, 'chats': len(entries), 'skipped': len(skipped),
+            'media': {'files': media_stats['files'], 'bytes': media_stats['bytes'],
+                      'missing': media_stats['missingCount'],
+                      'skipped': media_stats['skippedCount']}}
 
 
 MAX_BATCH_CHATS = 200
@@ -1642,17 +1706,29 @@ def cmd_export(p, args):
         raise BadInput('chats 必须是数组')
     if len(chats) > MAX_BATCH_CHATS:
         raise BadInput('一次最多导出 %d 个会话' % MAX_BATCH_CHATS)
-    zip_mode = bool(chats) or bool(args.get('media'))
+    media_enabled = bool(args.get('media'))
+    zip_mode = bool(chats) or media_enabled
     if zip_mode and not out.lower().endswith('.zip'):
         raise BadInput('批量或媒体导出必须输出 .zip')
+    if media_enabled:
+        if not chats and not args.get('chatKind'):
+            raise BadInput('媒体导出需要指定会话：单个会话，或在会话列表里勾选多个')
+        if not os.path.exists(p['db']):
+            raise BadInput('媒体导出需要先构建索引（会用到构建时复制的 nt_msg.db）')
     q.ensure_private_dir(os.path.dirname(out) or '.')
     args = dict(args, format=fmt,
                 account=str(args.get('account') or read_status(p).get('account', '')))
 
     conn = open_index(p)
+    src = None
     try:
         if zip_mode:
-            payload = export_bundle(conn, args, out, label, chats)
+            datadir = ''
+            if media_enabled:
+                datadir = (read_meta(p['index']) or {}).get('datadir', '')
+                key = read_key(p, args.get('account') or None)
+                src = q.open_encrypted(p['db'], key, readonly=True)
+            payload = export_bundle(conn, args, out, label, chats, src, datadir)
         else:
             redactor = Redactor(mode)
             kind = str(args.get('chatKind') or '')
@@ -1664,6 +1740,8 @@ def cmd_export(p, args):
                        'bytes': os.path.getsize(out) if os.path.exists(out) else 0,
                        'label': label}
     finally:
+        if src is not None:
+            src.close()
         conn.close()
     print(json.dumps(payload, ensure_ascii=False))
 

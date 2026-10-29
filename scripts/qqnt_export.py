@@ -162,6 +162,11 @@ def csv_cell(value):
     return text
 
 
+def file_stem(text, fallback='export'):
+    """A file-name-safe stem; Windows forbids more characters than POSIX."""
+    stem = re.sub(r'[\\/:*?"<>|\r\n\t\x00-\x1f]+', '_', str(text or '')).strip(' .')
+    return stem[:60] or fallback
+
 def sqlcipher_module():
     try:
         from sqlcipher3 import dbapi2 as mod

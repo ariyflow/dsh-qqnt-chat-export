@@ -249,6 +249,34 @@ test('the HTTP route bundles a batch selection as one zip', { skip: POSIX_ONLY }
   }
 })
 
+test('a media export is bundled as a zip even for one chat', { skip: POSIX_ONLY }, async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  const python = await fakePython(dir, 'echo')
+  const { server, base } = await startServer({ python, workDir: work })
+  try {
+    const response = await fetch(`${base}/api/export/queue`, {
+      method: 'POST', headers: actionHeaders,
+      body: JSON.stringify({ chatKind: 'group', chatId: '1', media: true, format: 'html' }),
+    })
+    assert.equal(response.status, 202)
+    const { id, task } = await response.json()
+    assert.equal(task.format, 'zip')
+    const finished = await waitFor(async () => {
+      const list = await (await fetch(`${base}/api/export/queue`)).json()
+      return list.tasks.find((row) => row.id === id && row.state === 'done')
+    })
+    const args = JSON.parse(await readFile(`${finished.path}.args.json`, 'utf8'))
+    assert.equal(args.media, true)
+    assert.equal(args.format, 'html')
+    assert.equal(args.chatId, '1')
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('the HTTP route refuses a malformed batch selection', { skip: POSIX_ONLY }, async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')

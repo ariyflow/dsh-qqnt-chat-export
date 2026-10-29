@@ -59,6 +59,9 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
     task.state = 'done'
     task.bytes = Number(payload?.bytes) || 0
     task.rows = Number(payload?.rows) || 0
+    if (payload?.media && Number.isFinite(Number(payload.media.files))) {
+      task.media = { files: Number(payload.media.files), missing: Number(payload.media.missing) || 0 }
+    }
     if (typeof payload?.path === 'string' && payload.path !== '') task.path = payload.path
   }
 

@@ -123,6 +123,7 @@
   .filters input[type=date] { width: 140px; }
   .filters label { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 4px; }
   .filters .spacer { flex: 1; }
+  .filters label.check { user-select: none; }
   .scope {
     display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 8px;
     border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent);
@@ -338,6 +339,9 @@
         <option value="qq">QQ 号打码</option>
         <option value="all">昵称 + QQ 号</option>
       </select>
+      <label class="check" title="把本机已下载的图片/文件/语音/视频一起打包成 ZIP">
+        <input type="checkbox" id="media"> 含媒体
+      </label>
       <button class="primary" type="button" id="download">下载</button>
     </form>
     <div class="summary" id="summary">选择左侧的会话，直接输入关键词可跨全部会话查询。</div>
@@ -1159,6 +1163,11 @@
   function download() {
     if (!state.indexReady) { toast('先建立索引'); return }
     if (!state.total) { toast('当前没有可导出的消息'); return }
+    var withMedia = $('media').checked
+    if (withMedia && !state.chatId) {
+      toast('含媒体导出需要先选定一个会话，或在左侧勾选多个会话批量导出')
+      return
+    }
     if (state.total > 20000 && !confirm('将要导出 ' + num(state.total) + ' 条消息，可能是个大文件。继续？')) return
     // Use the filters of the visible result, not whatever is typed but not run.
     var filters = state.filters || currentFilters()
@@ -1166,10 +1175,12 @@
     var label = state.chatId ? state.chatName : '全部会话'
     var keyword = (filters.keyword || '').trim()
     if (keyword) label += '_' + keyword
+    if (withMedia) label += '_媒体'
+    var redact = $('redact').value
     api('/api/export/queue', {
       method: 'POST',
       body: Object.assign({}, filters, {
-        format: format, label: label, redact: $('redact').value
+        format: format, label: label, redact: redact, media: withMedia
       })
     }).then(function (result) {
       toast('已加入导出队列：' + format.toUpperCase())
@@ -1188,7 +1199,7 @@
       method: 'POST',
       body: {
         chats: chats, format: format, label: '批量导出 ' + chats.length + ' 个会话',
-        redact: $('redact').value
+        redact: $('redact').value, media: $('media').checked
       }
     }).then(function () {
       toast('已加入导出队列：' + chats.length + ' 个会话（ZIP）')
@@ -1233,7 +1244,8 @@
       if (task.state === 'running') {
         stateText.innerHTML = '<span class="spinner"></span>导出中'
       } else if (task.state === 'done') {
-        stateText.textContent = num(task.rows) + ' 条 · ' + bytes(task.bytes)
+        stateText.textContent = num(task.rows) + ' 条 · ' + bytes(task.bytes) +
+          (task.media && task.media.files ? ' · 媒体 ' + task.media.files + ' 个' : '')
       } else {
         stateText.textContent = '失败'
       }
