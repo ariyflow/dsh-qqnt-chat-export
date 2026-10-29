@@ -44,6 +44,6 @@
         # index.<uin>.sqlite (0~5). Switching back to a cached account then
         # builds incrementally instead of rebuilding from scratch.
         keepAccountIndexes: 2
-        # fts = trigram full-text index (fast keyword search, ~3.5x disk);
+        # fts = trigram full-text index (fast keyword search, +30~60% disk);
         # like = no index, keyword search scans. Rebuild for changes to apply.
         searchIndex: fts

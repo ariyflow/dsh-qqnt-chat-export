@@ -338,7 +338,7 @@
       <label class="field">
         <span>保留账号索引数</span>
         <input type="number" id="setKeepIndexes" min="0" max="5" step="1" value="2">
-        <small>切换 QQ 账号时把其它账号的索引缓存为 <code>index.&lt;账号&gt;.sqlite</code>，切回时直接增量更新。0 表示只保留当前账号；每个索引约 0.65 MB / 1000 条消息。</small>
+        <small>切换 QQ 账号时把其它账号的索引缓存为 <code>index.&lt;账号&gt;.sqlite</code>，切回时直接增量更新。0 表示只保留当前账号；每个索引约 0.2~0.4 MB / 1000 条消息（含 FTS，文本越长占比越高）。</small>
       </label>
       <label class="field">
         <span>搜索索引</span>
@@ -520,6 +520,11 @@
     if (status.index && status.index.exists) {
       parts.push('索引 ' + num(status.index.messages || 0) + ' 条')
       if (status.index.chats) parts.push(num(status.index.chats) + ' 个会话')
+      if (status.index.search) parts.push('搜索 ' + (status.index.search === 'like' ? 'LIKE' : 'FTS'))
+      var parked = (status.index.accounts || []).filter(function (item) {
+        return item && !item.current
+      }).length
+      if (parked) parts.push('缓存 ' + parked + ' 个账号')
     } else {
       parts.push('未建立索引')
     }

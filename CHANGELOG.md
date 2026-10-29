@@ -1,5 +1,17 @@
 # 更新记录
 
+## 0.7.1
+
+上线后修补，集中在「文档说的和代码做的不一致」的几处：
+
+- 容量文案按实测修正：32.2 万条消息的索引是 92.9 MB（`messages` 40.6 + FTS 26.8 + 普通索引 21.2），约 **0.2~0.4 MB / 1000 条**；FTS 只多占 **30%~60%**（这份数据上是 29%），不是之前说的 3.5 倍。README、设置页、`CHANGELOG`、`cordis.patch.yml` 注释统一成这个口径。
+- 修复设置页默认值过期：`apply()` 里缓存了一份 `defaults`，迁移工作目录后仍会把旧临时路径当占位符、并显示 `workDirLegacy: true`。现在每次请求现算（一次 `existsSync`）。
+- 修复迁移工作目录带入旧状态：`migrateWorkDir()` 现在跳过 `build-status.json`、`build.lock` 和 `*-wal/-shm/-journal`。之前会把旧目录的进度文件复制过去，`/api/status` 的 `build.index` 一直指向 `/tmp/qqnt-chat-export/index.sqlite`；WAL/SHM 也属于它们各自的数据库，复制一半的 WAL 比不复制更危险。被跳过的条目会随迁移后的清理一起从旧目录删除。
+- 新增 `qqnt_query.py prune --keep N`：改小「保留账号索引数」后立即清理缓存，不用等下一次构建。设置保存成功且 `keepAccountIndexes` 变化时，Node 侧会 detached 跑一次；构建进行中（锁被占用）时 Python 输出 `skipped: busy` 并正常退出，留给下一轮。
+- `status` 的 `index.search` 报告索引的关键词模式（`fts` / `like`）；0.6 的旧索引没有 `search` 时按 `meta.fts` 推断。网页状态行显示「搜索 FTS/LIKE」和「缓存 N 个账号」。
+- 测试：新增 Python 用例覆盖 `search` 推断与 `prune` 命令（含锁占用、`keep=0` 不动当前索引），Node 用例覆盖迁移跳过 sidecar/状态文件与 prune spawn；Python 35 个、Node 25 个。
+- 版本升到 0.7.1。
+
 ## 0.7.0
 
 - 多账号索引缓存：切换 QQ 账号时，上一个账号的 `index.sqlite` 会改名为 `index.<账号>.sqlite` 停放，切回该账号时先恢复缓存再走增量同步，不再整库重建。当前索引始终是 `index.sqlite`，查询层和导出路径完全不变；切换只是一次同目录 `os.replace`。
@@ -8,7 +20,7 @@
 - 账号不一致横幅升级：如果当前 QQ 账号的索引在缓存里，直接给「切换到该账号的索引」按钮，不再只能重新同步。
 - 默认工作目录改到持久位置：Windows `%LOCALAPPDATA%\dsh-qqnt-chat-export\work`，Linux `~/.local/share/dsh-qqnt-chat-export/work`（遵循 `XDG_DATA_HOME`），macOS `~/Library/Application Support/...`。`/tmp` 在大内存机器上常是 tmpfs，重启即丢密钥和索引。
 - 老用户兼容：显式 `workDir` 优先，但取值等于旧临时目录时同样会提示迁移（0.6 每次保存设置都会把解析后的 `/tmp` 路径写进 `settings.json`，否则多数老用户看不到提示）；否则持久目录不存在、旧目录里还有 `key.txt`/`index.sqlite`/`nt_msg.db` 之一时继续用旧目录并提示。横幅提供「迁移到持久目录」/「继续使用」，后者写入 `legacyWorkDirDismissed: true` 不再打扰。迁移先复制再改设置，成功后删除旧文件；失败保留旧目录。
-- 设置页新增「保留账号索引数」和「搜索索引」（`fts` / `like`，重建后生效）。`build --search like` 不建 `message_fts`，边库体积约降到 1/3.5；`meta.search` 记录模式，改模式会自动全量重建。
+- 设置页新增「保留账号索引数」和「搜索索引」（`fts` / `like`，重建后生效）。`build --search like` 不建 `message_fts`，索引体积约减少 30%~60%（实测 32 万条时 FTS 占 29%）；`meta.search` 记录模式，改模式会自动全量重建。
 - `status` 的 `index.accounts` 列出当前索引与各缓存账号（账号、大小、mtime、是否当前），只读文件名和 `stat()`，不会逐个打开缓存。
 - 「存储与清理」新增动态扫描的「账号索引缓存」类别：只匹配 `index.<账号>.sqlite`（连同 `-wal/-shm`），当前索引不在该类别里，误删不到。
 - 修复账号切换时解密副本不刷新：`nt_msg.db` 是各账号共用的副本，现在切换账号（含恢复缓存）会强制重新复制，避免拿上一个账号的数据做增量。

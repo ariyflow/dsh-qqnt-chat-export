@@ -17,7 +17,7 @@ import {
   validatePatch,
 } from '../settings.js'
 import { cleanupStorage, migrateWorkDir, removeWorkDirEntries, storageSnapshot } from '../storage.js'
-import { startWebServer } from '../web.js'
+import { pruneAccountIndexes, startWebServer } from '../web.js'
 
 const actionHeaders = { 'content-type': 'application/json', 'x-qqnt-action': '1' }
 
@@ -452,6 +452,67 @@ test('index select validates input and reports the helper JSON', {
     assert.equal(body.cached, false)
   } finally {
     await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('migration leaves stale status and journal sidecars behind', async () => {
+  const dir = await tempDir()
+  const from = path.join(dir, 'old')
+  const to = path.join(dir, 'new')
+  try {
+    await mkdir(from, { recursive: true })
+    await writeFile(path.join(from, 'key.txt'), 'secret')
+    await writeFile(path.join(from, 'index.sqlite'), 'idx')
+    await writeFile(path.join(from, 'index.sqlite-wal'), 'wal')
+    await writeFile(path.join(from, 'index.sqlite-shm'), 'shm')
+    await writeFile(path.join(from, 'nt_msg.db-journal'), 'journal')
+    await writeFile(path.join(from, 'build-status.json'), JSON.stringify({
+      state: 'done', index: path.join(from, 'index.sqlite'),
+    }))
+    await writeFile(path.join(from, 'build.lock'), '1')
+
+    const result = await migrateWorkDir(from, to)
+    assert.deepEqual(result.copied.sort(), ['index.sqlite', 'key.txt'])
+    // The old progress file would point `/api/status` at the temp directory,
+    // and a copied lock would block every later build.
+    for (const name of ['build-status.json', 'build.lock', 'index.sqlite-wal',
+      'index.sqlite-shm', 'nt_msg.db-journal']) {
+      assert.equal(existsSync(path.join(to, name)), false, `${name} must not be copied`)
+      assert.ok(result.discarded.includes(name), `${name} should be reported as discarded`)
+    }
+    assert.equal(existsSync(path.join(from, 'key.txt')), true, 'source survives until commit')
+
+    // A status left in the target by an earlier attempt is cleared as well.
+    await writeFile(path.join(to, 'build-status.json'), JSON.stringify({ state: 'running' }))
+    await migrateWorkDir(from, to)
+    assert.equal(existsSync(path.join(to, 'build-status.json')), false)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('lowering the cache limit spawns a prune with the new value', {
+  skip: process.platform === 'win32' ? 'needs a POSIX shell wrapper' : false,
+}, async () => {
+  const dir = await tempDir()
+  try {
+    const calls = path.join(dir, 'calls')
+    const wrapper = path.join(dir, 'py')
+    await writeFile(wrapper, `#!/bin/sh\necho "$@" >> "${calls}"\n`, { mode: 0o755 })
+    assert.equal(pruneAccountIndexes({ python: wrapper, workDir: dir }, 0), true)
+    let argv = ''
+    for (let attempt = 0; attempt < 60 && argv === ''; attempt += 1) {
+      try {
+        argv = (await readFile(calls, 'utf8')).trim()
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+    }
+    assert.match(argv, /qqnt_query\.py/)
+    assert.match(argv, /--work/)
+    assert.match(argv, / prune --keep 0$/)
+  } finally {
     await rm(dir, { recursive: true, force: true })
   }
 })

@@ -1,6 +1,6 @@
 {
   "name": "dsh-qqnt-chat-export",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Read, search, and export NTQQ chat history (groups and private chats) as text, CSV, JSON, Markdown, HTML, or SQLite on Windows and Linux — a DeepSeek Harness bundle with model tools and a local web UI at http://127.0.0.1:46728/ (port configurable).",
   "type": "module",
   "license": "MIT",

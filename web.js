@@ -115,6 +115,34 @@ function spawnBuild(settings, argv) {
   })
 }
 
+/**
+ * Drop parked account indexes beyond a newly lowered limit.
+ *
+ * Runs detached and never blocks the settings response: a busy build lock or a
+ * missing interpreter only costs a log line, and the next sync prunes again.
+ */
+export function pruneAccountIndexes(settings, keep) {
+  const argv = ['-X', 'utf8', QUERY_CLI, '--work', settings.workDir]
+  if (settings.tencentRoot) argv.push('--root', settings.tencentRoot)
+  argv.push('prune', '--keep', String(keep))
+  try {
+    const child = spawn(settings.python, argv, {
+      windowsHide: true,
+      detached: true,
+      stdio: 'ignore',
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+    })
+    child.on('error', (error) => {
+      console.warn(`[qqnt-chat-export] account cache prune skipped: ${error.message}`)
+    })
+    child.unref()
+    return true
+  } catch (error) {
+    console.warn(`[qqnt-chat-export] account cache prune failed: ${error.message}`)
+    return false
+  }
+}
+
 /** One python invocation returning parsed JSON from stdout. */
 function runJson(settings, command, args = {}, { signal } = {}) {
   return new Promise((resolve, reject) => {

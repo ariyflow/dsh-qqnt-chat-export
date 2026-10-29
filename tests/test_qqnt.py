@@ -170,6 +170,36 @@ class SchemaTests(unittest.TestCase):
             conn.close()
 
 
+class IndexCountTests(unittest.TestCase):
+    """`status` must say which keyword mode an index was built with."""
+
+    def counts(self, meta):
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            path = os.path.join(tmp.name, 'index.sqlite')
+            conn = sqlite3.connect(path)
+            try:
+                conn.executescript(qq.SCHEMA)
+                conn.executemany('INSERT OR REPLACE INTO meta VALUES (?,?)',
+                                 list(meta.items()))
+                conn.commit()
+            finally:
+                conn.close()
+            return qq.index_counts(path)[0]
+        finally:
+            tmp.cleanup()
+
+    def test_search_mode_is_reported(self):
+        self.assertEqual(self.counts({'search': 'fts', 'fts': '1'})['search'], 'fts')
+        self.assertEqual(self.counts({'search': 'like', 'fts': '0'})['search'], 'like')
+        # 0.6 indexes only stored whether the trigram table was built.
+        self.assertEqual(self.counts({'fts': '0'})['search'], 'like')
+        self.assertEqual(self.counts({'fts': '1'})['search'], 'fts')
+        self.assertEqual(self.counts({})['search'], '')
+        # A missing index still reports nothing instead of a bogus mode.
+        self.assertEqual(qq.index_counts('/nonexistent/index.sqlite'), ({}, 0))
+
+
 class FilterTests(unittest.TestCase):
     def test_like_escape(self):
         self.assertEqual(qq.like_escape(r'a%b_c\d'), r'a\%b\_c\\d')

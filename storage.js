@@ -12,6 +12,10 @@ import path from 'node:path'
 const LOCK_MAX_AGE_MS = 15 * 60 * 1000
 /** Parked indexes for other accounts: index.<uin>.sqlite (+ sidecars). */
 const CACHE_RE = /^index\.[0-9A-Za-z_-]+\.sqlite(?:-(?:wal|shm))?$/
+/** Progress/lock files describe one directory; they must not travel with it. */
+const STALE_STATE = new Set(['build-status.json', 'build-status.json.tmp', 'build.lock'])
+/** A SQLite journal belongs to its database; the copy re-creates its own. */
+const SIDECAR_RE = /-(?:wal|shm|journal)$/
 export const ACCOUNT_CACHE_ID = 'indexCache'
 
 export const STORAGE_ITEMS = [
@@ -262,12 +266,18 @@ export async function migrateWorkDir(from, to, { removeSource = false } = {}) {
   const entries = await readdir(source, { withFileTypes: true })
   const copied = []
   const skipped = []
+  const discarded = []
   try {
     for (const entry of entries) {
-      // The lock belongs to the old directory; a build cannot be running here
-      // (the caller checks first), and copying a lock file would block the new
-      // directory forever.
-      if (entry.name === 'build.lock') continue
+      // Progress files and the lock describe the *old* directory: `index` would
+      // point at `/tmp/...` and a copied lock would block the new one forever.
+      // A build cannot be running here (the caller checks first).
+      // WAL/SHM/journal sidecars belong to their database; SQLite recreates
+      // them, and a half-copied WAL is worse than none.
+      if (STALE_STATE.has(entry.name) || SIDECAR_RE.test(entry.name)) {
+        discarded.push(entry.name)
+        continue
+      }
       const src = path.join(source, entry.name)
       const dst = path.join(target, entry.name)
       if (existsSync(dst)) {
@@ -280,12 +290,17 @@ export async function migrateWorkDir(from, to, { removeSource = false } = {}) {
     if (existsSync(path.join(source, 'key.txt')) && !existsSync(path.join(target, 'key.txt'))) {
       throw new Error('key.txt 没有复制成功')
     }
+    // A previous attempt may have left a status/lock in the target that still
+    // names the source directory.
+    for (const name of STALE_STATE) {
+      await rm(path.join(target, name), { force: true })
+    }
   } catch (error) {
     for (const name of copied) await rm(path.join(target, name), { recursive: true, force: true })
     throw Object.assign(error, { status: 500 })
   }
-  if (removeSource) await removeWorkDirEntries(source, copied)
-  return { from: source, to: target, copied, skipped }
+  if (removeSource) await removeWorkDirEntries(source, [...copied, ...discarded])
+  return { from: source, to: target, copied, skipped, discarded }
 }
 
 /** Best-effort deletion of the entries a migration copied (source cleanup). */

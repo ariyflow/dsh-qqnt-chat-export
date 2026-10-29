@@ -266,6 +266,36 @@ class AccountCacheTests(unittest.TestCase):
         accounts = status['index']['accounts']
         self.assertEqual([(item['account'], item['current']) for item in accounts],
                          [(GROUP, True)])
+        self.assertEqual(status['index']['search'], 'fts')
+
+    def test_prune_command_shrinks_the_cache(self):
+        self.build()
+        for account, when in ((GROUP, 1_600_000_000), (OTHER, 1_600_000_100)):
+            path = os.path.join(self.work, 'index.%s.sqlite' % account)
+            with open(path, 'w', encoding='ascii') as f:
+                f.write('x')
+            os.utime(path, (when, when))
+
+        result = self.run_cli('prune', '--keep', '1')
+        self.assertEqual(result['keep'], 1)
+        self.assertEqual([item['account'] for item in result['removed']], [GROUP])
+        self.assertEqual([item['account'] for item in self._cache_accounts()], [OTHER])
+        self.assertTrue(os.path.exists(self.p['index']))
+
+        # A running build holds the lock: pruning steps aside, exit code 0.
+        lock = os.path.join(self.work, 'build.lock')
+        with open(lock, 'w', encoding='ascii') as f:
+            f.write(str(os.getpid()))
+        busy = self.run_cli('prune', '--keep', '0')
+        os.remove(lock)
+        self.assertEqual(busy['skipped'], 'busy')
+        self.assertEqual(len(self._cache_accounts()), 1)
+
+        # keep=0 removes every cache but never the live index.
+        result = self.run_cli('prune', '--keep', '0')
+        self.assertEqual([item['account'] for item in result['removed']], [OTHER])
+        self.assertEqual(self._cache_accounts(), [])
+        self.assertTrue(os.path.exists(self.p['index']))
 
     def test_global_account_option_reaches_select(self):
         self.build()

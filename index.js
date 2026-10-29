@@ -31,7 +31,7 @@ import {
   venvPython,
 } from './settings.js'
 import { buildRunning, cleanupStorage, migrateWorkDir, removeWorkDirEntries, storageSnapshot } from './storage.js'
-import { startWebServer } from './web.js'
+import { pruneAccountIndexes, startWebServer } from './web.js'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'qqnt-chat-export'
@@ -739,7 +739,9 @@ export function apply(ctx, config) {
   const bundleConfig = config && typeof config === 'object' ? config : {}
   let overrides = loadOverrides()
   const settings = resolveSettings(bundleConfig, overrides)
-  const defaults = resolveSettings(bundleConfig, {})
+  // Recomputed per request: after a work-dir migration the cached copy would
+  // still advertise the old temp placeholder and `workDirLegacy: true`.
+  const currentDefaults = () => resolveSettings(bundleConfig, {})
   // The model-facing key tool shares the web job's slot: `busy` is evaluated
   // when the tool runs, long after `keyJob` below is initialised.
   ctx.tools.register(statusTool(settings))
@@ -800,7 +802,7 @@ export function apply(ctx, config) {
   }
 
   const handlers = {
-    getSettings: () => publicSettings(settings, defaults, { url: webUrl, file: settingsFile() }),
+    getSettings: () => publicSettings(settings, currentDefaults(), { url: webUrl, file: settingsFile() }),
     getStorage: () => storageSnapshot(settings.workDir),
     cleanupStorage: (ids) => {
       if (keyJob.state === 'running') {
@@ -855,7 +857,9 @@ export function apply(ctx, config) {
       // old files: a failed settings write leaves everything where it was.
       const result = await migrateWorkDir(settings.workDir, target)
       await commitSettings({ ...overrides, workDir: target })
-      const removed = await removeWorkDirEntries(result.from, result.copied)
+      // Stale progress files are dropped rather than copied, but they still
+      // belong to the old directory, so the cleanup removes them too.
+      const removed = await removeWorkDirEntries(result.from, [...result.copied, ...result.discarded])
       return { ...result, workDir: target, removed }
     },
   }
@@ -935,6 +939,7 @@ function isInsideDir(parent, child) {
       }
 
       const previousServer = webServer
+      const previousKeep = settings.keepAccountIndexes
       Object.assign(settings, next)
       if (portChanged) {
         webServer = candidate
@@ -943,8 +948,12 @@ function isInsideDir(parent, child) {
         // listener that is serving it.
         if (previousServer) setImmediate(() => { void previousServer.close() })
       }
+      // Lowering the limit must shrink the cache now, not after the next build.
+      if (next.keepAccountIndexes !== previousKeep && !buildRunning(settings.workDir)) {
+        pruneAccountIndexes(settings, next.keepAccountIndexes)
+      }
       return {
-        ...publicSettings(settings, defaults, { url: webUrl, file: settingsFile() }),
+        ...publicSettings(settings, currentDefaults(), { url: webUrl, file: settingsFile() }),
         restart: portChanged,
         previousUrl: previousServer ? previousServer.url : '',
       }

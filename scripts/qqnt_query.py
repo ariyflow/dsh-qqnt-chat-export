@@ -181,8 +181,14 @@ def index_counts(path):
         messages = conn.execute('SELECT count(*) FROM messages').fetchone()[0]
         chats = conn.execute('SELECT count(*) FROM chats').fetchone()[0]
         conn.close()
+        # 0.7.0 indexes record the mode in `search`; older ones only know
+        # whether the trigram table was built at all.
+        search = str(meta.get('search') or '')
+        if search not in ('fts', 'like'):
+            fts = meta.get('fts')
+            search = 'fts' if fts == '1' else ('like' if fts == '0' else '')
         return {'messages': messages, 'chats': chats, 'builtAt': int(meta.get('builtAt', 0)),
-                'account': str(meta.get('account') or '')}, messages
+                'account': str(meta.get('account') or ''), 'search': search}, messages
     except sqlite3.Error as exc:
         return {'error': str(exc)}, 0
 
@@ -1148,6 +1154,31 @@ def cmd_select(p, uin, keep=DEFAULT_KEEP_ACCOUNTS):
         release_lock(lock)
 
 
+def cmd_prune(p, keep=DEFAULT_KEEP_ACCOUNTS):
+    """Drop parked indexes beyond `keep` right after the setting was lowered.
+
+    The live `index.sqlite` is never touched. A running build holds the lock;
+    pruning then simply waits for the next sync instead of racing it.
+    """
+    q.ensure_workdir(p['work'])
+    keep = clamp_keep(keep)
+    try:
+        lock = acquire_lock(p)
+    except BadInput:
+        print(json.dumps({'keep': keep, 'skipped': 'busy', 'removed': []},
+                         ensure_ascii=False))
+        return
+    try:
+        removed = prune_cached(p, keep)
+    finally:
+        release_lock(lock)
+    print(json.dumps({
+        'keep': keep, 'skipped': '',
+        'removed': [{'account': item['account'], 'path': item['path'],
+                     'size': item['size']} for item in removed],
+    }, ensure_ascii=False))
+
+
 # --------------------------------------------------------------------------
 def main(argv=None):
     # stdout is a pipe on Windows (cp936 by default); chat text commonly holds
@@ -1182,6 +1213,10 @@ def main(argv=None):
     s.add_argument('--account', default=argparse.SUPPRESS,
                    help='账号；缺省用 --account 全局参数')
     s.add_argument('--keep', type=int, default=DEFAULT_KEEP_ACCOUNTS)
+    s = sub.add_parser('prune')
+    s.add_argument('--keep', type=int, default=DEFAULT_KEEP_ACCOUNTS,
+                   help='how many other accounts\' indexes to keep (0~%d)'
+                        % MAX_KEEP_ACCOUNTS)
 
     args = parser.parse_args(argv)
     p = paths(args.work)
@@ -1194,6 +1229,8 @@ def main(argv=None):
             cmd_build(p, root, args.account, args.refresh, clamp_keep(args.keep), args.search)
         elif args.cmd == 'select':
             cmd_select(p, args.account, args.keep)
+        elif args.cmd == 'prune':
+            cmd_prune(p, args.keep)
         elif args.cmd == 'status':
             cmd_status(p, root, args.account)
         elif args.cmd == 'sessions':
