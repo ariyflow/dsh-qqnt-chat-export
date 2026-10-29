@@ -23,6 +23,8 @@ const PAGE = path.join(HERE, 'page.html')
 const DEFAULT_PORT = 46728
 const DEFAULT_HOST = '127.0.0.1'
 const REQUEST_TIMEOUT_MS = 180_000
+/** One export may combine at most this many chats. */
+const MAX_BATCH_CHATS = 200
 const EXPORT_DIR_MAX_AGE_MS = 60 * 60 * 1000
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
 
@@ -276,6 +278,26 @@ function filtersFromBody(body) {
     if (typeof value === 'string' && value.trim() !== '') args[key] = value.trim()
   }
   return args
+}
+
+/** Batch selection from a request body; throws a 400-shaped error. */
+function chatsFromBody(value) {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value)) {
+    throw Object.assign(new Error('chats 必须是数组'), { status: 400 })
+  }
+  if (value.length > MAX_BATCH_CHATS) {
+    throw Object.assign(new Error(`一次最多导出 ${MAX_BATCH_CHATS} 个会话`), { status: 400 })
+  }
+  return value.map((item) => {
+    const kind = item?.kind
+    const id = String(item?.id ?? '').trim()
+    if (!['group', 'private'].includes(kind) || id === '') {
+      throw Object.assign(new Error('每个会话都需要 kind（group/private）和 id'), { status: 400 })
+    }
+    const label = typeof item?.label === 'string' ? item.label.slice(0, 120) : ''
+    return { kind, id, label }
+  })
 }
 
 function safeFileStem(text) {
@@ -676,13 +698,20 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       }
       readJsonBody(req)
         .then((body) => {
-          const format = String(body.format || 'txt').toLowerCase()
+          const innerFormat = String(body.format || 'txt').toLowerCase()
           const allowed = new Set(['txt', 'csv', 'json', 'md', 'html', 'sqlite'])
-          if (!allowed.has(format)) {
-            throw Object.assign(new Error(`unsupported format: ${format}`), { status: 400 })
+          if (!allowed.has(innerFormat)) {
+            throw Object.assign(new Error(`unsupported format: ${innerFormat}`), { status: 400 })
           }
-          const label = String(body.label || 'QQ聊天记录').slice(0, 120)
-          const queued = queue.enqueue(filtersFromBody(body), { label, format })
+          const chats = chatsFromBody(body.chats)
+          const media = body.media === true
+          const container = chats.length > 0 || media ? 'zip' : innerFormat
+          const label = String(body.label || (chats.length > 1
+            ? `批量导出 ${chats.length} 个会话` : 'QQ聊天记录')).slice(0, 120)
+          const args = filtersFromBody(body)
+          if (chats.length > 0) args.chats = chats
+          if (media) args.media = true
+          const queued = queue.enqueue(args, { label, format: container, innerFormat })
           if (!queued) {
             throw Object.assign(new Error(
               `最多同时 ${MAX_CONCURRENT} 个导出任务，等一个完成再试`), { status: 429 })

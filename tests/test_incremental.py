@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'scripts'))
@@ -255,6 +256,64 @@ class IncrementalBuildTests(unittest.TestCase):
             messages = json.load(f)['messages']
         self.assertEqual([item['text'] for item in messages],
                          ['第一条消息', '第二条消息'])
+
+    def test_batch_export_zip_has_manifest_and_one_file_per_chat(self):
+        self.run_cli('build')
+        out = os.path.join(self.work, 'exports', 'bundle.zip')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        result = self.run_cli('export', '--json', json.dumps({
+            'format': 'txt', 'out': out, 'label': '批量',
+            'chats': [{'kind': 'group', 'id': 'g1'},
+                      {'kind': 'private', 'id': 'f1'},
+                      {'kind': 'group', 'id': 'nope'}]}))
+        self.assertEqual(result['format'], 'zip')
+        self.assertEqual(result['chats'], 2)
+        self.assertEqual(result['skipped'], 1)
+        self.assertEqual(result['rows'], 3)
+        with zipfile.ZipFile(out) as archive:
+            names = archive.namelist()
+            self.assertEqual(names.count('manifest.json'), 1)
+            manifest = json.loads(archive.read('manifest.json'))
+            self.assertEqual(manifest['total'], 3)
+            self.assertEqual([chat['kind'] for chat in manifest['chats']],
+                             ['group', 'private'])
+            self.assertEqual(manifest['skipped'][0]['id'], 'nope')
+            self.assertFalse(manifest['media']['enabled'])
+            bodies = [name for name in names if name.endswith('.txt')]
+            self.assertEqual(len(bodies), 2)
+            joined = ''.join(archive.read(name).decode() for name in bodies)
+            self.assertIn('第一条消息', joined)
+            self.assertIn('私聊一条', joined)
+
+    def test_batch_export_requires_a_zip_target(self):
+        self.run_cli('build')
+        out = os.path.join(self.work, 'exports', 'bundle.txt')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        proc = subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
+             '--root', self.root, '--account', '12345', '--work', self.work,
+             'export', '--json', json.dumps({
+                 'format': 'txt', 'out': out,
+                 'chats': [{'kind': 'group', 'id': 'g1'}]})],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn('必须输出 .zip', json.loads(proc.stdout)['error'])
+
+    def test_batch_export_rejects_a_bad_chat_entry(self):
+        self.run_cli('build')
+        out = os.path.join(self.work, 'exports', 'bundle.zip')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        proc = subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
+             '--root', self.root, '--account', '12345', '--work', self.work,
+             'export', '--json', json.dumps({
+                 'format': 'txt', 'out': out,
+                 'chats': [{'kind': 'group'}]})],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn('会话参数不完整', json.loads(proc.stdout)['error'])
 
     def test_around_rejects_an_unknown_id(self):
         self.run_cli('build')

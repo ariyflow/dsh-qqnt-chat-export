@@ -135,8 +135,11 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
   /**
    * Queue one export. Returns `null` when every slot is busy; the HTTP layer
    * turns that into 429 instead of silently dropping the request.
+   *
+   * `format` is the file the user downloads (a bundle is always `zip`);
+   * `innerFormat` is what each chat file inside a bundle should be.
    */
-  function enqueue(args, { label = 'QQ聊天记录', format = 'txt' } = {}) {
+  function enqueue(args, { label = 'QQ聊天记录', format = 'txt', innerFormat } = {}) {
     if (running() >= concurrency) return null
     const id = `e${Date.now().toString(36)}${(counter += 1).toString(36)}`
     const out = path.join(exportsDir(), `${id}.${format}`)
@@ -154,7 +157,7 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
     }
     tasks.unshift(task)
     trim()
-    start(task, { ...args, format, out, label })
+    start(task, { ...args, format: innerFormat || format, out, label })
     return { ...task }
   }
 

@@ -31,9 +31,11 @@ import re
 import shutil
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
+import zipfile
 
 import qqnt_export as q
 
@@ -1350,28 +1352,20 @@ def exports_target(p, out):
     return out
 
 
-def cmd_export(p, args):
+def export_writer(conn, args, label):
+    """Rows and a `write(target)` for one export, so bundles reuse the writers."""
     fmt = str(args.get('format') or 'txt').lower()
-    if fmt not in ('txt', 'csv', 'json', 'md', 'html', 'sqlite'):
-        q.die('不支持的格式: %s' % fmt)
-    out = args.get('out')
-    if not out:
-        q.die('缺少输出路径')
-    out = exports_target(p, out)
-    label = str(args.get('label') or 'QQ聊天记录')
-    q.ensure_private_dir(os.path.dirname(out) or '.')
+    where, params = build_where(conn, args)
+    cur = conn.execute(
+        'SELECT m.msg_id, m.ts, m.sender_name, m.sender_qq, m.is_out, m.text, '
+        'm.seg_kinds, m.chat_kind, m.chat_id '
+        'FROM messages m' + where + ' ORDER BY m.ts ASC, m.msg_id ASC', params)
+    account = str(args.get('account') or '')
+    head = ('# %s\n# 账号 %s   导出时间 %s\n'
+            % (label, account, datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    state = {'rows': 0}
 
-    conn = open_index(p)
-    try:
-        where, params = build_where(conn, args)
-        cur = conn.execute(
-            'SELECT m.msg_id, m.ts, m.sender_name, m.sender_qq, m.is_out, m.text, '
-            'm.seg_kinds, m.chat_kind, m.chat_id '
-            'FROM messages m' + where + ' ORDER BY m.ts ASC, m.msg_id ASC', params)
-
-        head = ('# %s\n# 账号 %s   导出时间 %s\n'
-                % (label, args.get('account') or read_status(p).get('account', ''),
-                   datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    def write(out):
         count = 0
         if fmt == 'txt':
             with atomic_out(out) as tmp, open(tmp, 'w', encoding='utf-8', newline='\n') as f:
@@ -1466,13 +1460,149 @@ def cmd_export(p, args):
                     db.commit()
                 finally:
                     db.close()
-    finally:
-        conn.close()
+        state['rows'] = count
+        return count
 
+    return write, state
+
+
+def write_export_file(conn, args, out, label):
+    write, _state = export_writer(conn, args, label)
+    return write(out)
+
+
+def safe_stem(text, fallback='export'):
+    """A file-name-safe stem; Windows forbids more characters than POSIX."""
+    stem = re.sub(r'[\\/:*?"<>|\r\n\t\x00-\x1f]+', '_', str(text or '')).strip(' .')
+    return stem[:60] or fallback
+
+
+def chat_meta(conn, kind, chat_id):
+    row = conn.execute('SELECT name, qq FROM chats WHERE chat_kind=? AND chat_id=?',
+                       (kind, str(chat_id))).fetchone()
+    return (row[0] or '', row[1] or '') if row else ('', '')
+
+
+def write_zip(directory, target):
+    """Zip a finished bundle next to its target, then swap it in."""
+    tmp = target + '.part'
+    try:
+        with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+            for root, dirs, files in os.walk(directory):
+                dirs.sort()
+                for name in sorted(files):
+                    full = os.path.join(root, name)
+                    arc = os.path.relpath(full, directory).replace(os.sep, '/')
+                    archive.write(full, arc)
+        q.private_file(tmp)
+        os.replace(tmp, target)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def export_bundle(conn, args, out, label, chats):
+    """Many chats (or one chat plus media) in one zip with a manifest."""
+    fmt = args['format']
+    workdir = tempfile.mkdtemp(prefix='.bundle-', dir=os.path.dirname(out) or '.')
+    entries, skipped = [], []
+    total = 0
+    try:
+        for index, scope in enumerate(chats or [None], 1):
+            scope_args = dict(args)
+            if scope is None:
+                kind = str(args.get('chatKind') or '')
+                chat_id = str(args.get('chatId') or '')
+                name = label
+            else:
+                if not isinstance(scope, dict):
+                    raise BadInput('chats 的每一项都必须是 {kind, id}')
+                kind = str(scope.get('kind') or scope.get('chatKind') or '')
+                chat_id = str(scope.get('id') or scope.get('chatId') or '')
+                if kind not in (GROUP_KIND, PRIVATE_KIND) or not chat_id:
+                    raise BadInput('会话参数不完整: %r' % (scope,))
+                name, _qq = chat_meta(conn, kind, chat_id)
+                name = name or str(scope.get('label') or '') or chat_id
+                scope_args['chatKind'] = kind
+                scope_args['chatId'] = chat_id
+            entry = {'kind': kind, 'id': chat_id, 'name': name,
+                     'rows': 0, 'file': ''}
+            path = os.path.join(workdir, '%03d-%s.%s' % (index, safe_stem(name, 'chat'), fmt))
+            rows = write_export_file(conn, scope_args, path, name)
+            total += rows
+            entry['rows'] = rows
+            if rows:
+                entry['file'] = os.path.basename(path)
+                entries.append(entry)
+            else:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                skipped.append(entry)
+        manifest = {
+            'version': 1,
+            'generatedAt': fmt_time(time.time()),
+            'account': str(args.get('account') or ''),
+            'label': label,
+            'format': fmt,
+            'total': total,
+            'chats': entries,
+            'skipped': skipped,
+            'media': {'enabled': False},
+        }
+        with open(os.path.join(workdir, 'manifest.json'), 'w', encoding='utf-8') as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+            f.write('\n')
+        write_zip(workdir, out)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
     q.private_file(out)
     size = os.path.getsize(out) if os.path.exists(out) else 0
-    print(json.dumps({'path': out, 'format': fmt, 'rows': count, 'bytes': size,
-                      'label': label}, ensure_ascii=False))
+    return {'path': out, 'format': 'zip', 'rows': total, 'bytes': size,
+            'label': label, 'chats': len(entries), 'skipped': len(skipped)}
+
+
+MAX_BATCH_CHATS = 200
+
+
+def cmd_export(p, args):
+    fmt = str(args.get('format') or 'txt').lower()
+    if fmt not in ('txt', 'csv', 'json', 'md', 'html', 'sqlite'):
+        q.die('不支持的格式: %s' % fmt)
+    out = args.get('out')
+    if not out:
+        q.die('缺少输出路径')
+    out = exports_target(p, out)
+    label = str(args.get('label') or 'QQ聊天记录')
+    chats = args.get('chats') or []
+    if chats and not isinstance(chats, list):
+        raise BadInput('chats 必须是数组')
+    if len(chats) > MAX_BATCH_CHATS:
+        raise BadInput('一次最多导出 %d 个会话' % MAX_BATCH_CHATS)
+    zip_mode = bool(chats) or bool(args.get('media'))
+    if zip_mode and not out.lower().endswith('.zip'):
+        raise BadInput('批量或媒体导出必须输出 .zip')
+    q.ensure_private_dir(os.path.dirname(out) or '.')
+    args = dict(args, format=fmt,
+                account=str(args.get('account') or read_status(p).get('account', '')))
+
+    conn = open_index(p)
+    try:
+        if zip_mode:
+            payload = export_bundle(conn, args, out, label, chats)
+        else:
+            rows = write_export_file(conn, args, out, label)
+            q.private_file(out)
+            payload = {'path': out, 'format': fmt, 'rows': rows,
+                       'bytes': os.path.getsize(out) if os.path.exists(out) else 0,
+                       'label': label}
+    finally:
+        conn.close()
+    print(json.dumps(payload, ensure_ascii=False))
 
 
 def cmd_status(p, root=None, account=None):

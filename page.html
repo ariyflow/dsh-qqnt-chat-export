@@ -101,7 +101,12 @@
   .session:hover { background: var(--bg); }
   .session.active { background: var(--accent-soft); }
   .session:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-  .session .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session .name { font-weight: 600; display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .session .name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session .pick { flex: none; margin: 0; }
+  .batch { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
+  .batch button { font-size: 12px; padding: 3px 8px; }
+  .batch span { margin-right: 2px; }
   .session .sub { color: var(--muted); font-size: 12px; grid-column: 1 / -1; display: flex; gap: 8px; }
   .badge {
     font-size: 11px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line);
@@ -296,6 +301,11 @@
         <button class="tab" data-kind="group">群聊</button>
         <button class="tab" data-kind="private">私聊</button>
       </div>
+      <div class="batch hidden" id="batchBar">
+        <span id="batchCount">已选 0 个会话</span>
+        <button class="primary" type="button" id="batchExport">导出选中（ZIP）</button>
+        <button class="ghost" type="button" id="batchClear">清空</button>
+      </div>
     </div>
     <div class="sessions" id="sessions"></div>
   </aside>
@@ -477,6 +487,7 @@
   var PAGE = 60
   var state = {
     sessions: [],
+    selection: {},
     kind: 'all',
     sessionKind: '',
     chatId: '',
@@ -887,14 +898,27 @@
       row.tabIndex = 0
       row.setAttribute('role', 'button')
       row.setAttribute('aria-current', active ? 'true' : 'false')
+      var key = item.kind + ':' + item.id
+      var picked = Object.prototype.hasOwnProperty.call(state.selection, key)
       row.innerHTML =
-        '<div class="name">' + esc(item.name) + '</div>' +
+        '<div class="name"><input type="checkbox" class="pick"' + (picked ? ' checked' : '') +
+        ' aria-label="选择会话"><span>' + esc(item.name) + '</span></div>' +
         '<div class="count">' + num(item.messages) + '</div>' +
         '<div class="sub"><span class="badge ' + (item.kind === 'private' ? 'private' : '') + '">' +
         (item.kind === 'private' ? '私聊' : '群聊') + '</span><span>' +
         esc(item.kind === 'private' ? (item.qq || item.id) : ('群 ' + item.id)) + '</span><span>' +
         esc(item.lastTime || '') + '</span></div>' +
         '<button class="ghost search-this" type="button">在本会话中搜索</button>'
+      var pick = row.querySelector('.pick')
+      pick.onclick = function (event) { event.stopPropagation() }
+      pick.onchange = function () {
+        if (pick.checked) {
+          state.selection[key] = { kind: item.kind, id: item.id, label: item.name }
+        } else {
+          delete state.selection[key]
+        }
+        updateBatchBar()
+      }
       row.onclick = function () { pickSession(item) }
       var searchBtn = row.querySelector('.search-this')
       searchBtn.onclick = function (event) {
@@ -913,6 +937,19 @@
     if (!shown) {
       host.innerHTML = '<div class="empty">没有匹配的会话</div>'
     }
+    updateBatchBar()
+  }
+
+  /** The batch bar only appears while at least one chat is ticked. */
+  function updateBatchBar() {
+    var count = Object.keys(state.selection).length
+    $('batchBar').classList.toggle('hidden', count === 0)
+    if (count) $('batchCount').textContent = '已选 ' + count + ' 个会话'
+  }
+
+  function clearSelection() {
+    state.selection = {}
+    renderSessions()
   }
 
   function pickSession(item) {
@@ -1131,6 +1168,21 @@
       showTaskPanel()
       pollTasks()
       return result
+    }).catch(function (error) { toast(error.message) })
+  }
+
+  /** Export every ticked chat as one ZIP with a manifest. */
+  function downloadSelected() {
+    var chats = Object.keys(state.selection).map(function (key) { return state.selection[key] })
+    if (!chats.length) { toast('先勾选要导出的会话'); return }
+    var format = $('format').value
+    api('/api/export/queue', {
+      method: 'POST',
+      body: { chats: chats, format: format, label: '批量导出 ' + chats.length + ' 个会话' }
+    }).then(function () {
+      toast('已加入导出队列：' + chats.length + ' 个会话（ZIP）')
+      showTaskPanel()
+      pollTasks()
     }).catch(function (error) { toast(error.message) })
   }
 
@@ -1792,6 +1844,8 @@
     loadMessages(true)
   })
   $('download').addEventListener('click', download)
+  $('batchExport').addEventListener('click', downloadSelected)
+  $('batchClear').addEventListener('click', clearSelection)
   $('taskClose').addEventListener('click', function () {
     $('taskPanel').classList.add('hidden')
   })

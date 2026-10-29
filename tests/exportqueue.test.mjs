@@ -34,6 +34,16 @@ print(json.dumps({'error': '磁盘满了'}))
 sys.exit(1)`,
     hang: `import time
 time.sleep(30)`,
+    echo: `import json, os, sys
+args = sys.argv[1:]
+payload = json.loads(args[args.index('--json') + 1])
+os.makedirs(os.path.dirname(payload['out']), exist_ok=True)
+with open(payload['out'], 'wb') as f:
+    f.write(b'PK')
+with open(payload['out'] + '.args.json', 'w', encoding='utf-8') as f:
+    json.dump(payload, f)
+print(json.dumps({'path': payload['out'], 'format': payload['format'],
+                  'rows': 3, 'bytes': 2, 'label': payload.get('label', '')}))`,
     outside: `import json, sys
 args = sys.argv[1:]
 payload = json.loads(args[args.index('--json') + 1])
@@ -192,6 +202,71 @@ test('the HTTP route queues, reports and serves a finished export', {
 
     const missing = await fetch(`${base}/api/export/queue/nope/file`)
     assert.equal(missing.status, 404)
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the HTTP route bundles a batch selection as one zip', { skip: POSIX_ONLY }, async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  const python = await fakePython(dir, 'echo')
+  const { server, base } = await startServer({ python, workDir: work })
+  try {
+    const response = await fetch(`${base}/api/export/queue`, {
+      method: 'POST', headers: actionHeaders,
+      body: JSON.stringify({
+        chats: [{ kind: 'group', id: '1', label: '群 1' },
+                { kind: 'private', id: 'u_1' }],
+        format: 'csv', label: '批量',
+      }),
+    })
+    assert.equal(response.status, 202)
+    const { id, task } = await response.json()
+    assert.equal(task.format, 'zip', 'a bundle downloads as a zip')
+    assert.ok(task.path.endsWith('.zip'))
+
+    const finished = await waitFor(async () => {
+      const list = await (await fetch(`${base}/api/export/queue`)).json()
+      return list.tasks.find((row) => row.id === id && row.state === 'done')
+    })
+    assert.ok(finished)
+    const args = JSON.parse(await readFile(`${finished.path}.args.json`, 'utf8'))
+    assert.equal(args.format, 'csv', 'the inner files keep the chosen format')
+    assert.equal(args.chats.length, 2)
+    assert.equal(args.chats[1].kind, 'private')
+    assert.ok(args.out.endsWith('.zip'))
+
+    const download = await fetch(`${base}/api/export/queue/${id}/file`)
+    assert.equal(download.status, 200)
+    assert.match(download.headers.get('content-disposition'), /attachment/)
+    assert.equal(await download.text(), 'PK')
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the HTTP route refuses a malformed batch selection', { skip: POSIX_ONLY }, async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  const python = await fakePython(dir)
+  const { server, base } = await startServer({ python, workDir: work })
+  try {
+    let response = await fetch(`${base}/api/export/queue`, {
+      method: 'POST', headers: actionHeaders,
+      body: JSON.stringify({ chats: 'nope', format: 'txt' }),
+    })
+    assert.equal(response.status, 400)
+    response = await fetch(`${base}/api/export/queue`, {
+      method: 'POST', headers: actionHeaders,
+      body: JSON.stringify({ chats: [{ kind: 'group' }], format: 'txt' }),
+    })
+    assert.equal(response.status, 400)
+    assert.match((await response.json()).error, /kind/)
   } finally {
     await server.close()
     await rm(dir, { recursive: true, force: true })
