@@ -855,6 +855,41 @@ class IncrementalBuildTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn('没有序号', json.loads(proc.stdout)['error'])
 
+    def test_private_name_uses_the_friend_not_the_sender(self):
+        self.write_profile([('f1', '10001', '好友', ''),
+                            ('me', '12345', '我自己', '')])
+        self.add_blob('c2c_msg_table', 1, 1700000200, _message_blob('对方发的'),
+                      'f1', 'f1', 10001)
+        # The last message is outgoing (sender = own uid). Deriving the chat
+        # name from the sender used to store "我自己" on this conversation.
+        self.add_blob('c2c_msg_table', 2, 1700000300, _message_blob('我发的'),
+                      'f1', 'me', 12345)
+        self.publish()
+        self.run_cli('build')
+        sessions = self.run_cli('sessions')['sessions']
+        names = {row['id']: row['name'] for row in sessions if row['kind'] == 'private'}
+        self.assertEqual(names['f1'], '好友')
+        got = self.run_cli('messages', '--json',
+                           json.dumps({'chatKind': 'private', 'chatId': 'f1',
+                                       'order': 'desc'}))
+        self.assertEqual(got['rows'][0]['sender'], '我自己')
+
+        # An index written by the old code still carries the wrong name; the
+        # next incremental sync must repair it without a full rebuild.
+        import sqlite3
+        conn = sqlite3.connect(os.path.join(self.work, 'index.sqlite'))
+        conn.execute("UPDATE chats SET name='我自己' WHERE chat_kind='private' "
+                     "AND chat_id='f1'")
+        conn.commit()
+        conn.close()
+        self.add('group_msg_table', 3, 1700001000, '新消息', 'g1')
+        self.publish()
+        self.run_cli('build', '--refresh')
+        self.assertEqual(self.status()['mode'], 'incremental')
+        sessions = self.run_cli('sessions')['sessions']
+        names = {row['id']: row['name'] for row in sessions if row['kind'] == 'private'}
+        self.assertEqual(names['f1'], '好友')
+
     def test_old_index_version_asks_for_a_rebuild(self):
         self.run_cli('build')
         import sqlite3

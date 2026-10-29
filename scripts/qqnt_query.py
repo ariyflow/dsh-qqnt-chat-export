@@ -45,7 +45,7 @@ import qqnt_media as media_mod
 GROUP_KIND = 'group'
 PRIVATE_KIND = 'private'
 PAGE_LIMIT_MAX = 500
-INDEX_VERSION = '5'            # bump when the sidecar schema changes
+INDEX_VERSION = '6'            # bump when the sidecar schema changes
 STATUS_INTERVAL = 1.5          # seconds between progress writes
 BATCH = 2000
 LOCK_MAX_AGE = 15 * 60         # seconds before a stale build lock is taken over
@@ -932,11 +932,15 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
                         name = group_names.get(chat_id, '')
                         chat_qq = ''
                     else:
-                        friend_qq, friend_name, friend_remark = friends.get(
+                        # 发送者看消息 uid（发出的消息就是自己），会话名必须看
+                        # chat_id（对方 uid）。用发送者推导会把「自己」的昵称
+                        # 写到只发了消息、还没收到回复的私聊上。
+                        sender_qq, sender_name, sender_remark = friends.get(
                             uid, ('', '', ''))
-                        # Messages keep the nickname; the remark is a name
-                        # decoration for the conversation, not every row.
-                        sender = friend_name or friend_remark or qq_s or friend_qq or uid or '?'
+                        sender = (sender_name or sender_remark or qq_s
+                                  or sender_qq or uid or '?')
+                        friend_qq, friend_name, friend_remark = friends.get(
+                            chat_id, ('', '', ''))
                         name = private_display_name(friend_name, friend_remark)
                         chat_qq = friend_qq
                     if sender and sender != '?':
@@ -991,13 +995,28 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
             if kind == PRIVATE_KIND:
                 friend_qq, friend_name, friend_remark = friends.get(
                     chat_id, ('', '', ''))
-                name = (name or private_display_name(friend_name, friend_remark)
-                        or friend_qq or chat_id)
+                name = (private_display_name(friend_name, friend_remark)
+                        or name or friend_qq or chat_id)
                 chat_qq = friend_qq or chat_qq
             resolved[(kind, chat_id)] = (name, chat_qq)
         idx.executemany(
             'INSERT OR REPLACE INTO chats VALUES (?,?,?,?)',
             [(kind, chat_id, name, qq) for (kind, chat_id), (name, qq) in resolved.items()])
+        # 0.10.0 及更早版本用消息发送者推导私聊名，发出的消息会把「自己」的
+        # 昵称写到会话上；增量构建不会重读旧消息，这里按好友资料统一修正。
+        for (chat_id,) in idx.execute(
+                'SELECT chat_id FROM chats WHERE chat_kind=?',
+                (PRIVATE_KIND,)).fetchall():
+            friend = friends.get(str(chat_id))
+            if not friend:
+                continue
+            friend_qq, friend_name, friend_remark = friend
+            display = private_display_name(friend_name, friend_remark)
+            if not display:
+                continue
+            idx.execute(
+                'UPDATE chats SET name=?, qq=? WHERE chat_kind=? AND chat_id=?',
+                (display, friend_qq or '', PRIVATE_KIND, chat_id))
         if not plan:
             idx.execute('CREATE INDEX idx_chat_ts ON messages(chat_kind, chat_id, ts)')
             idx.execute('CREATE INDEX idx_ts ON messages(ts)')
