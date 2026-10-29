@@ -12,7 +12,14 @@ import path from 'node:path'
 
 export const DEFAULT_WEB_PORT = 46728
 export const DEFAULT_WEB_HOST = '127.0.0.1'
-export const SETTINGS_KEYS = ['pythonPath', 'workDir', 'tencentRoot', 'account', 'webPort']
+export const SETTINGS_KEYS = [
+  'pythonPath', 'workDir', 'tencentRoot', 'account', 'webPort',
+  'installer', 'uvPath', 'pythonVersion',
+]
+/** `auto` prefers uv when it is installed and falls back to venv + pip. */
+export const INSTALLERS = ['auto', 'uv', 'pip']
+/** Python version uv should fetch for the private environment. */
+export const DEFAULT_PYTHON_VERSION = '3.12'
 const APP_DIR = 'dsh-qqnt-chat-export'
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
 
@@ -93,9 +100,17 @@ export function resolveSettings(config, overrides = {}) {
   const host = str(raw.webHost) || DEFAULT_WEB_HOST
   const bindHost = host === '[::1]' ? '::1' : host
 
+  const installer = INSTALLERS.includes(str(raw.installer)) ? str(raw.installer) : 'auto'
+  const uvPathRaw = str(raw.uvPath)
+  const versionRaw = str(raw.pythonVersion)
+  const pythonVersion = /^3\.\d{1,2}$/.test(versionRaw) ? versionRaw : DEFAULT_PYTHON_VERSION
+
   return {
     python: resolvePython(pythonPath),
     pythonPath,
+    uv: uvPathRaw ? resolvePython(uvPathRaw) : 'uv',
+    installer,
+    pythonVersion,
     workDir: workDirRaw ? path.resolve(expandHome(workDirRaw)) : defaultWorkDir(),
     tencentRoot: tencentRootRaw ? path.resolve(expandHome(tencentRootRaw)) : '',
     account: str(raw.account),
@@ -166,12 +181,26 @@ export function validatePatch(patch) {
     }
   }
   const out = {}
-  for (const key of ['pythonPath', 'workDir', 'tencentRoot', 'account']) {
+  for (const key of ['pythonPath', 'workDir', 'tencentRoot', 'account', 'uvPath']) {
     if (!Object.prototype.hasOwnProperty.call(patch, key)) continue
     if (typeof patch[key] !== 'string') {
       throw Object.assign(new Error(`${key} 必须是字符串`), { status: 400 })
     }
     out[key] = patch[key].trim()
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'installer')) {
+    const value = String(patch.installer)
+    if (!INSTALLERS.includes(value)) {
+      throw Object.assign(new Error(`installer 只能是 ${INSTALLERS.join(' / ')}`), { status: 400 })
+    }
+    out.installer = value
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'pythonVersion')) {
+    const value = String(patch.pythonVersion).trim()
+    if (value !== '' && !/^3\.\d{1,2}$/.test(value)) {
+      throw Object.assign(new Error('Python 版本应形如 3.12'), { status: 400 })
+    }
+    out.pythonVersion = value
   }
   if (Object.prototype.hasOwnProperty.call(patch, 'webPort')) {
     const port = Number(patch.webPort)
@@ -194,6 +223,9 @@ export function publicSettings(settings, defaults, { url = '', file = settingsFi
       account: settings.account,
       webPort: settings.webPort,
       webHost: settings.webHost,
+      installer: settings.installer,
+      uv: settings.uv,
+      pythonVersion: settings.pythonVersion,
     },
     defaults: {
       pythonPath: defaults.pythonPath,
@@ -203,6 +235,9 @@ export function publicSettings(settings, defaults, { url = '', file = settingsFi
       account: defaults.account,
       webPort: defaults.webPort,
       webHost: defaults.webHost,
+      installer: defaults.installer,
+      uv: defaults.uv,
+      pythonVersion: defaults.pythonVersion,
     },
     file,
     url,

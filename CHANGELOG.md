@@ -1,5 +1,14 @@
 # 更新记录
 
+## 0.6.1
+
+- 一键配置优先使用 [uv](https://docs.astral.sh/uv/)：`uv venv --python 3.12` 会下载托管 Python，绕开「系统 Python 版本不对 / 没有 wheel / 缺少 python3-venv」的问题；`uv pip install` 通常几秒装完。uv 不会被自动下载，检测不到就走原来的 `venv + pip`。
+- 新增「设置 → 环境安装方式」：`auto`（默认，优先 uv、失败自动退回 pip）、`uv`（强制，缺少 uv 时给出安装地址）、`pip`（只用系统 Python）。设置页的运行参数行会显示 uv 版本。
+- 新增配置项 `uvPath`（uv 可执行文件路径，空 = PATH）和 `pythonVersion`（默认 `3.12`，uv 用它下载托管 Python）；`python/` 目录提供可手工复现的 `pyproject.toml` + `.python-version`，并说明为什么仓库里不提交 `uv.lock`（锁定文件会记录镜像 URL，国内/海外用户下载源不同）。
+- `npm pack` 现在会带上 `python/` 环境声明。
+- 新增设置校验用例（installer 枚举、Python 版本格式、未知值回退 auto），Node 用例增至 17 个。
+- 版本升到 0.6.1。
+
 ## 0.6.0
 
 - 关键词搜索改用 FTS5 trigram 索引。旁路库里多了 `message_fts`（contentless，只存索引不复制正文），三字以上的关键词变成索引查找，不再是 `LIKE '%词%'` 整表扫描；中文没有词边界也能匹配句子中间的一段。1~2 个字的查询、以及没编译 FTS5 的 SQLite/SQLCipher 会自动退回 `LIKE`，功能不受影响。

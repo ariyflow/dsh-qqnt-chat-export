@@ -29,6 +29,21 @@ test('settings defaults keep the UI on loopback', () => {
   assert.equal(settings.webHost, '127.0.0.1')
   assert.ok(settings.workDir.endsWith('qqnt-chat-export'))
   assert.equal(settings.python, process.platform === 'win32' ? 'python' : 'python3')
+  assert.equal(settings.installer, 'auto')
+  assert.equal(settings.uv, 'uv')
+  assert.equal(settings.pythonVersion, '3.12')
+})
+
+test('uv install settings validate like the other fields', () => {
+  assert.deepEqual(
+    validatePatch({ installer: 'uv', uvPath: ' /opt/uv ', pythonVersion: '3.13' }),
+    { installer: 'uv', uvPath: '/opt/uv', pythonVersion: '3.13' })
+  assert.deepEqual(validatePatch({ pythonVersion: '' }), { pythonVersion: '' })
+  assert.throws(() => validatePatch({ installer: 'conda' }), /installer/)
+  assert.throws(() => validatePatch({ pythonVersion: 'latest' }), /3\.12/)
+  assert.deepEqual(resolveSettings({}, { installer: 'pip' }).installer, 'pip')
+  // An unknown value from a hand-edited file falls back to auto.
+  assert.deepEqual(resolveSettings({}, { installer: 'nope' }).installer, 'auto')
 })
 
 test('a non-loopback webHost is forced back to loopback', () => {

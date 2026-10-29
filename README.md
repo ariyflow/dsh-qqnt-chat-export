@@ -32,7 +32,7 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
 - 「从 QQ 同步」复制最新数据库后**增量追新消息**；消息总数对不上（删除/回溯/换账号）时自动全量重建；
 - **启动提示**：网页打开后显示一次启动横幅，告知默认访问地址，并检查 Python / sqlcipher3 / 密钥；缺依赖时可一键创建独立虚拟环境并安装（默认源或清华镜像）；
 - **密钥提取**：启动横幅和设置页都有「提取密钥」按钮，网页内显示扫描进度、日志和结果；已配置时可重新提取；点击前后都会提示查找密钥耗时较长（通常 1~3 分钟），请耐心等待；
-- **设置**：端口、工作目录 / 索引位置、Python 解释器、QQ 数据根目录、QQ 号，以及 Python/sqlcipher3 体检；
+- **设置**：端口、工作目录 / 索引位置、环境安装方式（自动 / uv / pip）、Python 解释器、QQ 数据根目录、QQ 号，以及 Python/uv/sqlcipher3 体检；
 - **存储与清理**：分类列出插件生成的明文文件及大小，二次确认后删除，不碰 QQ 原始数据。
 
 ## 要求
@@ -43,6 +43,7 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
   - Linux 数据目录：`~/.config/QQ/nt_qq_<hash>\`
     （Flatpak 为 `~/.var/app/com.qq.QQ/config/QQ/`，Snap 为 `~/snap/qq/current/.config/QQ/`）
 - 64 位 Python 3；`sqlcipher3` **装在这个插件自己的虚拟环境里** 即可。网页启动横幅提供一键配置，不需要也不建议装进系统 Python。
+- 可选：[uv](https://docs.astral.sh/uv/)（推荐）。装了就自动优先用它——它自带 Python 下载，能绕开系统 Python 版本不对或缺少 `python3-venv` 的问题；没装则退回 `venv + pip`。插件**不会**替你下载 uv。
 
 > Windows 与 Linux 共用同一套导出/查询脚本：Windows 走 `ctypes` + `ReadProcessMemory`，
 > Linux 走 `/proc/<pid>/mem`；两边的默认数据目录、默认 Python 解释器和进程名分别适配，
@@ -54,6 +55,18 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
 
 - **默认源**：直接使用默认 PyPI；
 - **清华镜像**：使用 `https://pypi.tuna.tsinghua.edu.cn/simple`，适合国内网络。
+
+安装引擎由「设置 → 环境安装方式」决定：
+
+| 取值 | 行为 |
+|---|---|
+| `auto`（默认） | 装了就优先用 uv，没有或 uv 失败时自动退回 `venv + pip` |
+| `uv` | 只用 uv；检测不到 uv 直接报错并给出安装地址 |
+| `pip` | 只用系统 Python 的 `venv` + `pip` |
+
+走 uv 时命令是 `uv venv --python 3.12 <venv>` + `uv pip install --python <venv>/bin/python [--index-url <镜像>] sqlcipher3-wheels`。
+Python 版本由 `pythonVersion` 决定（默认 `3.12`，uv 会自动下载托管解释器），
+`python/` 目录里还提供了一份可手工复现的 `pyproject.toml` + `.python-version`。
 
 手动创建时也只装进虚拟环境：
 
@@ -140,7 +153,8 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
   - **默认源安装**：直接使用默认 PyPI；
   - **清华镜像安装**：使用 `https://pypi.tuna.tsinghua.edu.cn/simple`；
   - 两者都会在 `~/.local/share/dsh-qqnt-chat-export/venv`（Windows `%LOCALAPPDATA%\dsh-qqnt-chat-export\venv`）创建**独立虚拟环境**；
-  - 只在这个虚拟环境里执行 `pip install sqlcipher3-wheels`（镜像模式加 `--index-url`），**不修改系统 Python**；
+  - 优先用 uv（可下载托管 Python、安装通常几秒）；uv 不可用或失败时自动退回系统 Python 的 `venv + pip`；
+  - 只在这个虚拟环境里执行 `uv pip install` / `pip install sqlcipher3-wheels`（镜像模式加 `--index-url`），**不修改系统 Python**；
   - 完成后自动把设置里的 Python 解释器切过去并持久化；
   - 页面实时显示安装源、步骤、耗时和日志；已有可用虚拟环境时直接复用；一个源失败可以直接换另一个重试。
 - **密钥检查**：环境就绪且未配置时，启动横幅和设置页「数据库密钥」卡片都会显示「提取密钥」按钮：
@@ -182,6 +196,9 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 | `account` | 最大的库 | 多账号时指定 QQ 号；Linux 识别不出 QQ 号时也可以传数据目录的哈希 |
 | `webPort` | `46728` | 网页端口，`0` 关闭网页 |
 | `webHost` | `127.0.0.1` | 绑定地址；为保证只在本机可访问，设置页只允许回环地址 |
+| `installer` | `auto` | 环境安装引擎：`auto`（优先 uv）/ `uv` / `pip` |
+| `uvPath` | 空 | uv 可执行文件路径；留空从 `PATH` 查找，不会自动下载 uv |
+| `pythonVersion` | `3.12` | uv 创建环境时下载/使用的 Python 版本 |
 
 ## 怎么工作的
 
@@ -199,7 +216,7 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 - 设置文件只保存路径和端口，不含聊天内容或密钥；POSIX 上权限为 `0600`。设置页的写操作要求同源请求和自定义请求头，避免其他网页触发端口/目录修改或清理。
 - 导出目录和文件在 POSIX 上分别是 `0700` / `0600`，只允许写在 `workDir/exports` 内。CSV 里以 `=`、`+`、`-`、`@`、Tab、CR 开头的单元格会加前导单引号，避免 Excel / LibreOffice 把聊天内容当公式执行。 导出先写临时文件再原子改名，失败不会留下半截文件；Markdown 会转义 `|`、反斜杠和换行，HTML 会转义标签，SQLite 导出不会因群聊/私聊 `msg_id` 相同而丢消息。
 - `key.json` 记录密钥属于哪个 QQ 账号；切换账号后建立索引或导出会直接提示重新提取，不会拿旧账号的密钥去试新库。
-- 「默认源安装」/「清华镜像安装」会从 PyPI 或清华镜像下载 `sqlcipher3-wheels` 并安装到插件私有虚拟环境，需要网络；都不会修改系统 Python。镜像内容由清华镜像同步，若不可用可换默认源。
+- 「默认源安装」/「清华镜像安装」会从 PyPI 或清华镜像下载 `sqlcipher3-wheels` 并安装到插件私有虚拟环境，需要网络；都不会修改系统 Python。镜像内容由清华镜像同步，若不可用可换默认源。uv 同样只写入该虚拟环境；它下载的托管 Python 落在 uv 自己的缓存目录（默认 `~/.local/share/uv/python`，可用 `UV_PYTHON_INSTALL_DIR` 覆盖）。
 - 网页服务**只绑 `127.0.0.1`**，并拒绝非本机的 `Host` 和跨站 `POST`，但仍然建议只在本机使用。
 - 对所有 QQ 数据**只读**：不修改 Windows 的 `Documents\Tencent Files` 或 Linux 的 `~/.config/QQ` 下任何文件，不结束 QQ 进程。
 - 媒体文件**不复制**：`[图片]` `[视频]` `[语音]` `[文件]` 只是占位符，原文件仍在 `nt_qq\nt_data\`（Windows）或 `nt_qq_<hash>/nt_data/`（Linux）。
@@ -238,6 +255,7 @@ cordis.patch.yml      插件行与默认配置
 scripts/
   qqnt_export.py      密钥提取 / 解密 / Protobuf 解析 / 单群导出（Windows + Linux）
   qqnt_query.py       只读查询层：建索引、会话列表、分页查询、多格式导出
+python/              可手工复现的 Python 环境声明（pyproject.toml、.python-version）
 locale/               en / zh 显示元数据
 tests/                Python / Node 回归测试
 docs/screenshot.png   界面截图（虚构数据）

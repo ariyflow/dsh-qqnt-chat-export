@@ -60,6 +60,14 @@ jobs:
           python scripts/qqnt_export.py info
           python scripts/qqnt_query.py --work "${RUNNER_TEMP}/qqnt-smoke" status
 
+      # The hand-reproducible environment spec ships with the package.
+      - name: Python environment spec
+        run: |
+          test -f python/pyproject.toml
+          test -f python/.python-version
+          grep -q "sqlcipher3-wheels" python/pyproject.toml
+          node -e "const p=require('./package.json');if(!p.files.includes('python'))throw new Error('package.json files lacks python/')"
+
       - name: JSON manifests
         run: |
           node -e "for (const f of ['package.json','locale/en.json','locale/zh.json']) { JSON.parse(require('fs').readFileSync(f,'utf8')); } console.log('json ok')"

@@ -758,6 +758,7 @@ export function apply(ctx, config) {
   let keyJobAbort = null
   const setup = {
     state: 'idle', step: '', log: [], error: '', source: 'default',
+    engine: '', uv: '',
     startedAt: 0, finishedAt: 0, venv: '', python: '',
   }
   const keyJob = {
@@ -814,6 +815,7 @@ export function apply(ctx, config) {
       return {
         ...(await probePython(settings)),
         ...ptraceInfo(),
+        uv: await detectUv(),
         venv: { dir: defaultVenvDir(), python: venvPython() },
         key: storage.key,
         index: storage.index,
@@ -1001,6 +1003,26 @@ function isInsideDir(parent, child) {
    * One-click setup: create a private virtualenv and install sqlcipher3-wheels
    * into it. System Python is never modified, and the page shows the full log.
    */
+  /** Whether uv is installed. uv is never downloaded for the user. */
+  async function detectUv(signal) {
+    const command = settings.uv || 'uv'
+    try {
+      const probe = await runSetupCommand(command, ['--version'], { signal, timeoutMs: 20_000 })
+      const version = probe.code === 0 ? (probe.output.trim().split('\n').pop() || '') : ''
+      return { command, available: version !== '', version }
+    } catch {
+      return { command, available: false, version: '' }
+    }
+  }
+
+  /**
+   * One-click setup: create a private virtualenv and install sqlcipher3-wheels
+   * into it. System Python is never modified, and the page shows the full log.
+   *
+   * `uv` is preferred when installed: it can fetch a known-good Python (the
+   * system one may lack a wheel or the venv module) and installs in seconds.
+   * `pip` stays as the fallback, so a machine without uv still works.
+   */
   async function runSetup(source = 'default') {
     const indexUrl = SETUP_SOURCES[source] || ''
     const sourceLabel = indexUrl ? '清华镜像' : '默认源'
@@ -1009,7 +1031,7 @@ function isInsideDir(parent, child) {
     const venvDir = defaultVenvDir()
     const target = venvPython(venvDir)
     Object.assign(setup, {
-      state: 'running', step: '准备', log: [], error: '', source,
+      state: 'running', step: '准备', log: [], error: '', source, engine: '', uv: '',
       startedAt: Date.now(), finishedAt: 0, venv: venvDir, python: target,
     })
     try {
@@ -1021,32 +1043,89 @@ function isInsideDir(parent, child) {
       if (existsSync(target) && await hasSqlcipher(target, signal)) {
         setupLog('虚拟环境里已经有 sqlcipher3，直接切换')
       } else {
-        const base = await findBasePython(venvDir, signal)
-        setup.step = '创建虚拟环境'
-        setupLog(`使用 Python ${base.version}：${[base.command, ...base.args].join(' ').trim()}`)
-        if (existsSync(venvDir)) {
-          setupLog('删除不完整的旧虚拟环境')
-          rmSync(venvDir, { recursive: true, force: true })
+        const uv = await detectUv(signal)
+        setup.uv = uv.version
+        setupLog(settings.installer === 'auto'
+          ? `安装方式：自动（${uv.available ? '使用 uv' : '未找到 uv，使用 pip'}）`
+          : `安装方式：${settings.installer}`)
+        if (settings.installer === 'uv' && !uv.available) {
+          throw new Error('没有找到 uv。先安装 https://docs.astral.sh/uv/ ，'
+            + '或在设置里把「环境安装方式」改成 pip / 自动。')
         }
-        const create = await runSetupCommand(base.command, [
-          ...base.args, '-m', 'venv', venvDir,
-        ], { signal, timeoutMs: 120_000 })
-        appendSetupOutput(create.output)
-        if (create.code !== 0) {
-          if (signal.aborted) throw new Error('配置已取消')
-          throw new Error('创建虚拟环境失败。Debian/Ubuntu 可能需要先安装 python3-venv：sudo apt install python3-venv')
+        let useUv = uv.available && settings.installer !== 'pip'
+        if (useUv) {
+          setup.engine = 'uv'
+          setup.step = '创建虚拟环境（uv）'
+          setupLog(`使用 ${uv.version || 'uv'}，目标 Python ${settings.pythonVersion}`
+            + '（首次运行时 uv 会下载托管的 Python，可能较慢）')
+          if (existsSync(venvDir)) {
+            setupLog('删除不完整的旧虚拟环境')
+            rmSync(venvDir, { recursive: true, force: true })
+          }
+          const create = await runSetupCommand(uv.command, [
+            'venv', '--python', settings.pythonVersion, venvDir,
+          ], { signal, timeoutMs: 10 * 60_000 })
+          appendSetupOutput(create.output)
+          if (create.code !== 0) {
+            if (signal.aborted) throw new Error('配置已取消')
+            if (settings.installer === 'auto') {
+              setupLog('uv 创建虚拟环境失败，改用系统 Python + pip 重试')
+              useUv = false
+            } else {
+              throw new Error(`uv 创建虚拟环境失败（Python ${settings.pythonVersion}）。`
+                + '检查网络或代理，或在设置里把安装方式改回自动 / pip。')
+            }
+          } else {
+            setup.step = indexUrl ? '安装 sqlcipher3（uv，清华镜像）' : '安装 sqlcipher3（uv）'
+            setupLog('只安装到上面的虚拟环境，不修改系统 Python')
+            setupLog(`正在从${sourceLabel}下载并安装 sqlcipher3-wheels…`)
+            const uvArgs = ['pip', 'install', '--python', target]
+            if (indexUrl) uvArgs.push('--index-url', indexUrl)
+            uvArgs.push('sqlcipher3-wheels')
+            const install = await runSetupCommand(uv.command, uvArgs, { signal, timeoutMs: 15 * 60_000 })
+            appendSetupOutput(install.output)
+            if (install.code !== 0) {
+              if (signal.aborted) throw new Error('配置已取消')
+              if (settings.installer === 'auto') {
+                setupLog('uv 安装 sqlcipher3 失败，改用系统 Python + pip 重试')
+                useUv = false
+              } else {
+                throw new Error(`uv 安装 sqlcipher3-wheels 失败（${sourceLabel}）；`
+                  + '请检查网络或代理后重试，或换另一个安装源')
+              }
+            }
+          }
         }
-        setup.step = indexUrl ? '安装 sqlcipher3（清华镜像）' : '安装 sqlcipher3'
-        setupLog('只安装到上面的虚拟环境，不修改系统 Python')
-        setupLog(`正在从${sourceLabel}下载并安装 sqlcipher3-wheels（取决于网络，可能需要几分钟）…`)
-        const pipArgs = ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-input']
-        if (indexUrl) pipArgs.push('--index-url', indexUrl)
-        pipArgs.push('sqlcipher3-wheels')
-        const install = await runSetupCommand(target, pipArgs, { signal, timeoutMs: 15 * 60_000 })
-        appendSetupOutput(install.output)
-        if (install.code !== 0) {
-          if (signal.aborted) throw new Error('配置已取消')
-          throw new Error(`在虚拟环境里安装 sqlcipher3-wheels 失败（${sourceLabel}）；请检查网络或代理后重试，或换另一个安装源`)
+        if (!useUv) {
+          setup.engine = 'pip'
+          const base = await findBasePython(venvDir, signal)
+          setup.step = '创建虚拟环境'
+          setupLog(`使用 Python ${base.version}：${[base.command, ...base.args].join(' ').trim()}`)
+          if (existsSync(venvDir)) {
+            setupLog('删除不完整的旧虚拟环境')
+            rmSync(venvDir, { recursive: true, force: true })
+          }
+          const create = await runSetupCommand(base.command, [
+            ...base.args, '-m', 'venv', venvDir,
+          ], { signal, timeoutMs: 120_000 })
+          appendSetupOutput(create.output)
+          if (create.code !== 0) {
+            if (signal.aborted) throw new Error('配置已取消')
+            throw new Error('创建虚拟环境失败。Debian/Ubuntu 可能需要先安装 python3-venv：sudo apt install python3-venv，'
+              + '或安装 uv 让插件用它下载 Python。')
+          }
+          setup.step = indexUrl ? '安装 sqlcipher3（清华镜像）' : '安装 sqlcipher3'
+          setupLog('只安装到上面的虚拟环境，不修改系统 Python')
+          setupLog(`正在从${sourceLabel}下载并安装 sqlcipher3-wheels（取决于网络，可能需要几分钟）…`)
+          const pipArgs = ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-input']
+          if (indexUrl) pipArgs.push('--index-url', indexUrl)
+          pipArgs.push('sqlcipher3-wheels')
+          const install = await runSetupCommand(target, pipArgs, { signal, timeoutMs: 15 * 60_000 })
+          appendSetupOutput(install.output)
+          if (install.code !== 0) {
+            if (signal.aborted) throw new Error('配置已取消')
+            throw new Error(`在虚拟环境里安装 sqlcipher3-wheels 失败（${sourceLabel}）；请检查网络或代理后重试，或换另一个安装源`)
+          }
         }
       }
       setup.step = '验证'

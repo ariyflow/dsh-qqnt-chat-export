@@ -28,3 +28,11 @@
         webPort: 46728
         # Loopback only. Do not widen this: the page shows every chat.
         webHost: '127.0.0.1'
+        # Which installer the one-click environment setup uses:
+        # auto = uv when installed, otherwise venv + pip; uv = only uv;
+        # pip = only venv + pip. uv is never downloaded for the user.
+        installer: auto
+        # Path to the uv executable. Empty means "uv" on PATH.
+        uvPath: ''
+        # Python version uv fetches for the private environment.
+        pythonVersion: '3.12'
