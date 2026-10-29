@@ -45,6 +45,12 @@ def _message_blob(text):
     return _varint(40800 << 3 | 2) + _varint(len(segment)) + segment
 
 
+def _image_blob():
+    """Encode one image segment (45002 = 2), rendered as `[图片]`."""
+    segment = _varint(45002 << 3) + _varint(2)
+    return _varint(40800 << 3 | 2) + _varint(len(segment)) + segment
+
+
 @unittest.skipIf(sqlcipher is None, 'sqlcipher3-wheels is not installed')
 class IncrementalBuildTests(unittest.TestCase):
     def setUp(self):
@@ -71,7 +77,7 @@ class IncrementalBuildTests(unittest.TestCase):
         conn.close()
         self.add('group_msg_table', 1, 1700000000, '第一条消息')
         self.add('group_msg_table', 2, 1700000100, '第二条消息')
-        self.add('c2c_msg_table', 1, 1700000200, '私聊一条')
+        self.add('c2c_msg_table', 1, 1700000200, '私聊一条', 'f1')
         self.publish()
         with open(os.path.join(self.work, 'key.txt'), 'w', encoding='ascii') as f:
             f.write(KEY)
@@ -211,6 +217,92 @@ class IncrementalBuildTests(unittest.TestCase):
         self.run_cli('build', '--refresh')
         self.assertEqual(self.count('第三条'), 1)
         self.assertEqual(self.meta().get('fts'), '0')
+
+    # -- 检索体验 --------------------------------------------------------
+    def test_messages_around_returns_the_context(self):
+        self.run_cli('build')
+        rows = self.run_cli('messages', '--json', json.dumps(
+            {'chatKind': 'group', 'chatId': 'g1', 'order': 'asc', 'limit': 100}))['rows']
+        self.assertEqual([row['text'] for row in rows], ['第一条消息', '第二条消息'])
+        self.assertTrue(all('rowId' in row for row in rows))
+        self.assertEqual(rows[0]['chatName'], '')          # unnamed synthetic chat
+
+        anchor = rows[1]['rowId']
+        ctx = self.run_cli('messages', '--json',
+                           json.dumps({'around': anchor, 'limit': 3}))
+        self.assertEqual(ctx['anchor'], anchor)
+        self.assertEqual(ctx['chatId'], 'g1')
+        self.assertEqual([row['text'] for row in ctx['rows']], ['第一条消息', '第二条消息'])
+        self.assertEqual(ctx['total'], 2)
+        self.assertEqual(ctx['rows'][1]['rowId'], anchor)
+
+        # The first message has nothing before it.
+        head = self.run_cli('messages', '--json',
+                            json.dumps({'around': rows[0]['rowId'], 'limit': 5}))
+        self.assertEqual([row['text'] for row in head['rows']],
+                         ['第一条消息', '第二条消息'])
+        self.assertEqual(head['rows'][0]['rowId'], rows[0]['rowId'])
+
+    def test_exports_and_search_share_the_filter_columns(self):
+        self.run_cli('build')
+        out = os.path.join(self.work, 'exports', 'filtered.json')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        result = self.run_cli('export', '--json', json.dumps(
+            {'format': 'json', 'out': out, 'label': 'g1',
+             'chatKind': 'group', 'chatId': 'g1'}))
+        self.assertEqual(result['rows'], 2)
+        with open(out, encoding='utf-8') as f:
+            messages = json.load(f)['messages']
+        self.assertEqual([item['text'] for item in messages],
+                         ['第一条消息', '第二条消息'])
+
+    def test_around_rejects_an_unknown_id(self):
+        self.run_cli('build')
+        proc = subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
+             '--root', self.root, '--account', '12345', '--work', self.work,
+             'messages', '--json', json.dumps({'around': 999999})],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn('索引里没有', json.loads(proc.stdout)['error'])
+
+    def test_query_syntax_end_to_end(self):
+        self.run_cli('build')
+        # from: overrides the sender form field; every synthetic row is from 'u'.
+        got = self.run_cli('messages', '--json',
+                           json.dumps({'keyword': 'from:u 第一条', 'sender': 'nobody'}))
+        self.assertEqual(got['total'], 1)
+        # Exclusions use NOT LIKE and keep the rest of the query.
+        got = self.run_cli('messages', '--json', json.dumps({'keyword': '条消息 -第二'}))
+        self.assertEqual(got['total'], 1)
+        self.assertEqual(got['rows'][0]['text'], '第一条消息')
+        # in: resolves a unique chat id (the synthetic chats are unnamed).
+        got = self.run_cli('messages', '--json', json.dumps({'keyword': 'in:g1 第一条'}))
+        self.assertEqual(got['total'], 1)
+        # An unknown `in:` falls back to all chats and says so.
+        got = self.run_cli('messages', '--json', json.dumps({'keyword': 'in:nope 条消息'}))
+        self.assertEqual(got['total'], 2)
+        self.assertTrue(got['notes'])
+        # A date range from the search box is applied.
+        # All three synthetic messages fall on 2023-11-15 in local time.
+        got = self.run_cli('messages', '--json',
+                           json.dumps({'keyword': 'since:2023-11-15 until:2023-11-15'}))
+        self.assertEqual(got['total'], 3)
+
+    def test_has_filter_matches_media_segments(self):
+        conn = self._connect()
+        conn.execute('INSERT INTO group_msg_table VALUES (?,?,?,?,?,?,?,?,?)',
+                     (3, 1700002000, 'u', 0, 1, 1, '', _image_blob(), 'g1'))
+        conn.commit()
+        conn.close()
+        self.publish()
+        self.run_cli('build', '--refresh')
+        got = self.run_cli('messages', '--json', json.dumps({'keyword': 'has:image'}))
+        self.assertEqual(got['total'], 1)
+        self.assertEqual(got['rows'][0]['text'], '[图片]')
+        self.assertEqual(self.run_cli('messages', '--json',
+                                      json.dumps({'keyword': 'has:file'}))['total'], 0)
 
 
 if __name__ == '__main__':

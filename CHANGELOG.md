@@ -8,6 +8,9 @@
 - 页面：设置页新增「自动同步」开关与间隔；标题栏状态行显示「自动同步 60 分钟 · 上次同步 x 分钟前」，`walPending` 时追加提示；页面每 5 分钟刷新一次状态，发现新的自动同步就用 toast 提示「已自动同步 N 条新消息」并刷新会话列表。
 - 索引替换（`os.replace`）加 5 次 ×200ms 重试，Windows 上页面正在读索引时不会因为 EBUSY 直接失败；`build-status.json` / `sync-status.json` 的写入同样走重试。
 - 新增 `scripts/wal_spike.py`（手工诊断：只读源库、复制后回放、分别验证 main-only / +wal+shm / 截断 / 损坏四种情况）。
+- **检索体验**：`messages` 新增 `around=<索引 id>`，返回该消息前后各若干条与所在会话的总数（其它筛选条件会被忽略，因为上下文本来就不是命中）；每条结果新增 `rowId`、`chatKind/chatId`、`chatName`。网页跨会话搜索结果带「所在会话」和「在会话中查看」，点进去定位并高亮该消息。
+- **查询语法**：关键词框支持 `from:昵称/QQ`、`since:YYYY-MM-DD`、`until:...`、`in:群名/群号`、`has:image|file|voice|video`、`-排除词`，由纯函数 `parse_query()` 解析、`build_where()` 执行；非法日期、未知 `has:` 类型、带引号的短语都会退回普通关键词，不会静默放行全库查询。`qqnt_search` 工具同样生效。
+- 会话列表悬停可「在本会话中搜索」，查询范围在筛选栏用徽标显示并可一键退出；`in:` 只在唯一匹配时生效，不唯一时退回全部会话并在结果里提示。
 - 已知限制（写进 README 与 roadmap）：真实账号的 `msg_id` 不是全局单调的，同步的数量校验经常判定「有回溯」而退回全量重建（32 万条约 8 秒）；改进方向是每会话水位或时间窗回读。
 - 测试：Python 49 个（新增 5 个 autosync、3 个 copy-with-wal），Node 27 个（新增自动同步设置校验、`/api/status.sync`）。
 - 版本升到 0.8.0。

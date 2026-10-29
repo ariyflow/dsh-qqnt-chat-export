@@ -118,6 +118,21 @@
   .filters input[type=date] { width: 140px; }
   .filters label { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 4px; }
   .filters .spacer { flex: 1; }
+  .scope {
+    display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 8px;
+    border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent);
+    border-radius: 999px; font-size: 12px; max-width: 200px;
+  }
+  .scope span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .scope button { border: 0; background: transparent; color: inherit; padding: 0 4px; font-size: 14px; line-height: 1; }
+  .row.anchor { background: var(--accent-soft); }
+  .row .origin { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .row .origin button { font-size: 11px; padding: 0 6px; margin-left: 6px; }
+  .session .search-this {
+    font-size: 11px; padding: 0 6px; visibility: hidden; grid-column: 1 / -1;
+    justify-self: start; margin-top: 2px;
+  }
+  .session:hover .search-this, .session:focus-within .search-this { visibility: visible; }
   .summary { padding: 8px 16px; color: var(--muted); font-size: 13px; border-bottom: 1px solid var(--line); }
   .messages { overflow: auto; flex: 1; padding: 4px 0; }
   .row { display: grid; grid-template-columns: 132px 150px 1fr auto; gap: 12px; padding: 5px 16px; border-bottom: 1px solid transparent; }
@@ -260,7 +275,12 @@
 
   <section class="content">
     <form class="filters" id="filters">
-      <input id="keyword" placeholder="关键词" style="width:130px">
+      <input id="keyword" placeholder="关键词 / from: since: in: has: -排除" style="width:210px"
+             title="支持 from:昵称或QQ、since:YYYY-MM-DD、until:YYYY-MM-DD、in:群名或群号、has:image|file|voice|video，以及 -词 排除">
+      <span class="scope hidden" id="scopeHint" title="当前查询只在这个会话里">
+        <span id="scopeName"></span>
+        <button class="ghost" type="button" id="scopeClear" title="回到全部会话">×</button>
+      </span>
       <input id="sender" placeholder="发送者 / QQ" style="width:120px">
       <label>从 <input type="date" id="since"></label>
       <label>到 <input type="date" id="until"></label>
@@ -453,7 +473,8 @@
     setupPoll: 0,
     keyJob: null,
     keyPoll: 0,
-    lastSyncAt: 0
+    lastSyncAt: 0,
+    around: 0
   }
 
   var $ = function (id) { return document.getElementById(id) }
@@ -836,8 +857,15 @@
         '<div class="sub"><span class="badge ' + (item.kind === 'private' ? 'private' : '') + '">' +
         (item.kind === 'private' ? '私聊' : '群聊') + '</span><span>' +
         esc(item.kind === 'private' ? (item.qq || item.id) : ('群 ' + item.id)) + '</span><span>' +
-        esc(item.lastTime || '') + '</span></div>'
+        esc(item.lastTime || '') + '</span></div>' +
+        '<button class="ghost search-this" type="button">在本会话中搜索</button>'
       row.onclick = function () { pickSession(item) }
+      var searchBtn = row.querySelector('.search-this')
+      searchBtn.onclick = function (event) {
+        event.stopPropagation()
+        pickSession(item)
+        $('keyword').focus()
+      }
       row.addEventListener('keydown', function (event) {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault()
@@ -855,12 +883,41 @@
     state.sessionKind = item.kind
     state.chatId = item.id
     state.chatName = item.name
+    state.around = 0
     // 切换会话时清掉上一轮筛选，否则新会话会莫名其妙显示 0 条
     $('keyword').value = ''
     $('sender').value = ''
     $('since').value = ''
     $('until').value = ''
     renderSessions()
+    updateScope()
+    loadMessages(true)
+  }
+
+  /** Show which chat the query is limited to (and let the user leave it). */
+  function updateScope() {
+    var badge = $('scopeHint')
+    var active = !!state.chatId
+    badge.classList.toggle('hidden', !active)
+    if (active) {
+      $('scopeName').textContent = state.chatName || state.chatId
+      $('scopeHint').title = '当前查询只在这个会话里：' + (state.chatName || state.chatId)
+    }
+  }
+
+  /** Switch to the chat a cross-chat hit belongs to and load its context. */
+  function viewInContext(item) {
+    if (!item || !item.chatKind || !item.chatId) return
+    state.sessionKind = item.chatKind
+    state.chatId = item.chatId
+    state.chatName = item.chatName || item.chatId
+    state.around = item.rowId || 0
+    $('keyword').value = ''
+    $('sender').value = ''
+    $('since').value = ''
+    $('until').value = ''
+    renderSessions()
+    updateScope()
     loadMessages(true)
   }
 
@@ -899,7 +956,10 @@
       $('messages').innerHTML = ''
     }
     var filters = state.filters || currentFilters()
-    var query = queryString(filters, { offset: state.offset, limit: PAGE })
+    var around = reset ? state.around : 0
+    var query = queryString(filters, around
+      ? { around: around, limit: 40 }
+      : { offset: state.offset, limit: PAGE })
     // Requests may resolve out of order (fast chat switch, double "load more");
     // only the newest one may touch the list and the offset.
     var seq = ++state.reqSeq
@@ -917,10 +977,26 @@
         host.innerHTML = '<div class="empty">没有符合条件的消息</div>'
       }
       var fragment = document.createDocumentFragment()
-      rows.forEach(function (item) { fragment.appendChild(renderRow(item, filters.keyword || '')) })
+      var anchorRow = null
+      rows.forEach(function (item) {
+        var node = renderRow(item, filters.keyword || '', !around && !state.chatId)
+        if (around && item.rowId === around) anchorRow = node
+        fragment.appendChild(node)
+      })
       host.appendChild(fragment)
       state.offset += rows.length
       state.rows += rows.length
+      if (around) {
+        // Context view: no paging, and jump to the hit that started it.
+        if (anchorRow) {
+          anchorRow.classList.add('anchor')
+          anchorRow.scrollIntoView({ block: 'center' })
+        }
+        $('summary').textContent = '「' + (state.chatName || state.chatId) +
+          '」上下文 · 共 ' + num(state.total) + ' 条'
+        $('more').classList.add('hidden')
+        return
+      }
       var scope = state.chatId ? '「' + state.chatName + '」' : '全部会话'
       var filtered = ['keyword', 'sender', 'since', 'until'].some(function (key) {
         return filters[key] !== undefined && filters[key] !== ''
@@ -937,9 +1013,10 @@
     })
   }
 
-  function renderRow(item, keyword) {
+  function renderRow(item, keyword, crossChat) {
     var row = document.createElement('div')
     row.className = 'row'
+    row.setAttribute('data-row-id', item.rowId || '')
 
     var time = document.createElement('div')
     time.className = 'time'
@@ -965,6 +1042,21 @@
 
     var tools = document.createElement('div')
     tools.className = 'tools'
+    if (crossChat && item.chatId) {
+      // Every hit in a cross-chat search says where it came from, with a jump
+      // into that chat's context.
+      var origin = document.createElement('span')
+      origin.className = 'origin'
+      origin.textContent = (item.chatKind === 'private' ? '私聊 ' : '群 ') +
+        (item.chatName || item.chatId)
+      var jump = document.createElement('button')
+      jump.className = 'ghost'
+      jump.type = 'button'
+      jump.textContent = '在会话中查看'
+      jump.onclick = function () { viewInContext(item) }
+      origin.appendChild(jump)
+      msg.appendChild(origin)
+    }
     if (raw.length > 500 || raw.split('\n').length > 10) {
       msg.classList.add('clamped')
       var toggle = document.createElement('button')
@@ -1588,6 +1680,7 @@
   // ---------------------------------------------------------------- 事件
   $('filters').addEventListener('submit', function (event) {
     event.preventDefault()
+    state.around = 0
     var since = $('since').value
     var until = $('until').value
     if (since && until && since > until) {
@@ -1601,6 +1694,16 @@
     $('sender').value = ''
     $('since').value = ''
     $('until').value = ''
+    state.around = 0
+    loadMessages(true)
+  })
+  $('scopeClear').addEventListener('click', function () {
+    state.chatId = ''
+    state.chatName = ''
+    state.sessionKind = ''
+    state.around = 0
+    renderSessions()
+    updateScope()
     loadMessages(true)
   })
   $('download').addEventListener('click', download)
@@ -1660,6 +1763,7 @@
     if (!$('settings').classList.contains('hidden')) closeSettings()
   })
 
+  updateScope()
   refreshStatus(false)
   startStatusPoll()
   // `/api/status` spawns the Python helper; show the address/setup prompt even

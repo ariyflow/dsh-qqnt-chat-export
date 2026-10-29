@@ -411,6 +411,45 @@ test('status exposes the automatic sync setting and its last run', {
   }
 })
 
+test('messages around and query syntax reach the helper verbatim', {
+  skip: process.platform === 'win32' ? 'needs a POSIX shell wrapper' : false,
+}, async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  const calls = path.join(dir, 'calls')
+  const wrapper = path.join(dir, 'py')
+  // Answer with one row so the route returns 200; record the argv it got.
+  await writeFile(wrapper,
+    '#!/bin/sh\necho "$@" >> "' + calls + '"\necho \'{"total":1,"offset":0,"limit":40,"rows":[]}\'\n',
+    { mode: 0o755 })
+  const { server, base } = await startServer({ python: wrapper, workDir: work }, {})
+  const lastCall = async () => {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      try {
+        const lines = (await readFile(calls, 'utf8')).trim().split('\n').filter(Boolean)
+        if (lines.length) return lines[lines.length - 1]
+      } catch {
+        // Not written yet.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    return ''
+  }
+  try {
+    const response = await fetch(
+      `${base}/api/messages?around=42&keyword=${encodeURIComponent('from:张三 -红包')}`)
+    assert.equal(response.status, 200)
+    const call = await lastCall()
+    assert.match(call, /messages --json/)
+    assert.match(call, /"around":"42"/)
+    assert.match(call, /from:张三/)
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('the served page contains the startup checklist and key action', async () => {
   const dir = await tempDir()
   const { server, base } = await startServer({ python: process.execPath, workDir: dir }, {})

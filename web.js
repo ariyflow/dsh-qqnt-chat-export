@@ -645,6 +645,10 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
         offset: readInt(params.get('offset'), 0),
         limit: Math.min(Math.max(readInt(params.get('limit'), 50), 1), 500),
       }
+      // "View in chat": the helper resolves the anchor and returns its context,
+      // ignoring the paging and the other filters.
+      const around = params.get('around')
+      if (around) args.around = around
       runJson(settings, 'messages', args)
         .then((payload) => sendJson(res, 200, payload))
         .catch((error) => sendJson(res, error.status ?? 409, { error: error.message }))

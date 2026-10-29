@@ -999,7 +999,113 @@ def parse_day(value, end):
     return int(day.timestamp())
 
 
+# `has:` maps a word to the segment type stored in `seg_kinds` (45002).
+HAS_KINDS = {'image': '2', 'file': '3', 'voice': '4', 'video': '5'}
+_QUERY_PREFIX = re.compile(r'^(from|since|until|in|has):(.*)$', re.IGNORECASE)
+
+
+def _tokenize_query(text):
+    """Split on spaces, keeping `"double quoted"` phrases as one literal token."""
+    tokens, buf, quoted, in_quote = [], [], False, False
+    for char in str(text or ''):
+        if char == '"':
+            in_quote = not in_quote
+            quoted = True
+            continue
+        if char.isspace() and not in_quote:
+            if buf:
+                tokens.append((''.join(buf), quoted))
+            buf, quoted = [], False
+            continue
+        buf.append(char)
+    if buf:
+        tokens.append((''.join(buf), quoted))
+    return tokens
+
+
+def parse_query(text):
+    """Split the search box into the filters `build_where` understands.
+
+    `from:`/`since:`/`until:`/`in:`/`has:` override the matching form field, a
+    leading `-` excludes a word, and everything else is the keyword. Anything
+    that does not parse (a bad date, an unknown `has:` type, a quoted phrase)
+    stays a keyword, so a typo never silently returns the whole database.
+    """
+    out = {'keyword': '', 'sender': '', 'since': '', 'until': '', 'chat': '',
+           'has': [], 'exclude': []}
+    words = []
+    for token, quoted in _tokenize_query(text):
+        if quoted:
+            words.append(token)
+            continue
+        if len(token) > 1 and token.startswith('-'):
+            out['exclude'].append(token[1:])
+            continue
+        match = _QUERY_PREFIX.match(token)
+        if not match:
+            words.append(token)
+            continue
+        key, value = match.group(1).lower(), match.group(2).strip()
+        if not value:
+            words.append(token)
+        elif key == 'from':
+            out['sender'] = value
+        elif key in ('since', 'until'):
+            try:
+                parse_day(value, end=False)
+            except BadInput:
+                words.append(token)
+            else:
+                out[key] = value
+        elif key == 'in':
+            out['chat'] = value
+        else:                              # has:
+            kind = HAS_KINDS.get(value.lower())
+            if kind:
+                out['has'].append(kind)
+            else:
+                words.append(token)
+    out['keyword'] = ' '.join(words)
+    return out
+
+
+def resolve_chat(conn, text):
+    """`in:<群名/群号>` -> (chat_kind, chat_id) for a single unambiguous match."""
+    value = str(text or '').strip()
+    if not value:
+        return None
+    # An id-shaped value must resolve by id only: falling back to the name
+    # column could silently pick a different chat (a group and a private chat
+    # can share the same id text in a synthetic or unusual database).
+    rows = conn.execute('SELECT chat_kind, chat_id FROM chats WHERE chat_id=?',
+                        (value,)).fetchall()
+    if rows:
+        return rows[0] if len(rows) == 1 else None
+    rows = conn.execute("SELECT chat_kind, chat_id FROM chats "
+                        "WHERE name LIKE ? ESCAPE '\\'",
+                        ('%' + like_escape(value) + '%',)).fetchall()
+    return rows[0] if len(rows) == 1 else None
+
+
+def merge_query_args(args):
+    """Apply the search-box syntax on top of the form fields (syntax wins)."""
+    parsed = parse_query(args.get('keyword') or '')
+    out = dict(args)
+    out['keyword'] = parsed['keyword']
+    if parsed['sender']:
+        out['sender'] = parsed['sender']
+    if parsed['since']:
+        out['since'] = parsed['since']
+    if parsed['until']:
+        out['until'] = parsed['until']
+    out['exclude'] = parsed['exclude']
+    out['has'] = parsed['has']
+    out['in'] = parsed['chat']
+    return out
+
+
 def build_where(conn, args):
+    """WHERE clause over the `messages m` alias (callers join `chats` as needed)."""
     clauses, params = [], []
     kind = args.get('chatKind')
     chat = args.get('chatId')
@@ -1008,29 +1114,36 @@ def build_where(conn, args):
         raise BadInput('chatKind 必须是 %r 或 %r，收到 %r'
                        % (GROUP_KIND, PRIVATE_KIND, kind))
     if kind in (GROUP_KIND, PRIVATE_KIND) and chat:
-        clauses.append('chat_kind=? AND chat_id=?')
+        clauses.append('m.chat_kind=? AND m.chat_id=?')
         params += [kind, str(chat)]
     keyword = (args.get('keyword') or '').strip()
     if keyword:
         if len(keyword) >= MIN_FTS_CHARS and has_fts(conn):
-            clauses.append('rowid IN (SELECT rowid FROM message_fts '
+            clauses.append('m.rowid IN (SELECT rowid FROM message_fts '
                            'WHERE message_fts MATCH ?)')
             params.append(fts_phrase(keyword))
         else:
-            clauses.append("text LIKE ? ESCAPE '\\'")
+            clauses.append("m.text LIKE ? ESCAPE '\\'")
             params.append('%' + like_escape(keyword) + '%')
     sender = (args.get('sender') or '').strip()
     if sender:
-        clauses.append("(sender_name LIKE ? ESCAPE '\\' OR sender_qq = ?)")
+        clauses.append("(m.sender_name LIKE ? ESCAPE '\\' OR m.sender_qq = ?)")
         params += ['%' + like_escape(sender) + '%', sender]
     since = parse_day(args.get('since'), end=False)
     if since is not None:
-        clauses.append('ts >= ?')
+        clauses.append('m.ts >= ?')
         params.append(since)
     until = parse_day(args.get('until'), end=True)
     if until is not None:
-        clauses.append('ts <= ?')
+        clauses.append('m.ts <= ?')
         params.append(until)
+    for term in args.get('exclude') or []:
+        clauses.append("m.text NOT LIKE ? ESCAPE '\\'")
+        params.append('%' + like_escape(term) + '%')
+    for kind_code in args.get('has') or []:
+        # seg_kinds is a comma-joined list ("1,2"), so match the whole entry.
+        clauses.append("(',' || m.seg_kinds || ',') LIKE ?")
+        params.append('%%,%s,%%' % kind_code)
     if not clauses:
         return '', []
     return ' WHERE ' + ' AND '.join(clauses), params
@@ -1051,6 +1164,35 @@ def row_json(row):
         item['chatKind'] = row[7] or ''
         item['chatId'] = str(row[8] or '')
     return item
+
+
+# Columns every message query returns: the internal row id (for `around`),
+# the QQ message id, and the chat the row belongs to.
+MSG_COLUMNS = ('m.id, m.msg_id, m.ts, m.sender_name, m.sender_qq, m.is_out, '
+               'm.text, m.seg_kinds, m.chat_kind, m.chat_id, c.name')
+MSG_FROM = (' FROM messages m LEFT JOIN chats c '
+            'ON c.chat_kind = m.chat_kind AND c.chat_id = m.chat_id')
+
+
+def message_json(row):
+    (row_id, msg_id, ts, sender, qq, is_out, text, kinds,
+     kind, chat, name) = row
+    return {
+        'rowId': int(row_id), 'id': str(msg_id), 'ts': q.as_seconds(ts),
+        'time': fmt_time(ts), 'sender': sender or '', 'qq': qq or '',
+        'out': bool(is_out), 'text': text or '', 'kinds': kinds or '',
+        'chatKind': kind or '', 'chatId': str(chat or ''),
+        'chatName': (name or '').strip(),
+    }
+
+
+def page_args(args, default=50):
+    try:
+        limit = min(max(int(args.get('limit')), 1), PAGE_LIMIT_MAX) if args.get('limit') else default
+        offset = max(int(args.get('offset') or 0), 0)
+    except (TypeError, ValueError):
+        raise BadInput('limit / offset 必须是整数')
+    return limit, offset
 
 
 def cmd_sessions(p):
@@ -1077,25 +1219,83 @@ def cmd_sessions(p):
     print(json.dumps({'sessions': sessions}, ensure_ascii=False))
 
 
-def cmd_messages(p, args):
-    conn = open_index(p)
+def messages_page(conn, args):
+    """One page of matches, newest first unless `order=asc`."""
     where, params = build_where(conn, args)
-    total = conn.execute('SELECT count(*) FROM messages' + where, params).fetchone()[0]
-    limit = args.get('limit')
-    try:
-        limit = min(max(int(limit), 1), PAGE_LIMIT_MAX) if limit else 50
-        offset = max(int(args.get('offset') or 0), 0)
-    except (TypeError, ValueError):
-        raise BadInput('limit / offset 必须是整数')
+    total = conn.execute('SELECT count(*) FROM messages m' + ' ' + where, params).fetchone()[0]
+    limit, offset = page_args(args)
     order = 'ASC' if str(args.get('order', '')).lower() == 'asc' else 'DESC'
     rows = conn.execute(
-        'SELECT msg_id, ts, sender_name, sender_qq, is_out, text, seg_kinds, '
-        'chat_kind, chat_id '
-        'FROM messages' + where + ' ORDER BY ts %s, msg_id %s LIMIT ? OFFSET ?' % (order, order),
+        'SELECT %s%s%s ORDER BY m.ts %s, m.msg_id %s LIMIT ? OFFSET ?'
+        % (MSG_COLUMNS, MSG_FROM, where, order, order),
         params + [limit, offset]).fetchall()
-    conn.close()
-    print(json.dumps({'total': total, 'offset': offset, 'limit': limit,
-                      'rows': [row_json(r) for r in rows]}, ensure_ascii=False))
+    return {'total': total, 'offset': offset, 'limit': limit,
+            'rows': [message_json(r) for r in rows]}
+
+
+def messages_around(conn, args, around):
+    """The anchor message plus its neighbours inside the same chat.
+
+    Used by "在会话中查看": the page searches across chats, then jumps to one hit
+    with enough context to read the conversation. Other filters are ignored on
+    purpose - the neighbours of a hit are not hits themselves.
+    """
+    try:
+        anchor = int(around)
+    except (TypeError, ValueError):
+        raise BadInput('around 必须是消息的索引 id')
+    limit, _ = page_args(args, default=40)
+    row = conn.execute('SELECT chat_kind, chat_id, ts FROM messages WHERE id=?',
+                       (anchor,)).fetchone()
+    if row is None:
+        raise BadInput('索引里没有 id=%s 的消息（索引可能已重建，重新搜索即可）' % anchor)
+    kind, chat, ts = row
+    half = max(1, (limit - 1) // 2)
+    after_count = max(1, limit - 1 - half)
+    before = conn.execute(
+        'SELECT %s%s WHERE m.chat_kind=? AND m.chat_id=? '
+        'AND (m.ts < ? OR (m.ts = ? AND m.id < ?)) '
+        'ORDER BY m.ts DESC, m.id DESC LIMIT ?'
+        % (MSG_COLUMNS, MSG_FROM),
+        (kind, str(chat), ts, ts, anchor, half)).fetchall()
+    anchor_row = conn.execute(
+        'SELECT %s%s WHERE m.id=?' % (MSG_COLUMNS, MSG_FROM), (anchor,)).fetchone()
+    after = conn.execute(
+        'SELECT %s%s WHERE m.chat_kind=? AND m.chat_id=? '
+        'AND (m.ts > ? OR (m.ts = ? AND m.id > ?)) '
+        'ORDER BY m.ts ASC, m.id ASC LIMIT ?'
+        % (MSG_COLUMNS, MSG_FROM),
+        (kind, str(chat), ts, ts, anchor, after_count)).fetchall()
+    rows = list(reversed(before)) + [anchor_row] + list(after)
+    total = conn.execute('SELECT count(*) FROM messages WHERE chat_kind=? AND chat_id=?',
+                         (kind, str(chat))).fetchone()[0]
+    return {'total': total, 'anchor': anchor, 'chatKind': kind,
+            'chatId': str(chat), 'offset': 0, 'limit': limit,
+            'rows': [message_json(r) for r in rows]}
+
+
+def cmd_messages(p, args):
+    conn = open_index(p)
+    try:
+        args = merge_query_args(args)
+        notes = []
+        wanted = args.get('in') or ''
+        if wanted:
+            chat = resolve_chat(conn, wanted)
+            if chat:
+                args['chatKind'], args['chatId'] = chat
+            else:
+                notes.append('没有唯一匹配的会话「%s」，已按全部会话查询' % wanted)
+        around = args.get('around')
+        if around not in (None, ''):
+            payload = messages_around(conn, args, around)
+        else:
+            payload = messages_page(conn, args)
+    finally:
+        conn.close()
+    if notes:
+        payload['notes'] = notes
+    print(json.dumps(payload, ensure_ascii=False))
 
 
 # --------------------------------------------------------------------------
@@ -1165,9 +1365,9 @@ def cmd_export(p, args):
     try:
         where, params = build_where(conn, args)
         cur = conn.execute(
-            'SELECT msg_id, ts, sender_name, sender_qq, is_out, text, seg_kinds, '
-            'chat_kind, chat_id '
-            'FROM messages' + where + ' ORDER BY ts ASC, msg_id ASC', params)
+            'SELECT m.msg_id, m.ts, m.sender_name, m.sender_qq, m.is_out, m.text, '
+            'm.seg_kinds, m.chat_kind, m.chat_id '
+            'FROM messages m' + where + ' ORDER BY m.ts ASC, m.msg_id ASC', params)
 
         head = ('# %s\n# 账号 %s   导出时间 %s\n'
                 % (label, args.get('account') or read_status(p).get('account', ''),

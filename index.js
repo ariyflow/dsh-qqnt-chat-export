@@ -421,7 +421,7 @@ export function listChatsTool(settings) {
 export function searchTool(settings) {
   return {
     name: 'qqnt_search',
-    description: 'Search local QQ messages by keyword (substring match, Chinese included), optionally restricted to one chat, one sender, or a date range. Returns matching rows with their chat, sender, and time. Requires the sidecar index.',
+    description: 'Search local QQ messages by keyword (substring match, Chinese included), optionally restricted to one chat, one sender, or a date range. The keyword also accepts inline filters: from:name|QQ, since:YYYY-MM-DD, until:YYYY-MM-DD, in:group name or number, has:image|file|voice|video, and -word to exclude. Returns matching rows with their chat, sender, and time. Requires the sidecar index.',
     parameters: {
       type: 'object',
       additionalProperties: false,

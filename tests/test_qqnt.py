@@ -200,6 +200,70 @@ class IndexCountTests(unittest.TestCase):
         self.assertEqual(qq.index_counts('/nonexistent/index.sqlite'), ({}, 0))
 
 
+class QuerySyntaxTests(unittest.TestCase):
+    """The `from:/since:/until:/in:/has:/-` syntax parsed from the search box."""
+
+    def test_plain_keyword(self):
+        parsed = qq.parse_query('转账')
+        self.assertEqual(parsed['keyword'], '转账')
+        self.assertEqual(qq.parse_query('   ')['keyword'], '')
+
+    def test_from_sets_the_sender(self):
+        parsed = qq.parse_query('from:张三 转账')
+        self.assertEqual(parsed['sender'], '张三')
+        self.assertEqual(parsed['keyword'], '转账')
+        self.assertEqual(qq.parse_query('from:123456')['sender'], '123456')
+
+    def test_dates_override_the_range(self):
+        parsed = qq.parse_query('since:2024-01-01 until:2024-02-01 报表')
+        self.assertEqual((parsed['since'], parsed['until']), ('2024-01-01', '2024-02-01'))
+        self.assertEqual(parsed['keyword'], '报表')
+        # A malformed date stays a keyword instead of silently matching all.
+        parsed = qq.parse_query('since:15/11/2023 x')
+        self.assertEqual(parsed['since'], '')
+        self.assertIn('since:15/11/2023', parsed['keyword'])
+
+    def test_in_and_has(self):
+        self.assertEqual(qq.parse_query('in:家族群 报表')['chat'], '家族群')
+        self.assertEqual(qq.parse_query('has:image')['has'], ['2'])
+        self.assertEqual(qq.parse_query('has:file 报告')['has'], ['3'])
+        self.assertEqual(qq.parse_query('has:voice')['has'], ['4'])
+        self.assertEqual(qq.parse_query('has:video')['has'], ['5'])
+        # Unknown types are not filters; they are just searchable text.
+        parsed = qq.parse_query('has:bogus 词')
+        self.assertEqual(parsed['has'], [])
+        self.assertIn('has:bogus', parsed['keyword'])
+
+    def test_exclusions_and_quotes(self):
+        parsed = qq.parse_query('-红包 转账')
+        self.assertEqual(parsed['exclude'], ['红包'])
+        self.assertEqual(parsed['keyword'], '转账')
+        # A quoted phrase is literal even when it looks like a filter.
+        parsed = qq.parse_query('"from:x" 引号')
+        self.assertEqual(parsed['sender'], '')
+        self.assertEqual(parsed['keyword'], 'from:x 引号')
+
+    def test_merge_lets_the_syntax_win(self):
+        merged = qq.merge_query_args({
+            'keyword': 'from:张三 has:image', 'sender': '李四', 'since': '2024-01-01',
+        })
+        self.assertEqual(merged['sender'], '张三')
+        self.assertEqual(merged['has'], ['2'])
+        self.assertEqual(merged['keyword'], '')
+        self.assertEqual(merged['since'], '2024-01-01')
+
+    def test_where_clause_for_exclusions_and_types(self):
+        conn = sqlite3.connect(':memory:')
+        try:
+            conn.executescript(qq.SCHEMA)
+            where, params = qq.build_where(conn, {'exclude': ['红包'], 'has': ['2']})
+            self.assertIn('m.text NOT LIKE ?', where)
+            self.assertIn("',' || m.seg_kinds || ','", where)
+            self.assertEqual(params, ['%红包%', '%,2,%'])
+        finally:
+            conn.close()
+
+
 class FilterTests(unittest.TestCase):
     def test_like_escape(self):
         self.assertEqual(qq.like_escape(r'a%b_c\d'), r'a\%b\_c\\d')
@@ -210,8 +274,8 @@ class FilterTests(unittest.TestCase):
             conn.executescript(qq.SCHEMA)
             where, params = qq.build_where(
                 conn, {'keyword': "100%_x", 'chatKind': 'group', 'chatId': '1'})
-            self.assertIn('chat_kind=? AND chat_id=?', where)
-            self.assertIn("text LIKE ? ESCAPE '\\'", where)
+            self.assertIn('m.chat_kind=? AND m.chat_id=?', where)
+            self.assertIn("m.text LIKE ? ESCAPE '\\'", where)
             self.assertEqual(params[:2], ['group', '1'])
             self.assertEqual(params[2], '%100\\%\\_x%')
         finally:
@@ -227,7 +291,7 @@ class FilterTests(unittest.TestCase):
             self.assertEqual(params, ['"聊天记录"'])
             # A trigram cannot answer one or two characters.
             where, params = qq.build_where(conn, {'keyword': '消'})
-            self.assertIn("text LIKE ? ESCAPE '\\'", where)
+            self.assertIn("m.text LIKE ? ESCAPE '\\'", where)
             self.assertEqual(params, ['%消%'])
         finally:
             conn.close()
