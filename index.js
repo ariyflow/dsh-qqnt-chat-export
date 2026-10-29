@@ -470,7 +470,7 @@ export function searchTool(settings) {
 export function exportChatTool(settings) {
   return {
     name: 'qqnt_export_chat',
-    description: 'Export one chat — group or private — from the local QQ index to txt, csv, json, md, html, or sqlite, and return the written file path. Requires the sidecar index.',
+    description: 'Export one chat — group or private — from the local QQ index to txt, csv, json, md, html, or sqlite, and return the written file path. Set media=true to also copy downloaded pictures/files/voice/video (returns a ZIP), split=day for one file per day (ZIP), embed=true for a single self-contained HTML, and redact to pseudonymise senders. Requires the sidecar index.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -481,6 +481,22 @@ export function exportChatTool(settings) {
         format: { type: 'string', enum: ['txt', 'csv', 'json', 'md', 'html', 'sqlite'], description: 'Defaults to txt.' },
         outDir: { type: 'string', description: 'Absolute output directory. Defaults to QQ导出_<chat> inside the user\'s downloads folder.' },
         label: { type: 'string', description: 'Chat name used in the file name and heading. Defaults to the name in the index.' },
+        redact: {
+          type: 'string', enum: ['names', 'qq', 'all'],
+          description: 'Pseudonymise senders/QQ numbers before writing; message text is never rewritten.',
+        },
+        media: {
+          type: 'boolean',
+          description: 'Copy downloaded media into a ZIP (best effort; missing files are listed in manifest.json).',
+        },
+        split: {
+          type: 'string', enum: ['day'],
+          description: 'Split the chat into one file per local day inside a ZIP.',
+        },
+        embed: {
+          type: 'boolean',
+          description: 'Inline pictures as data URIs in a single HTML file (format must be html).',
+        },
       },
     },
     output: { schema: outputSchema({ outPath: { type: 'string' } }), render: renderReport },
@@ -497,6 +513,16 @@ export function exportChatTool(settings) {
       if (!['txt', 'csv', 'json', 'md', 'html', 'sqlite'].includes(format)) {
         return { ok: false, exitCode: 1, outPath: '', output: `不支持的格式: ${format}` }
       }
+      const embed = args.embed === true
+      const split = args.split === 'day' ? 'day' : ''
+      const media = args.media === true || embed
+      const redact = ['names', 'qq', 'all'].includes(args.redact) ? args.redact : ''
+      if (embed && format !== 'html') {
+        return { ok: false, exitCode: 1, outPath: '', output: 'embed 只支持 html 格式' }
+      }
+      // Media and day-splitting always arrive as one bundle; embedding stays a
+      // single shareable HTML.
+      const container = embed ? 'html' : (media || split ? 'zip' : format)
       // Prefer the name the index knows; the label also names the file.
       let label = typeof args.label === 'string' ? args.label.trim() : ''
       if (label === '') {
@@ -516,12 +542,16 @@ export function exportChatTool(settings) {
       // The query layer may only write inside workDir/exports; stage there and
       // move the finished file to the directory the user asked for.
       const staging = path.join(settings.workDir, 'exports',
-        `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${format}`)
+        `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${container}`)
       const payloadArgs = { chatKind: kind, chatId, format, label, out: staging }
+      if (redact) payloadArgs.redact = redact
+      if (media) payloadArgs.media = true
+      if (split) payloadArgs.split = 'day'
+      if (embed) payloadArgs.embed = true
       const { code, payload } = await runQueryJson(
         settings, ['export', '--json', JSON.stringify(payloadArgs)], exec)
       if (code !== 0) return { ok: false, exitCode: code, outPath: '', output: payload.error || '导出失败' }
-      const target = path.join(outDir, `${fileStem(label, chatId)}_${fileStamp()}.${format}`)
+      const target = path.join(outDir, `${fileStem(label, chatId)}_${fileStamp()}.${container}`)
       try {
         renameSync(payload.path, target)
       } catch (error) {
@@ -672,7 +702,7 @@ The qqnt_* tools read the message database of the NTQQ client installed on this 
 
 /** Appended only while the browsing UI is actually listening. */
 function webGuidance(url) {
-  return ` The same data, including private chats and keyword search across every chat, is browsable at ${url} in a browser tab; that page also downloads the current query as txt, csv, json, markdown, html, or sqlite. The page opens with a startup checklist that names this URL, checks Python/sqlcipher3 and the cached key, and offers a one-click setup that creates a private virtualenv and installs sqlcipher3-wheels into it. The same checklist and the settings page have a 提取密钥 button that runs key extraction with visible progress and logs; when the user is working in the browser, point them there instead of asking them to run a tool. Never install Python packages into the global/system interpreter; use that one-click setup or another virtualenv and point the Python interpreter setting at it. For private chats or cross-chat search, the sidecar index must exist first: qqnt_list_chats, qqnt_search, and qqnt_export_chat read it, and they explain how to build it in the web UI when it is missing.`
+  return ` The same data, including private chats and keyword search across every chat, is browsable at ${url} in a browser tab; that page also downloads the current query as txt, csv, json, markdown, html, or sqlite. The page opens with a startup checklist that names this URL, checks Python/sqlcipher3 and the cached key, and offers a one-click setup that creates a private virtualenv and installs sqlcipher3-wheels into it. The same checklist and the settings page have a 提取密钥 button that runs key extraction with visible progress and logs; when the user is working in the browser, point them there instead of asking them to run a tool. Never install Python packages into the global/system interpreter; use that one-click setup or another virtualenv and point the Python interpreter setting at it. For private chats or cross-chat search, the sidecar index must exist first: qqnt_list_chats, qqnt_search, and qqnt_export_chat read it, and they explain how to build it in the web UI when it is missing. An export can also bundle downloaded media (media: true), split into one file per day (split: "day"), pseudonymise senders (redact), or inline pictures into a single HTML (embed); the first two return a ZIP with manifest.json.`
 }
 
 /** One-shot Python/sqlcipher3 probe used by the settings page. */

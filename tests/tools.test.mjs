@@ -104,6 +104,37 @@ test('export writes the requested format outside the work directory', { skip: !h
   }
 })
 
+test('export tool bundles, splits, and redacts', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const outDir = path.join(work, 'out')
+    const redacted = await exportChatTool(settings).execute(
+      { chatKind: 'private', chatId: 'p1', format: 'json', outDir, redact: 'all' },
+      { signal: signal() })
+    assert.equal(redacted.ok, true, redacted.output)
+    assert.match(redacted.outPath, /\.json$/)
+    const body = JSON.parse(readFileSync(redacted.outPath, 'utf8'))
+    assert.equal(body.chat, '私聊1')
+    assert.equal(body.messages[0].sender, '成员1')
+    assert.equal(body.messages[0].qq, '')
+
+    const split = await exportChatTool(settings).execute(
+      { chatKind: 'group', chatId: 'g1', format: 'txt', outDir, split: 'day' },
+      { signal: signal() })
+    assert.equal(split.ok, true, split.output)
+    assert.match(split.outPath, /\.zip$/)
+    assert.ok(existsSync(split.outPath))
+
+    const bad = await exportChatTool(settings).execute(
+      { chatKind: 'group', chatId: 'g1', format: 'txt', outDir, embed: true },
+      { signal: signal() })
+    assert.equal(bad.ok, false)
+    assert.match(bad.output, /html/)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
 test('index tools explain how to build a missing index', { skip: !hasPython() && 'python is not installed' }, async () => {
   const work = await mkdtemp(path.join(os.tmpdir(), 'qqnt-tools-empty-'))
   const settings = { python: PYTHON, workDir: path.join(work, 'work'), webPort: 46728 }
