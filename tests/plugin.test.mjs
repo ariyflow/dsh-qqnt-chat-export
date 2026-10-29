@@ -438,12 +438,15 @@ test('messages around and query syntax reach the helper verbatim', {
   }
   try {
     const response = await fetch(
-      `${base}/api/messages?around=42&keyword=${encodeURIComponent('from:张三 -红包')}`)
+      `${base}/api/messages?around=42&keyword=${encodeURIComponent('from:张三 -红包')}`
+      + `&sender=${encodeURIComponent('^。$')}&senderRegex=1`)
     assert.equal(response.status, 200)
     const call = await lastCall()
     assert.match(call, /messages --json/)
     assert.match(call, /"around":"42"/)
     assert.match(call, /from:张三/)
+    assert.match(call, /"senderRegex":"1"/)
+    assert.match(call, /"\^。\$"/)
   } finally {
     await server.close()
     await rm(dir, { recursive: true, force: true })
@@ -477,13 +480,102 @@ test('the stats route forwards the current filters to the helper', {
   }
   try {
     const response = await fetch(
-      `${base}/api/stats?chatKind=group&chatId=1&since=2024-01-01`)
+      `${base}/api/stats?chatKind=group&chatId=1&since=2024-01-01`
+      + `&sender=${encodeURIComponent('^。$')}&senderRegex=1`)
     assert.equal(response.status, 200)
     assert.equal((await response.json()).total, 3)
     const call = await lastCall()
     assert.match(call, /stats --json/)
     assert.match(call, /"chatId":"1"/)
     assert.match(call, /"since":"2024-01-01"/)
+    assert.match(call, /"senderRegex":"1"/)
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the media route streams a file resolved by the helper', {
+  skip: process.platform === 'win32' ? 'needs a POSIX shell wrapper' : false,
+}, async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  const image = path.join(dir, 'pic.jpg')
+  await writeFile(image, 'fake-jpeg-bytes')
+  const calls = path.join(dir, 'calls')
+  const wrapper = path.join(dir, 'py')
+  const payload = JSON.stringify({
+    path: image, name: 'pic.jpg', size: 15, mime: 'image/jpeg',
+    kind: 'image', thumbnail: true, seq: 1,
+  })
+  await writeFile(wrapper,
+    '#!/bin/sh\necho "$@" >> "' + calls + '"\n' + `echo '${payload}'\n`,
+    { mode: 0o755 })
+  const { server, base } = await startServer({ python: wrapper, workDir: work }, {})
+  const lastCall = async () => {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      try {
+        const lines = (await readFile(calls, 'utf8')).trim().split('\n').filter(Boolean)
+        if (lines.length) return lines[lines.length - 1]
+      } catch {
+        // Not written yet.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    return ''
+  }
+  try {
+    const response = await fetch(`${base}/api/media/7?seq=1&thumb=1`)
+    assert.equal(response.status, 200)
+    assert.match(response.headers.get('content-type'), /image\/jpeg/)
+    assert.equal(await response.text(), 'fake-jpeg-bytes')
+    const call = await lastCall()
+    assert.match(call, /media --json/)
+    assert.match(call, /"rowId":7/)
+    assert.match(call, /"thumb":true/)
+
+    const etag = response.headers.get('etag')
+    const again = await fetch(`${base}/api/media/7?seq=1&thumb=1`,
+      { headers: { 'if-none-match': etag } })
+    assert.equal(again.status, 304)
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the gallery route forwards the chat scope to the helper', {
+  skip: process.platform === 'win32' ? 'needs a POSIX shell wrapper' : false,
+}, async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  const calls = path.join(dir, 'calls')
+  const wrapper = path.join(dir, 'py')
+  await writeFile(wrapper,
+    '#!/bin/sh\necho "$@" >> "' + calls + '"\n'
+    + 'echo \'{"total":0,"offset":0,"limit":60,"items":[]}\'\n',
+    { mode: 0o755 })
+  const { server, base } = await startServer({ python: wrapper, workDir: work }, {})
+  try {
+    const response = await fetch(`${base}/api/media/list?chatKind=group&chatId=g1&limit=30`)
+    assert.equal(response.status, 200)
+    assert.equal((await response.json()).total, 0)
+    let call = ''
+    for (let attempt = 0; attempt < 40 && !call; attempt += 1) {
+      try {
+        const lines = (await readFile(calls, 'utf8')).trim().split('\n').filter(Boolean)
+        call = lines[lines.length - 1] || ''
+      } catch {
+        // Not written yet.
+      }
+      if (!call) await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    assert.match(call, /media-list --json/)
+    assert.match(call, /"chatKind":"group"/)
+    assert.match(call, /"chatId":"g1"/)
+    assert.match(call, /"limit":30/)
   } finally {
     await server.close()
     await rm(dir, { recursive: true, force: true })
@@ -512,6 +604,10 @@ test('the served page contains the startup checklist and key action', async () =
     assert.match(html, /id="statsCsv"/)
     assert.match(html, /id="statsBtn"/)
     assert.match(html, /id="statsPanel"/)
+    assert.match(html, /id="senderRegex"/)
+    assert.match(html, /id="galleryBtn"/)
+    assert.match(html, /id="galleryDialog"/)
+    assert.match(html, /id="mediaDialog"/)
   } finally {
     await server.close()
     await rm(dir, { recursive: true, force: true })

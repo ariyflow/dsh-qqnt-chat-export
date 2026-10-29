@@ -25,7 +25,9 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime
+import functools
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -43,7 +45,7 @@ import qqnt_media as media_mod
 GROUP_KIND = 'group'
 PRIVATE_KIND = 'private'
 PAGE_LIMIT_MAX = 500
-INDEX_VERSION = '3'            # bump when the sidecar schema changes
+INDEX_VERSION = '5'            # bump when the sidecar schema changes
 STATUS_INTERVAL = 1.5          # seconds between progress writes
 BATCH = 2000
 LOCK_MAX_AGE = 15 * 60         # seconds before a stale build lock is taken over
@@ -77,6 +79,25 @@ CREATE TABLE chats(
     PRIMARY KEY(chat_kind, chat_id)
 );
 CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT);
+-- Media metadata for previews. `path` is resolved at build time so the web UI
+-- can serve a thumbnail without rescanning nt_data per request; requests still
+-- re-check it and fall back to a hash lookup when the cache was cleaned.
+CREATE TABLE media(
+    chat_kind TEXT NOT NULL,
+    msg_id    INTEGER NOT NULL,
+    chat_id   TEXT NOT NULL,
+    seq       INTEGER NOT NULL,
+    kind      TEXT NOT NULL,
+    name      TEXT,
+    size      INTEGER,
+    md5       TEXT,
+    server    TEXT,
+    path      TEXT,
+    thumbnail INTEGER NOT NULL DEFAULT 0,
+    reason    TEXT,
+    PRIMARY KEY(chat_kind, msg_id, seq)
+);
+CREATE INDEX idx_media_chat ON media(chat_kind, chat_id, msg_id);
 '''
 
 # The keyword index. Contentless because `messages.text` is already stored:
@@ -514,6 +535,19 @@ def index_accounts(p):
 # --------------------------------------------------------------------------
 # 名称表
 # --------------------------------------------------------------------------
+def private_display_name(nick, remark):
+    """私聊显示名：昵称（备注）。
+
+    Both fields are optional; when they are equal the name is not repeated.
+    The remark alone is better than a bare uid, so it is used as a fallback.
+    """
+    nick = (nick or '').strip()
+    remark = (remark or '').strip()
+    if nick and remark and remark != nick:
+        return '%s（%s）' % (nick, remark)
+    return nick or remark
+
+
 def load_names(p, key):
     """群名、群成员昵称、好友昵称 —— 缺失时返回空表，不阻断索引。"""
     group_names, member_names, friends = {}, {}, {}
@@ -533,10 +567,24 @@ def load_names(p, key):
     if os.path.exists(p['profile']):
         try:
             conn = q.open_encrypted(p['profile'], key)
-            for uid, uin, nick in conn.execute(
-                    'SELECT [1000],[1002],[20002] FROM profile_info_v6'):
+            # Older QQ builds have no remark column; fall back to a
+            # nickname-only query instead of dropping every friend name.
+            rows = None
+            for sql in ('SELECT [1000],[1002],[20002],[20009] FROM profile_info_v6',
+                        'SELECT [1000],[1002],[20002] FROM profile_info_v6'):
+                try:
+                    rows = list(conn.execute(sql))
+                    break
+                except Exception:     # noqa: BLE001 - sqlcipher has its own Error
+                    rows = None
+            if rows is None:
+                raise sqlite3.OperationalError('profile_info_v6 缺少昵称列')
+            for row in rows:
+                uid, uin, nick = row[0], row[1], row[2]
+                remark = row[3] if len(row) > 3 else ''
                 if uid:
-                    friends[str(uid)] = (str(uin or '').strip(), (nick or '').strip())
+                    friends[str(uid)] = (str(uin or '').strip(), (nick or '').strip(),
+                                         (remark or '').strip())
             conn.close()
         except Exception as exc:      # noqa: BLE001
             print('warn: profile_info.db: %s' % exc, file=sys.stderr)
@@ -851,6 +899,10 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
                 'SELECT coalesce(max(id), 0) + 1 FROM messages').fetchone()[0]
         insert = ('INSERT OR REPLACE INTO messages VALUES '
                   '(?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        media_insert = ('INSERT OR REPLACE INTO media VALUES '
+                        '(?,?,?,?,?,?,?,?,?,?,?,?)')
+        media_kinds = set(media_mod.MEDIA_KINDS)
+        media_index = None
 
         for kind, table in ((GROUP_KIND, 'group_msg_table'),
                             (PRIVATE_KIND, 'c2c_msg_table')):
@@ -863,7 +915,7 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
                         'WHERE s.[40001] > coalesce(w.max_id, 0)' % MARKS_TABLE)
                 params = (kind,)
             cur = src.execute(sql, params)
-            batch, fts_batch = [], []
+            batch, fts_batch, media_batch = [], [], []
             while True:
                 rows = cur.fetchmany(BATCH)
                 if not rows:
@@ -880,13 +932,13 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
                         name = group_names.get(chat_id, '')
                         chat_qq = ''
                     else:
-                        friend_qq, friend_name = friends.get(uid, ('', ''))
-                        sender = friend_name or qq_s or friend_qq or uid or '?'
-                        name = friend_name or ''
+                        friend_qq, friend_name, friend_remark = friends.get(
+                            uid, ('', '', ''))
+                        # Messages keep the nickname; the remark is a name
+                        # decoration for the conversation, not every row.
+                        sender = friend_name or friend_remark or qq_s or friend_qq or uid or '?'
+                        name = private_display_name(friend_name, friend_remark)
                         chat_qq = friend_qq
-                        if not name:
-                            # 会话名取对方，取不到就退回 QQ 号或 uid
-                            name = chat_qq or chat_id
                     if sender and sender != '?':
                         chats[(kind, chat_id)] = (name, chat_qq if kind == PRIVATE_KIND else '')
                     if qq_s and uin and qq_s == str(uin):
@@ -897,6 +949,20 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
                         is_out = 1
                     batch.append((next_id, msg_id, kind, chat_id, q.as_seconds(ts),
                                   uid, qq_s, sender, is_out, t11, t12, kinds, text))
+                    # 媒体与文本来自同一个 blob：顺手写进 media 表，预览和
+                    # 相册就不必再回读加密源库。只解析确实含媒体的行。
+                    if media_kinds.intersection(str(kinds or '').split(',')):
+                        if media_index is None:
+                            media_index = media_mod.path_index(datadir)
+                        for order, item in enumerate(media_mod.blob_media(blob), 1):
+                            found = media_mod.locate(item, datadir, index=media_index,
+                                                     trust_index=True)
+                            media_batch.append((
+                                kind, msg_id, chat_id, order, item['kind'],
+                                item['name'], item['size'], item['md5'],
+                                item['server'], found.get('path') or '',
+                                1 if found.get('thumbnail') else 0,
+                                found.get('reason') or ''))
                     if fts:
                         # Row ids are ours, so the keyword index can be fed
                         # from the same tuple without a second lookup.
@@ -905,6 +971,9 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
                     processed += 1
                 idx.executemany(insert, batch)
                 batch.clear()
+                if media_batch:
+                    idx.executemany(media_insert, media_batch)
+                    media_batch.clear()
                 if fts and fts_batch:
                     idx.executemany(
                         'INSERT INTO message_fts(rowid, text) VALUES (?,?)', fts_batch)
@@ -920,8 +989,10 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
         resolved = {}
         for (kind, chat_id), (name, chat_qq) in chats.items():
             if kind == PRIVATE_KIND:
-                friend_qq, friend_name = friends.get(chat_id, ('', ''))
-                name = name or friend_name or friend_qq or chat_id
+                friend_qq, friend_name, friend_remark = friends.get(
+                    chat_id, ('', '', ''))
+                name = (name or private_display_name(friend_name, friend_remark)
+                        or friend_qq or chat_id)
                 chat_qq = friend_qq or chat_qq
             resolved[(kind, chat_id)] = (name, chat_qq)
         idx.executemany(
@@ -983,13 +1054,58 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
 def open_index(p):
     if not os.path.exists(p['index']):
         q.die('还没有索引。先建立索引（首次约需 1 分钟）。')
-    return sqlite3.connect(readonly_uri(p['index']), uri=True)
+    conn = sqlite3.connect(readonly_uri(p['index']), uri=True)
+    # 旧索引没有新加的 media 表；回退到逐条 glob 会让查询报 SQL 错误，
+    # 不如直接提示重建。没有 version 的索引（手工/测试）保持可用。
+    try:
+        version = conn.execute(
+            "SELECT v FROM meta WHERE k='version'").fetchone()
+    except sqlite3.Error:
+        version = None
+    if version and str(version[0]) != INDEX_VERSION:
+        conn.close()
+        q.die('索引版本已更新（旧 %s → 新 %s），请先在网页点「从 QQ 同步」重建。'
+              % (version[0], INDEX_VERSION))
+    # 发送者正则：只在查询连接上注册，构建连接不需要。
+    conn.create_function('regexp', 2, _regexp_match, deterministic=True)
+    return conn
 
 
 def like_escape(text):
     for ch in ('\\', '%', '_'):
         text = text.replace(ch, '\\' + ch)
     return text
+
+
+def truthy(value):
+    """'1' / true / 'yes' / 'on' —— 表单字符串与 JSON 布尔都接受。"""
+    if isinstance(value, bool):
+        return value
+    return str(value or '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+@functools.lru_cache(maxsize=64)
+def _compiled_regex(pattern):
+    return re.compile(pattern)
+
+
+def _regexp_match(pattern, value):
+    """SQLite `regexp(pattern, value)` —— search 语义，出错时视为不匹配。"""
+    try:
+        return 1 if _compiled_regex(pattern).search(value or '') else 0
+    except (re.error, TypeError):
+        return 0
+
+
+def check_sender_regex(pattern):
+    """Validate a sender regex before it reaches SQLite; raises BadInput."""
+    if len(pattern) > 200:
+        raise BadInput('发送者正则最长 200 个字符')
+    try:
+        _compiled_regex(pattern)
+    except re.error as exc:
+        raise BadInput('发送者正则无效：%s' % exc)
+    return pattern
 
 def create_fts(conn):
     """Create the trigram keyword index; False when this SQLite lacks it."""
@@ -1162,8 +1278,14 @@ def build_where(conn, args):
             params.append('%' + like_escape(keyword) + '%')
     sender = (args.get('sender') or '').strip()
     if sender:
-        clauses.append("(m.sender_name LIKE ? ESCAPE '\\' OR m.sender_qq = ?)")
-        params += ['%' + like_escape(sender) + '%', sender]
+        if truthy(args.get('senderRegex')):
+            check_sender_regex(sender)
+            clauses.append("(regexp(?, m.sender_name) OR "
+                           "regexp(?, coalesce(m.sender_qq, '')))")
+            params += [sender, sender]
+        else:
+            clauses.append("(m.sender_name LIKE ? ESCAPE '\\' OR m.sender_qq = ?)")
+            params += ['%' + like_escape(sender) + '%', sender]
     since = parse_day(args.get('since'), end=False)
     if since is not None:
         clauses.append('m.ts >= ?')
@@ -1202,23 +1324,35 @@ def row_json(row):
 
 
 # Columns every message query returns: the internal row id (for `around`),
-# the QQ message id, and the chat the row belongs to.
-MSG_COLUMNS = ('m.id, m.msg_id, m.ts, m.sender_name, m.sender_qq, m.is_out, '
-               'm.text, m.seg_kinds, m.chat_kind, m.chat_id, c.name')
+# the QQ message id, and the chat the row belongs to. Media columns let the
+# page render a thumbnail without a second request per row; only files that
+# exist on this machine are counted (emoji are stored with an empty path).
+MSG_COLUMNS = (
+    'm.id, m.msg_id, m.ts, m.sender_name, m.sender_qq, m.is_out, '
+    'm.text, m.seg_kinds, m.chat_kind, m.chat_id, c.name, '
+    '(SELECT count(*) FROM media x WHERE x.chat_kind=m.chat_kind '
+    'AND x.chat_id=m.chat_id AND x.msg_id=m.msg_id AND x.path<>\'\'), '
+    '(SELECT x.seq FROM media x WHERE x.chat_kind=m.chat_kind '
+    'AND x.chat_id=m.chat_id AND x.msg_id=m.msg_id '
+    'AND x.kind=\'image\' AND x.path<>\'\' ORDER BY x.seq LIMIT 1)')
 MSG_FROM = (' FROM messages m LEFT JOIN chats c '
             'ON c.chat_kind = m.chat_kind AND c.chat_id = m.chat_id')
 
 
 def message_json(row):
     (row_id, msg_id, ts, sender, qq, is_out, text, kinds,
-     kind, chat, name) = row
-    return {
+     kind, chat, name, media_count, image_seq) = row
+    item = {
         'rowId': int(row_id), 'id': str(msg_id), 'ts': q.as_seconds(ts),
         'time': fmt_time(ts), 'sender': sender or '', 'qq': qq or '',
         'out': bool(is_out), 'text': text or '', 'kinds': kinds or '',
         'chatKind': kind or '', 'chatId': str(chat or ''),
         'chatName': (name or '').strip(),
+        'mediaCount': int(media_count or 0),
     }
+    if image_seq is not None:
+        item['imageSeq'] = int(image_seq)
+    return item
 
 
 def page_args(args, default=50):
@@ -1386,6 +1520,124 @@ def cmd_messages(p, args):
     if notes:
         payload['notes'] = notes
     print(json.dumps(payload, ensure_ascii=False))
+
+
+# --------------------------------------------------------------------------
+# 媒体预览 / 相册
+# --------------------------------------------------------------------------
+MAX_PREVIEW_BYTES = 64 * 1024 * 1024
+
+
+def path_inside(path, root):
+    """Whether `path` really lives under `root` (symlinks resolved)."""
+    if not path or not root:
+        return False
+    try:
+        real = os.path.realpath(path)
+        base = os.path.realpath(root)
+    except OSError:
+        return False
+    return real == base or real.startswith(base + os.sep)
+
+
+def media_datadir(p):
+    """The nt_data root recorded by the last build (may be empty)."""
+    return str((read_meta(p['index']) or {}).get('datadir') or '')
+
+
+def resolve_media(row, datadir, prefer_thumb=False):
+    """Turn one `media` table row into a readable local file.
+
+    The stored path is used while it is still inside nt_data; otherwise the
+    hash is looked up again, so a cleaned/re-downloaded cache keeps working.
+    """
+    kind, name, size, md5, server, path, thumb, reason = row
+    if path and os.path.isfile(path) and path_inside(path, datadir):
+        return {'path': path, 'thumbnail': bool(thumb), 'reason': ''}
+    item = {'kind': kind, 'name': name or '', 'size': size or 0,
+            'md5': md5 or '', 'server': server or '', 'path': path or ''}
+    found = media_mod.locate(item, datadir, index=media_mod.path_index(datadir),
+                             prefer_thumb=prefer_thumb)
+    if found.get('path') and not path_inside(found['path'], datadir):
+        return {'path': '', 'reason': 'outside-datadir'}
+    return found
+
+
+def cmd_media(p, args):
+    """One media item of one message, with its resolved absolute path."""
+    try:
+        row_id = int(args.get('rowId'))
+        seq = int(args.get('seq') or 1)
+    except (TypeError, ValueError):
+        raise BadInput('rowId / seq 必须是整数')
+    if seq < 1:
+        raise BadInput('seq 必须从 1 开始')
+    conn = open_index(p)
+    try:
+        message = conn.execute(
+            'SELECT chat_kind, chat_id, msg_id FROM messages WHERE id=?',
+            (row_id,)).fetchone()
+        if message is None:
+            raise BadInput('索引里没有这条消息')
+        kind, chat_id, msg_id = message
+        row = conn.execute(
+            'SELECT kind, name, size, md5, server, path, thumbnail, reason '
+            'FROM media WHERE chat_kind=? AND msg_id=? AND seq=?',
+            (kind, msg_id, seq)).fetchone()
+        if row is None:
+            raise BadInput('这条消息没有序号为 %d 的媒体' % seq)
+    finally:
+        conn.close()
+    datadir = media_datadir(p)
+    found = resolve_media(row, datadir, prefer_thumb=bool(args.get('thumb')))
+    path = found.get('path') or ''
+    if not path:
+        raise BadInput('媒体文件不在本机（%s）' % (found.get('reason') or 'missing'))
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        raise BadInput('媒体文件无法读取')
+    if size > MAX_PREVIEW_BYTES:
+        raise BadInput('媒体文件超过 %d MB，请用导出功能下载'
+                       % (MAX_PREVIEW_BYTES // 1024 // 1024))
+    mime = mimetypes.guess_type(path)[0] or 'application/octet-stream'
+    print(json.dumps({
+        'path': path, 'name': row[1] or os.path.basename(path),
+        'size': size, 'mime': mime, 'kind': row[0],
+        'thumbnail': bool(found.get('thumbnail')), 'seq': seq,
+    }, ensure_ascii=False))
+
+
+def cmd_media_list(p, args):
+    """Images of one chat for the gallery, newest first."""
+    kind = args.get('chatKind')
+    chat = str(args.get('chatId') or '').strip()
+    if kind not in (GROUP_KIND, PRIVATE_KIND) or not chat:
+        raise BadInput('chatKind 和 chatId 都是必需的')
+    limit, offset = page_args(args, 60)
+    conn = open_index(p)
+    try:
+        where = ("FROM media x WHERE x.chat_kind=? AND x.chat_id=? "
+                 "AND x.kind='image' AND x.path<>''")
+        total = conn.execute('SELECT count(*) ' + where, (kind, chat)).fetchone()[0]
+        rows = conn.execute(
+            'SELECT m.id, x.seq, x.kind, x.name, x.size, x.path, x.thumbnail, '
+            'm.ts, m.sender_name FROM media x '
+            'JOIN messages m ON m.chat_kind=x.chat_kind AND m.chat_id=x.chat_id '
+            'AND m.msg_id=x.msg_id WHERE x.chat_kind=? AND x.chat_id=? '
+            "AND x.kind='image' AND x.path<>'' "
+            'ORDER BY m.ts DESC, x.seq DESC LIMIT ? OFFSET ?',
+            (kind, chat, limit, offset)).fetchall()
+    finally:
+        conn.close()
+    items = [{
+        'rowId': int(row_id), 'seq': seq, 'kind': item_kind,
+        'name': name or '', 'size': size or 0,
+        'ts': q.as_seconds(ts), 'time': fmt_time(ts), 'sender': sender or '',
+        'missing': not path,
+    } for row_id, seq, item_kind, name, size, path, _thumb, ts, sender in rows]
+    print(json.dumps({'total': total, 'offset': offset, 'limit': limit,
+                      'items': items}, ensure_ascii=False))
 
 
 # --------------------------------------------------------------------------
@@ -2162,6 +2414,10 @@ def main(argv=None):
     s.add_argument('--json', default='{}')
     s = sub.add_parser('stats')
     s.add_argument('--json', default='{}')
+    s = sub.add_parser('media')
+    s.add_argument('--json', default='{}')
+    s = sub.add_parser('media-list')
+    s.add_argument('--json', default='{}')
     s = sub.add_parser('export')
     s.add_argument('--json', default='{}')
     s = sub.add_parser('build')
@@ -2211,6 +2467,10 @@ def main(argv=None):
             cmd_messages(p, json.loads(args.json))
         elif args.cmd == 'stats':
             cmd_stats(p, json.loads(args.json))
+        elif args.cmd == 'media':
+            cmd_media(p, json.loads(args.json))
+        elif args.cmd == 'media-list':
+            cmd_media_list(p, json.loads(args.json))
         elif args.cmd == 'export':
             cmd_export(p, json.loads(args.json))
     except BadInput as exc:

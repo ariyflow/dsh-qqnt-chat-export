@@ -434,6 +434,7 @@ export function searchTool(settings) {
         chatKind: { type: 'string', enum: ['group', 'private'] },
         chatId: { type: 'string', description: 'Group number, or the other party\'s uid for a private chat.' },
         sender: { type: 'string', description: 'Sender name fragment or exact QQ number.' },
+        senderRegex: { type: 'boolean', description: 'Treat `sender` as a regular expression (re.search semantics) matched against the nickname and QQ. Defaults to a plain substring match.' },
         since: { type: 'string', description: 'Start date (`YYYY-MM-DD`) or Unix seconds.' },
         until: { type: 'string', description: 'End date (`YYYY-MM-DD`) or Unix seconds.' },
         limit: { type: 'integer', minimum: 1, maximum: 100, description: 'Rows to return. Defaults to 20.' },
@@ -451,6 +452,7 @@ export function searchTool(settings) {
         const value = args[key]
         if (typeof value === 'string' && value.trim() !== '') payloadArgs[key] = value.trim()
       }
+      if (args.senderRegex === true) payloadArgs.senderRegex = true
       payloadArgs.limit = Math.min(Math.max(Number(args.limit) || 20, 1), 100)
       const offset = Number(args.offset)
       if (Number.isInteger(offset) && offset > 0) payloadArgs.offset = offset

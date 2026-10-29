@@ -48,6 +48,18 @@ class CsvTests(unittest.TestCase):
         self.assertEqual(q.csv_cell(None), '')
 
 
+class PrivateNameTests(unittest.TestCase):
+    def test_nick_and_remark_combine(self):
+        self.assertEqual(qq.private_display_name('好友甲', '某班级A'),
+                         '好友甲（某班级A）')
+        self.assertEqual(qq.private_display_name('  好友甲 ', ' 备注 '), '好友甲（备注）')
+        self.assertEqual(qq.private_display_name('好友甲', '好友甲'), '好友甲')
+        self.assertEqual(qq.private_display_name('好友甲', ''), '好友甲')
+        self.assertEqual(qq.private_display_name('', '备注'), '备注')
+        self.assertEqual(qq.private_display_name(None, None), '')
+        self.assertEqual(qq.private_display_name(' ', '  '), '')
+
+
 class CopyDbTests(unittest.TestCase):
     def _src(self, tmp):
         path = os.path.join(tmp, 'src.db')

@@ -19,6 +19,8 @@ import zipfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'scripts'))
 
+import qqnt_query as qq              # noqa: E402
+
 try:
     from sqlcipher3 import dbapi2 as sqlcipher
 except Exception:                       # noqa: BLE001 - CI has no wheel
@@ -99,8 +101,8 @@ class IncrementalBuildTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _connect(self):
-        conn = sqlcipher.connect(self.secret)
+    def _connect(self, path=None):
+        conn = sqlcipher.connect(path or self.secret)
         conn.execute('PRAGMA cipher_page_size = 4096')
         conn.execute("PRAGMA key = '%s'" % KEY)
         conn.execute('PRAGMA kdf_iter = 4000')
@@ -113,6 +115,22 @@ class IncrementalBuildTests(unittest.TestCase):
         conn.commit()
         conn.close()
         with open(self.secret, 'rb') as src, open(os.path.join(self.dbdir, 'nt_msg.db'), 'wb') as dst:
+            dst.write(HEADER + src.read())
+
+    def write_profile(self, rows, columns=('[1000]', '[1002]', '[20002]', '[20009]')):
+        """Publish an encrypted profile_info.db next to nt_msg.db."""
+        path = os.path.join(self.tmp.name, 'profile-secret.db')
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        conn = self._connect(path)
+        conn.execute('CREATE TABLE profile_info_v6(%s)' % ','.join(columns))
+        conn.executemany('INSERT INTO profile_info_v6 VALUES (%s)'
+                         % ','.join('?' * len(columns)), rows)
+        conn.commit()
+        conn.close()
+        with open(path, 'rb') as src, open(os.path.join(self.dbdir, 'profile_info.db'), 'wb') as dst:
             dst.write(HEADER + src.read())
 
     def add(self, table, msg_id, ts, text, chat='g1'):
@@ -709,6 +727,149 @@ class IncrementalBuildTests(unittest.TestCase):
         got = self.run_cli('messages', '--json',
                            json.dumps({'keyword': 'since:2023-11-15 until:2023-11-15'}))
         self.assertEqual(got['total'], 3)
+
+    def test_private_names_include_the_remark(self):
+        self.write_profile([
+            ('f1', '10001', '好友甲', '某班级A'),
+            ('f2', '10002', '小明', '小明'),
+            ('f3', '10003', '无备注', ''),
+        ])
+        self.add_blob('c2c_msg_table', 4, 1700000500, _message_blob('私聊一'), 'f1', 'f1', 10001)
+        self.add_blob('c2c_msg_table', 2, 1700000300, _message_blob('私聊二'), 'f2', 'f2', 10002)
+        self.add_blob('c2c_msg_table', 3, 1700000400, _message_blob('私聊三'), 'f3', 'f3', 10003)
+        self.publish()
+        self.run_cli('build')
+        sessions = self.run_cli('sessions')['sessions']
+        names = {row['id']: row['name'] for row in sessions if row['kind'] == 'private'}
+        self.assertEqual(names['f1'], '好友甲（某班级A）')
+        # The remark is not repeated when it equals the nickname.
+        self.assertEqual(names['f2'], '小明')
+        # No remark: keep the plain nickname, never fall back to the uid.
+        self.assertEqual(names['f3'], '无备注')
+        # Message rows keep the nickname so long transcripts stay readable.
+        got = self.run_cli('messages', '--json',
+                           json.dumps({'chatKind': 'private', 'chatId': 'f1'}))
+        self.assertIn('好友甲', {row['sender'] for row in got['rows']})
+        # The name is baked into the index, so a version bump rebuilt it.
+        self.assertEqual(self.meta().get('version'), qq.INDEX_VERSION)
+
+    def test_profile_without_remark_column_falls_back_to_nickname(self):
+        self.write_profile([('f1', '10001', '好友甲')],
+                           columns=('[1000]', '[1002]', '[20002]'))
+        self.publish()
+        self.run_cli('build')
+        sessions = self.run_cli('sessions')['sessions']
+        names = {row['id']: row['name'] for row in sessions if row['kind'] == 'private'}
+        self.assertEqual(names['f1'], '好友甲')
+
+    def test_sender_regex_is_opt_in(self):
+        self.write_profile([('a', '111', '。', ''), ('b', '222', '。。', '')])
+        self.add_blob('c2c_msg_table', 5, 1700000600, _message_blob('一个句号'), 'f1', 'a', 111)
+        self.add_blob('c2c_msg_table', 6, 1700000700, _message_blob('两个句号'), 'f2', 'b', 222)
+        self.publish()
+        self.run_cli('build')
+
+        def total(**extra):
+            return self.run_cli('messages', '--json',
+                                json.dumps(dict(limit=100, **extra)))['total']
+
+        # Default stays a substring match: both senders contain '。'.
+        self.assertEqual(total(sender='。'), 2)
+        # Regex mode with search semantics also matches both...
+        self.assertEqual(total(sender='。', senderRegex=True), 2)
+        # ...while anchors separate them.
+        self.assertEqual(total(sender='^。$', senderRegex=True), 1)
+        self.assertEqual(total(sender='^。。$', senderRegex=True), 1)
+        # QQ numbers are matched too.
+        self.assertEqual(total(sender='^111$', senderRegex=True), 1)
+        # A literal '^。$' under the default mode matches nothing.
+        self.assertEqual(total(sender='^。$'), 0)
+
+        stats = self.run_cli('stats', '--json',
+                             json.dumps({'sender': '^。$', 'senderRegex': True}))
+        self.assertEqual(stats['total'], 1)
+        out = os.path.join(self.work, 'exports', 'regex.json')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        result = self.run_cli('export', '--json', json.dumps({
+            'format': 'json', 'out': out, 'label': '正则',
+            'sender': '^。$', 'senderRegex': True}))
+        self.assertEqual(result['rows'], 1)
+
+        proc = subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
+             '--root', self.root, '--account', '12345', '--work', self.work,
+             'messages', '--json', json.dumps({'sender': '[', 'senderRegex': True})],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn('正则无效', json.loads(proc.stdout)['error'])
+
+        proc = subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
+             '--root', self.root, '--account', '12345', '--work', self.work,
+             'messages', '--json', json.dumps({'sender': 'a' * 201, 'senderRegex': True})],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn('200', json.loads(proc.stdout)['error'])
+
+    def test_media_index_powers_preview_and_gallery(self):
+        md5 = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
+        picdir = os.path.join(self.root, '12345', 'nt_qq', 'nt_data',
+                              'Pic', '2023-11', 'Ori')
+        os.makedirs(picdir)
+        with open(os.path.join(picdir, md5 + '.jpg'), 'wb') as f:
+            f.write(b'\xff\xd8fake-jpeg-payload')
+        conn = self._connect()
+        conn.execute('INSERT INTO group_msg_table VALUES (?,?,?,?,?,?,?,?,?)',
+                     (3, 1700002000, 'u', 0, 1, 1, '', _image_blob(), 'g1'))
+        conn.commit()
+        conn.close()
+        self.publish()
+        self.run_cli('build')
+
+        payload = self.run_cli('messages', '--json', json.dumps({'keyword': 'has:image'}))
+        row = payload['rows'][0]
+        self.assertEqual(row['mediaCount'], 1)
+        self.assertEqual(row['imageSeq'], 1)
+
+        preview = self.run_cli('media', '--json', json.dumps(
+            {'rowId': row['rowId'], 'seq': 1, 'thumb': True}))
+        self.assertTrue(preview['path'].endswith(md5 + '.jpg'))
+        self.assertEqual(preview['kind'], 'image')
+        self.assertTrue(preview['mime'].startswith('image/'))
+        self.assertEqual(preview['size'], len(b'\xff\xd8fake-jpeg-payload'))
+
+        listing = self.run_cli('media-list', '--json',
+                               json.dumps({'chatKind': 'group', 'chatId': 'g1'}))
+        self.assertEqual(listing['total'], 1)
+        self.assertEqual(listing['items'][0]['rowId'], row['rowId'])
+
+        # A stale path is re-resolved by hash; an unknown seq is a 400.
+        proc = subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
+             '--root', self.root, '--account', '12345', '--work', self.work,
+             'media', '--json', json.dumps({'rowId': row['rowId'], 'seq': 9})],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn('没有序号', json.loads(proc.stdout)['error'])
+
+    def test_old_index_version_asks_for_a_rebuild(self):
+        self.run_cli('build')
+        import sqlite3
+        conn = sqlite3.connect(os.path.join(self.work, 'index.sqlite'))
+        conn.execute("UPDATE meta SET v='3' WHERE k='version'")
+        conn.commit()
+        conn.close()
+        proc = subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
+             '--root', self.root, '--account', '12345', '--work', self.work,
+             'messages', '--json', '{"limit":1}'],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn('请先在网页点', proc.stderr)
 
     def test_has_filter_matches_media_segments(self):
         conn = self._connect()

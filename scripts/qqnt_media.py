@@ -100,23 +100,110 @@ def _find_by_hash(datadir, top, sub, md5, cache=None):
     return _glob_many(os.path.join(datadir, top, '*', sub, md5 + suffix), cache)
 
 
-def locate(item, datadir, cache=None):
+def path_index(datadir):
+    """`(kind, md5) -> (path, is_thumbnail)` for every cached media file.
+
+    Scanning the handful of month folders once is much cheaper than globbing
+    per message: a 320k-message build has tens of thousands of pictures.
+    Thumbnails get an extra `(kind, md5, 'thumb')` key so a preview can ask
+    for the small file while exports keep using the original.
+    """
+    index = {}
+    if not datadir or not os.path.isdir(datadir):
+        return index
+
+    def add(kind, path, is_thumb):
+        base = os.path.basename(path)
+        stem = base.split('_')[0].rsplit('.', 1)[0].lower()
+        if len(stem) != 32:
+            return
+        index.setdefault((kind, stem), (path, is_thumb))
+        if is_thumb:
+            index[(kind, stem, 'thumb')] = path
+
+    def scan(kind, top, sub, is_thumb):
+        try:
+            months = list(os.scandir(os.path.join(datadir, top)))
+        except OSError:
+            return
+        for month in months:
+            folder = os.path.join(month.path, sub)
+            try:
+                entries = list(os.scandir(folder))
+            except OSError:
+                continue
+            for entry in entries:
+                try:
+                    if entry.is_file():
+                        add(kind, entry.path, is_thumb)
+                except OSError:
+                    continue
+
+    # Originals first: setdefault keeps them ahead of their thumbnails.
+    scan('image', 'Pic', 'Ori', False)
+    scan('image', 'Pic', 'Thumb', True)
+    scan('video', 'Video', 'Ori', False)
+    scan('video', 'Video', 'Thumb', True)
+    scan('voice', 'Ptt', 'Ori', False)
+    # Transfers live in File/Ori/<prefix>_<uuid>/<name>; the uuid is the only
+    # stable part, so index the first file of each folder.
+    try:
+        folders = list(os.scandir(os.path.join(datadir, 'File', 'Ori')))
+    except OSError:
+        folders = []
+    for folder in folders:
+        try:
+            if not folder.is_dir():
+                continue
+            uuid = folder.name.split('_')[-1]
+            for entry in os.scandir(folder.path):
+                if entry.is_file():
+                    index.setdefault(('file', uuid), (entry.path, False))
+                    break
+        except OSError:
+            continue
+    return index
+
+
+def locate(item, datadir, cache=None, index=None, prefer_thumb=False,
+           trust_index=False):
     """Find the file for one media description.
 
     Returns `{path, thumbnail, reason}`; `path` is empty when the file is not
     on this machine (never downloaded, cache cleaned, or an emoji).
+    `index` is a `path_index()` result; `prefer_thumb` asks for the small
+    thumbnail variant first (previews), falling back to the original.
+    `trust_index` skips the per-hash glob on a miss: the scan already covered
+    every folder, so a miss means the file really is absent (bulk builds rely
+    on this to avoid tens of thousands of globs).
     """
+    kind = item.get('kind')
+    md5 = (item.get('md5') or '').lower()
+    if index is not None and md5 and kind in ('image', 'voice', 'video'):
+        if prefer_thumb:
+            hit = index.get((kind, md5, 'thumb'))
+            if hit:
+                return {'path': hit, 'thumbnail': True, 'reason': ''}
+        hit = index.get((kind, md5))
+        if hit:
+            return {'path': hit[0], 'thumbnail': bool(hit[1]), 'reason': ''}
+        if trust_index:
+            return {'path': '', 'reason': 'not-downloaded'}
     path = item.get('path') or ''
     if path:
         if os.path.isfile(path):
             if '/Emoji/' in path.replace('\\', '/'):
                 return {'path': '', 'reason': 'emoji'}
             return {'path': path, 'thumbnail': False, 'reason': ''}
-    kind = item.get('kind')
-    md5 = item.get('md5') or ''
     if kind == 'file':
         uuid = (item.get('server') or '').strip('/').split('/')[-1]
         if uuid:
+            if index is not None:
+                hit = index.get(('file', uuid))
+                if hit:
+                    return {'path': hit[0], 'thumbnail': False, 'reason': ''}
+                if trust_index:
+                    return {'path': '', 'reason': 'not-downloaded'}
             matches = _glob_many(
                 os.path.join(datadir, 'File', 'Ori', '*_' + uuid, '*'), cache)
             files = [name for name in matches if os.path.isfile(name)]
@@ -127,20 +214,18 @@ def locate(item, datadir, cache=None):
         return {'path': '', 'reason': 'no-hash'}
     if kind == 'image':
         candidates = [('Pic', 'Ori', False), ('Pic', 'Thumb', True)]
-        for top, sub, is_thumb in candidates:
-            files = _find_by_hash(datadir, top, sub, md5, cache)
-            if files:
-                return {'path': files[0], 'thumbnail': is_thumb, 'reason': ''}
     elif kind == 'voice':
-        files = _find_by_hash(datadir, 'Ptt', 'Ori', md5, cache)
-        if files:
-            return {'path': files[0], 'thumbnail': False, 'reason': ''}
+        candidates = [('Ptt', 'Ori', False)]
     elif kind == 'video':
-        for top, sub, is_thumb in (('Video', 'Ori', False),
-                                   ('Video', 'Thumb', True)):
-            files = _find_by_hash(datadir, top, sub, md5, cache)
-            if files:
-                return {'path': files[0], 'thumbnail': is_thumb, 'reason': ''}
+        candidates = [('Video', 'Ori', False), ('Video', 'Thumb', True)]
+    else:
+        candidates = []
+    if prefer_thumb:
+        candidates = sorted(candidates, key=lambda entry: not entry[2])
+    for top, sub, is_thumb in candidates:
+        files = _find_by_hash(datadir, top, sub, md5, cache)
+        if files:
+            return {'path': files[0], 'thumbnail': is_thumb, 'reason': ''}
     return {'path': '', 'reason': 'not-downloaded'}
 
 

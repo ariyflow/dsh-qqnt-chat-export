@@ -90,6 +90,17 @@ test('search reports where each hit came from', { skip: !hasPython() && 'python 
     assert.equal(short.ok, true, short.output)
     assert.match(short.output, /private\/p1/)
     assert.match(short.output, /丙/)
+
+    // senderRegex is opt-in: anchors separate otherwise identical prefixes.
+    const regex = await searchTool(settings).execute(
+      { keyword: '条消息', sender: '^甲$', senderRegex: true }, { signal: signal() })
+    assert.equal(regex.ok, true, regex.output)
+    assert.match(regex.output, /命中 1 条/)
+    assert.match(regex.output, /甲/)
+    const bad = await searchTool(settings).execute(
+      { keyword: '条消息', sender: '[', senderRegex: true }, { signal: signal() })
+    assert.equal(bad.ok, false)
+    assert.match(bad.output, /正则无效/)
   } finally {
     await rm(work, { recursive: true, force: true })
   }

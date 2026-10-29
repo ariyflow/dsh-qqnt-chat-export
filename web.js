@@ -181,7 +181,8 @@ function runJson(settings, command, args = {}, { signal } = {}) {
     if (settings.tencentRoot) argv.push('--root', settings.tencentRoot)
     if (settings.account) argv.push('--account', String(settings.account))
     argv.push(command)
-    if (command === 'messages' || command === 'export' || command === 'stats') {
+    if (command === 'messages' || command === 'export' || command === 'stats'
+      || command === 'media' || command === 'media-list') {
       argv.push('--json', JSON.stringify(args))
     }
     if (command === 'select') {
@@ -261,6 +262,7 @@ function filtersFrom(params) {
     chatId: params.get('chatId') || '',
     keyword: params.get('keyword') || '',
     sender: params.get('sender') || '',
+    senderRegex: params.get('senderRegex') === '1' ? '1' : '',
     since: params.get('since') || '',
     until: params.get('until') || '',
   }
@@ -276,6 +278,10 @@ function filtersFromBody(body) {
   for (const key of ['chatKind', 'chatId', 'keyword', 'sender', 'since', 'until', 'redact']) {
     const value = body[key]
     if (typeof value === 'string' && value.trim() !== '') args[key] = value.trim()
+  }
+  // A boolean cannot go through the string loop above.
+  if (body.senderRegex === true || body.senderRegex === '1' || body.senderRegex === 'true') {
+    args.senderRegex = true
   }
   return args
 }
@@ -477,7 +483,7 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       res.writeHead(200, {
         'content-type': 'text/html; charset=utf-8',
         'cache-control': 'no-store',
-        'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src data:",
+        'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; media-src 'self'",
       })
       res.end(pageHtml)
       return
@@ -695,6 +701,63 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       runJson(settings, 'messages', args)
         .then((payload) => sendJson(res, 200, payload))
         .catch((error) => sendJson(res, error.status ?? 409, { error: error.message }))
+      return
+    }
+    if (req.method === 'GET' && pathname === '/api/media/list') {
+      const kind = params.get('chatKind')
+      const chatId = params.get('chatId')
+      if (!['group', 'private'].includes(kind) || !chatId) {
+        sendJson(res, 400, { error: 'chatKind 和 chatId 都是必需的' })
+        return
+      }
+      runJson(settings, 'media-list', {
+        chatKind: kind,
+        chatId,
+        offset: readInt(params.get('offset'), 0),
+        limit: Math.min(Math.max(readInt(params.get('limit'), 60), 1), 200),
+      })
+        .then((payload) => sendJson(res, 200, payload))
+        .catch((error) => sendJson(res, error.status ?? 500, { error: error.message }))
+      return
+    }
+    // One media file of one message: the helper resolves the path inside
+    // nt_data, and this process only streams the bytes.
+    const mediaMatch = pathname.match(/^\/api\/media\/(\d+)$/)
+    if (req.method === 'GET' && mediaMatch) {
+      const args = {
+        rowId: Number(mediaMatch[1]),
+        seq: Math.max(readInt(params.get('seq'), 1), 1),
+      }
+      if (params.get('thumb') === '1') args.thumb = true
+      runJson(settings, 'media', args)
+        .then((payload) => {
+          let info
+          try {
+            info = statSync(payload.path)
+          } catch {
+            throw Object.assign(new Error('媒体文件已不存在'), { status: 404 })
+          }
+          const etag = `"${info.size}-${Math.floor(info.mtimeMs)}"`
+          if (req.headers['if-none-match'] === etag) {
+            res.writeHead(304, { etag, 'cache-control': 'private, max-age=3600' })
+            res.end()
+            return
+          }
+          const name = encodeURIComponent(path.basename(String(payload.name || 'media')))
+          res.writeHead(200, {
+            'content-type': payload.mime || 'application/octet-stream',
+            'content-length': info.size,
+            'cache-control': 'private, max-age=3600',
+            etag,
+            'content-disposition': `inline; filename*=UTF-8''${name}`,
+            'x-content-type-options': 'nosniff',
+          })
+          const stream = createReadStream(payload.path)
+          stream.on('error', () => res.destroy())
+          stream.pipe(res)
+        })
+        .catch((error) => sendJson(
+          res, error.status === 400 ? 404 : (error.status ?? 500), { error: error.message }))
       return
     }
     if (req.method === 'POST' && pathname === '/api/export/queue') {

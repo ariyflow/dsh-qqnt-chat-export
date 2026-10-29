@@ -168,6 +168,25 @@
   .row .msg { white-space: pre-wrap; word-break: break-word; }
   .row .msg.clamped { display: -webkit-box; -webkit-line-clamp: 10; -webkit-box-orient: vertical; overflow: hidden; }
   .row .msg .ph { color: var(--muted); background: var(--panel); border-radius: 4px; padding: 0 4px; }
+  .row .thumbs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .row .thumbs img {
+    max-height: 120px; max-width: 220px; border-radius: 6px; cursor: zoom-in;
+    border: 1px solid var(--line); background: var(--panel); object-fit: cover;
+  }
+  .row .thumbs .badge { align-self: flex-end; font-size: 11px; color: var(--muted); }
+  dialog.media-dialog, dialog.gallery-dialog { border: 1px solid var(--line); border-radius: 10px; padding: 0; background: var(--bg); color: var(--text); max-width: 92vw; }
+  dialog.media-dialog::backdrop, dialog.gallery-dialog::backdrop { background: rgba(0, 0, 0, .6); }
+  dialog.media-dialog figure { margin: 0; padding: 12px; display: flex; flex-direction: column; gap: 8px; align-items: center; }
+  dialog.media-dialog img { max-width: 86vw; max-height: 78vh; border-radius: 6px; }
+  dialog.media-dialog figcaption { font-size: 12px; color: var(--muted); }
+  .gallery-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  .gallery-head strong { font-size: 14px; }
+  .gallery-head span { flex: 1; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .gallery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px; padding: 12px; max-height: 70vh; overflow: auto; width: 78vw; }
+  .gallery-grid .tile { position: relative; aspect-ratio: 1; border-radius: 6px; overflow: hidden; background: var(--panel); border: 1px solid var(--line); }
+  .gallery-grid .tile img { width: 100%; height: 100%; object-fit: cover; cursor: zoom-in; display: block; }
+  .gallery-grid .tile.broken::after { content: '不可用'; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; }
+  .gallery-more { padding: 0 0 12px; text-align: center; }
   .row .tools { align-self: start; }
   .row .expand { font-size: 12px; padding: 0 8px; color: var(--accent); }
   mark { background: #fff3b0; color: inherit; border-radius: 2px; }
@@ -341,6 +360,9 @@
         <button class="ghost" type="button" id="scopeClear" title="回到全部会话">×</button>
       </span>
       <input id="sender" placeholder="发送者 / QQ" style="width:120px">
+      <label class="check" title="默认按文本包含匹配；勾选后把输入当正则（search 语义）匹配昵称和 QQ，例如 ^。$">
+        <input id="senderRegex" type="checkbox"> 正则
+      </label>
       <label>从 <input type="date" id="since"></label>
       <label>到 <input type="date" id="until"></label>
       <button class="primary" type="submit">查询</button>
@@ -380,6 +402,7 @@
       <label class="check hidden" id="frontMatterWrap" title="Markdown 开头加 YAML 元信息（会话、账号、导出时间）">
         <input type="checkbox" id="frontMatter"> MD 元信息
       </label>
+      <button class="ghost" type="button" id="galleryBtn" title="当前会话的图片相册（只显示本机已有的图片）">相册</button>
       <button class="ghost" type="button" id="statsBtn" title="本机统计：时间分布、发言人、活跃会话">统计</button>
       <button class="primary" type="button" id="download">下载</button>
     </form>
@@ -528,6 +551,26 @@
   </form>
 </dialog>
 
+<dialog class="media-dialog" id="mediaDialog">
+  <figure>
+    <img id="mediaImage" alt="图片预览">
+    <figcaption id="mediaCaption"></figcaption>
+  </figure>
+  <div style="padding:0 12px 12px;text-align:right">
+    <button class="ghost" type="button" id="mediaClose">关闭</button>
+  </div>
+</dialog>
+
+<dialog class="gallery-dialog" id="galleryDialog">
+  <header class="gallery-head">
+    <strong>相册</strong>
+    <span id="galleryScope"></span>
+    <button class="ghost" type="button" id="galleryClose">关闭</button>
+  </header>
+  <div class="gallery-grid" id="galleryGrid"></div>
+  <div class="gallery-more"><button class="ghost hidden" type="button" id="galleryMore">加载更多</button></div>
+</dialog>
+
 <section class="task-panel hidden" id="taskPanel" aria-live="polite">
   <header>
     <strong>导出任务</strong>
@@ -549,6 +592,7 @@
     keywordHistory: [],
     lastSyncCheck: 0,
     statsData: null,
+    gallery: null,
     kind: 'all',
     sessionKind: '',
     chatId: '',
@@ -1068,6 +1112,7 @@
     var args = {
       keyword: $('keyword').value.trim(),
       sender: $('sender').value.trim(),
+      senderRegex: $('senderRegex').checked ? '1' : '',
       since: $('since').value,
       until: $('until').value
     }
@@ -1255,12 +1300,101 @@
       }
       tools.appendChild(toggle)
     }
+    if (item.imageSeq) {
+      var thumbs = document.createElement('div')
+      thumbs.className = 'thumbs'
+      var thumb = document.createElement('img')
+      thumb.loading = 'lazy'
+      thumb.alt = '图片'
+      thumb.title = '点击放大'
+      thumb.src = '/api/media/' + item.rowId + '?seq=' + item.imageSeq + '&thumb=1'
+      thumb.onerror = function () { thumbs.remove() }
+      thumb.onclick = function () { openLightbox(item.rowId, item.imageSeq, item) }
+      thumbs.appendChild(thumb)
+      if (item.mediaCount > 1) {
+        var badge = document.createElement('span')
+        badge.className = 'badge'
+        badge.textContent = '+' + (item.mediaCount - 1) + ' 个媒体'
+        thumbs.appendChild(badge)
+      }
+      msg.appendChild(thumbs)
+    }
 
     row.appendChild(time)
     row.appendChild(who)
     row.appendChild(msg)
     row.appendChild(tools)
     return row
+  }
+
+  // ---------------------------------------------------------------- 媒体
+  function openLightbox(rowId, seq, item) {
+    var caption = [
+      item && item.time,
+      item && item.sender,
+      '第 ' + seq + ' 个媒体'
+    ].filter(Boolean).join(' · ')
+    $('mediaImage').src = '/api/media/' + rowId + '?seq=' + seq
+    $('mediaCaption').textContent = caption
+    $('mediaDialog').showModal()
+  }
+
+  function openGallery() {
+    if (!state.chatId || (state.sessionKind !== 'group' && state.sessionKind !== 'private')) {
+      toast('先选择一个会话，再看它的相册')
+      return
+    }
+    state.gallery = { offset: 0, total: 0, loading: false }
+    $('galleryScope').textContent = state.chatName || state.chatId
+    $('galleryGrid').innerHTML = ''
+    $('galleryMore').classList.add('hidden')
+    $('galleryDialog').showModal()
+    loadGallery(true)
+  }
+
+  function loadGallery(reset) {
+    var gallery = state.gallery
+    if (!gallery || gallery.loading) return
+    if (!reset && gallery.offset >= gallery.total) return
+    if (reset) {
+      gallery.offset = 0
+      gallery.total = 0
+      $('galleryGrid').innerHTML = ''
+    }
+    gallery.loading = true
+    var query = new URLSearchParams({
+      chatKind: state.sessionKind,
+      chatId: state.chatId,
+      offset: String(gallery.offset),
+      limit: '60'
+    })
+    api('/api/media/list?' + query).then(function (payload) {
+      gallery.loading = false
+      gallery.total = payload.total || 0
+      var items = payload.items || []
+      gallery.offset += items.length
+      var grid = $('galleryGrid')
+      items.forEach(function (item) {
+        var tile = document.createElement('div')
+        tile.className = 'tile'
+        var img = document.createElement('img')
+        img.loading = 'lazy'
+        img.alt = item.name || '图片'
+        img.title = [item.time, item.sender].filter(Boolean).join(' · ')
+        img.src = '/api/media/' + item.rowId + '?seq=' + item.seq + '&thumb=1'
+        img.onerror = function () { tile.classList.add('broken'); img.remove() }
+        img.onclick = function () { openLightbox(item.rowId, item.seq, item) }
+        tile.appendChild(img)
+        grid.appendChild(tile)
+      })
+      if (!items.length && gallery.offset === 0) {
+        grid.innerHTML = '<div class="empty">这个会话还没有本机可用的图片</div>'
+      }
+      $('galleryMore').classList.toggle('hidden', gallery.offset >= gallery.total)
+    }).catch(function (error) {
+      gallery.loading = false
+      toast('相册加载失败：' + error.message)
+    })
   }
 
   // ---------------------------------------------------------------- 统计
@@ -2153,6 +2287,13 @@
   $('download').addEventListener('click', download)
   $('statsBtn').addEventListener('click', openStats)
   $('statsCsv').addEventListener('click', downloadStatsCsv)
+  $('galleryBtn').addEventListener('click', openGallery)
+  $('galleryMore').addEventListener('click', function () { loadGallery(false) })
+  $('galleryClose').addEventListener('click', function () { $('galleryDialog').close() })
+  $('mediaClose').addEventListener('click', function () { $('mediaDialog').close() })
+  $('mediaDialog').addEventListener('click', function (event) {
+    if (event.target === $('mediaDialog')) $('mediaDialog').close()
+  })
   $('statsClose').addEventListener('click', function () {
     $('statsPanel').classList.add('hidden')
   })
