@@ -2450,7 +2450,13 @@
     add('QQ 进程', platform.qqProcesses > 0
       ? (platform.qqProcesses + ' 个 · ' + esc(platform.memoryAccess))
       : '未运行 · ' + esc(platform.memoryAccess))
-    add('数据目录', paths.tencentRoot ? esc(paths.tencentRoot) : '未找到', paths.tencentRoot ? '' : 'bad')
+    if (platform.dataRootFound === false) {
+      // Keep the searched path visible: "未找到" alone does not tell the user
+      // which directory was looked at, and a custom tencentRoot is the usual fix.
+      add('数据目录', '未找到' + (paths.tencentRoot ? '（已查找 ' + esc(paths.tencentRoot) + '）' : ''), 'bad')
+    } else {
+      add('数据目录', paths.tencentRoot ? esc(paths.tencentRoot) : '未找到', paths.tencentRoot ? '' : 'bad')
+    }
     add('账号', platform.account
       ? esc(platform.account) + '（共 ' + esc(platform.accounts) + ' 个）'
       : '未识别（共 ' + esc(platform.accounts) + ' 个）')

@@ -316,6 +316,10 @@ locale/               en / zh 显示元数据
 tests/                Python / Node 回归测试
 docs/screenshot.png        界面截图（虚构数据）
 docs/screenshot-stats.png  统计面板截图（虚构数据）
+docs/windows-checklist.md  Windows 12 项验收清单（步骤 / 预期 / 失败先看哪里 / 实测）
+docs/verification-windows.md  某一轮 Windows 全量验证的实测记录
+docs/plan-0.12.md     0.12 计划书与验收结果
+docs/roadmap-0.12.md  后续路线（0.13 归档、0.14 规模与检索、0.15 维护）
 ```
 
 ## 开发与测试
@@ -328,6 +332,8 @@ node --test tests/*.test.mjs
 测试不会读取真实 QQ 数据；增量同步、FTS 与「没有 FTS5」的用例使用临时合成库（`tests/test_incremental.py`），它们需要 `sqlcipher3`，没装时自动跳过。CI 会在 Ubuntu/Windows 上安装 `sqlcipher3-wheels` 与 `pyzipper` 让这些用例真正执行；本地想跑全套，把解释器指向插件的私有虚拟环境即可（`PYTHON=<venv>/bin/python node --test tests/*.test.mjs`）。
 
 Node 侧的网页与导出队列用例原本用一个 `#!/bin/sh` 假解释器，Windows 上无法启动，所以那 26 个用例一直被跳过。现在假解释器改成 `.py`、由真实 Python 运行，测试通过环境变量 `QQNT_HELPER_SCRIPT`（**仅供测试**：只在它是绝对路径时生效，生产环境从不设置）把 `web.js` 指向临时脚本。两个平台因此跑同一套用例，不再有平台相关的 skip。
+
+Windows 真机验收按 [`docs/windows-checklist.md`](docs/windows-checklist.md) 走一遍（12 项，每项都写了失败时先看哪个文件）；排查用户问题时，让对方在设置页点「下载诊断包」，那个 JSON 能判断平台、路径、依赖与表结构哪里不对。
 
 ## 已知问题 / 注意
 
