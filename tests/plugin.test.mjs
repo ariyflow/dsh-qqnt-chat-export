@@ -20,9 +20,50 @@ import { cleanupStorage, migrateWorkDir, removeWorkDirEntries, storageSnapshot }
 import { pruneAccountIndexes, startWebServer } from '../web.js'
 
 const actionHeaders = { 'content-type': 'application/json', 'x-qqnt-action': '1' }
+const PYTHON = process.env.PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3')
 
 async function tempDir() {
   return mkdtemp(path.join(os.tmpdir(), 'qqnt-test-'))
+}
+
+/**
+ * Point this process at a fake helper script.
+ *
+ * These cases used `#!/bin/sh` wrappers as fake interpreters, which Windows
+ * cannot spawn — that is why the web routes were skipped there. A `.py` run by
+ * the real interpreter works on both platforms; `QQNT_HELPER_SCRIPT` is the
+ * test-only seam in `web.js` (`queryCli()`), and only an absolute path counts.
+ *
+ * @param {string} dir - temporary directory
+ * @param {object} payload - JSON the fake prints on stdout
+ * @param {string|null} calls - file to append its argv to, for call assertions
+ * @returns {Promise<string>} the fake's path
+ */
+async function fakeHelper(dir, payload = {}, calls = null) {
+  const file = path.join(dir, 'fake-helper.py')
+  const reply = path.join(dir, 'fake-reply.json')
+  // Forward slashes keep a Windows path from being read as a Python escape.
+  const literal = (value) => JSON.stringify(value.replace(/\\/g, '/'))
+  await writeFile(reply, JSON.stringify(payload))
+  const lines = [
+    'import sys',
+    `with open(${literal(reply)}, encoding='utf-8') as f:`,
+    '    reply = f.read()',
+  ]
+  if (calls) {
+    lines.push(
+      `with open(${literal(calls)}, 'a', encoding='utf-8') as f:`,
+      "    print(' '.join(sys.argv[1:]), file=f)")
+  }
+  lines.push('print(reply)')
+  await writeFile(file, `${lines.join('\n')}\n`)
+  process.env.QQNT_HELPER_SCRIPT = file
+  return file
+}
+
+/** Back to the bundled helper (tests that need the real query layer). */
+function clearHelper() {
+  delete process.env.QQNT_HELPER_SCRIPT
 }
 
 test('settings defaults keep the UI on loopback', () => {
@@ -383,12 +424,11 @@ test('a missing interpreter returns 500 without killing the server', async () =>
   }
 })
 
-test('status exposes the automatic sync setting and its last run', {
-  skip: process.platform === 'win32' ? 'needs python3 on PATH' : false,
-}, async () => {
+test('status exposes the automatic sync setting and its last run', async () => {
+  clearHelper()
   const dir = await tempDir()
   const settings = {
-    python: 'python3', workDir: dir, autoSync: true, syncIntervalMinutes: 30,
+    python: PYTHON, workDir: dir, autoSync: true, syncIntervalMinutes: 30,
   }
   await writeFile(path.join(dir, 'sync-status.json'), JSON.stringify({
     checkedAt: 1700000000, lastSyncAt: 1699999000, added: 7, mode: 'incremental',
@@ -411,19 +451,14 @@ test('status exposes the automatic sync setting and its last run', {
   }
 })
 
-test('messages around and query syntax reach the helper verbatim', {
-  skip: process.platform === 'win32' ? 'needs a POSIX shell wrapper' : false,
-}, async () => {
+test('messages around and query syntax reach the helper verbatim', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
   const calls = path.join(dir, 'calls')
-  const wrapper = path.join(dir, 'py')
   // Answer with one row so the route returns 200; record the argv it got.
-  await writeFile(wrapper,
-    '#!/bin/sh\necho "$@" >> "' + calls + '"\necho \'{"total":1,"offset":0,"limit":40,"rows":[]}\'\n',
-    { mode: 0o755 })
-  const { server, base } = await startServer({ python: wrapper, workDir: work }, {})
+  await fakeHelper(dir, { total: 1, offset: 0, limit: 40, rows: [] }, calls)
+  const { server, base } = await startServer({ python: PYTHON, workDir: work }, {})
   const lastCall = async () => {
     for (let attempt = 0; attempt < 40; attempt += 1) {
       try {
@@ -453,19 +488,15 @@ test('messages around and query syntax reach the helper verbatim', {
   }
 })
 
-test('the stats route forwards the current filters to the helper', {
-  skip: process.platform === 'win32' ? 'needs a POSIX shell wrapper' : false,
-}, async () => {
+test('the stats route forwards the current filters to the helper', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
   const calls = path.join(dir, 'calls')
-  const wrapper = path.join(dir, 'py')
-  await writeFile(wrapper,
-    '#!/bin/sh\necho "$@" >> "' + calls + '"\n' +
-    'echo \'{"total":3,"chats":1,"senders":2,"monthly":[],"hourly":[],"topSenders":[],"topChats":[]}\'\n',
-    { mode: 0o755 })
-  const { server, base } = await startServer({ python: wrapper, workDir: work }, {})
+  await fakeHelper(dir, {
+    total: 3, chats: 1, senders: 2, monthly: [], hourly: [], topSenders: [], topChats: [],
+  }, calls)
+  const { server, base } = await startServer({ python: PYTHON, workDir: work }, {})
   const lastCall = async () => {
     for (let attempt = 0; attempt < 40; attempt += 1) {
       try {
@@ -495,24 +526,18 @@ test('the stats route forwards the current filters to the helper', {
   }
 })
 
-test('the media route streams a file resolved by the helper', {
-  skip: process.platform === 'win32' ? 'needs a POSIX shell wrapper' : false,
-}, async () => {
+test('the media route streams a file resolved by the helper', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
   const image = path.join(dir, 'pic.jpg')
   await writeFile(image, 'fake-jpeg-bytes')
   const calls = path.join(dir, 'calls')
-  const wrapper = path.join(dir, 'py')
-  const payload = JSON.stringify({
+  await fakeHelper(dir, {
     path: image, name: 'pic.jpg', size: 15, mime: 'image/jpeg',
     kind: 'image', thumbnail: true, seq: 1,
-  })
-  await writeFile(wrapper,
-    '#!/bin/sh\necho "$@" >> "' + calls + '"\n' + `echo '${payload}'\n`,
-    { mode: 0o755 })
-  const { server, base } = await startServer({ python: wrapper, workDir: work }, {})
+  }, calls)
+  const { server, base } = await startServer({ python: PYTHON, workDir: work }, {})
   const lastCall = async () => {
     for (let attempt = 0; attempt < 40; attempt += 1) {
       try {
@@ -545,19 +570,13 @@ test('the media route streams a file resolved by the helper', {
   }
 })
 
-test('the gallery route forwards the chat scope to the helper', {
-  skip: process.platform === 'win32' ? 'needs a POSIX shell wrapper' : false,
-}, async () => {
+test('the gallery route forwards the chat scope to the helper', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
   const calls = path.join(dir, 'calls')
-  const wrapper = path.join(dir, 'py')
-  await writeFile(wrapper,
-    '#!/bin/sh\necho "$@" >> "' + calls + '"\n'
-    + 'echo \'{"total":0,"offset":0,"limit":60,"items":[]}\'\n',
-    { mode: 0o755 })
-  const { server, base } = await startServer({ python: wrapper, workDir: work }, {})
+  await fakeHelper(dir, { total: 0, offset: 0, limit: 60, items: [] }, calls)
+  const { server, base } = await startServer({ python: PYTHON, workDir: work }, {})
   try {
     const response = await fetch(`${base}/api/media/list?chatKind=group&chatId=g1&limit=30`)
     assert.equal(response.status, 200)
@@ -582,9 +601,7 @@ test('the gallery route forwards the chat scope to the helper', {
   }
 })
 
-test('session aliases, pins and hidden chats merge in the web layer', {
-  skip: process.platform === 'win32' ? 'needs a POSIX shell wrapper' : false,
-}, async () => {
+test('session aliases, pins and hidden chats merge in the web layer', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
@@ -595,14 +612,12 @@ test('session aliases, pins and hidden chats merge in the web layer', {
       { kind: 'private', id: 'p1', name: '私聊一', qq: '2', messages: 3, lastTime: '2024-01-03' },
     ],
   }
-  const wrapper = path.join(dir, 'py')
-  await writeFile(wrapper,
-    '#!/bin/sh\n' + `echo '${JSON.stringify(sessions)}'\n`, { mode: 0o755 })
+  await fakeHelper(dir, sessions)
   await writeFile(path.join(work, 'chats-state.json'), JSON.stringify({
     'group:g1': { alias: '别名群', pinned: true },
     'private:p1': { hidden: true },
   }))
-  const { server, base } = await startServer({ python: wrapper, workDir: work }, {})
+  const { server, base } = await startServer({ python: PYTHON, workDir: work }, {})
   try {
     let payload = await (await fetch(`${base}/api/sessions`)).json()
     assert.deepEqual(payload.sessions.map((row) => row.id), ['g1', 'g2'])
@@ -666,18 +681,15 @@ test('the served page contains the startup checklist and key action', async () =
   }
 })
 
-test('status reuses the helper report while a build runs', {
-  skip: process.platform === 'win32' ? 'needs a POSIX shell wrapper' : false,
-}, async () => {
+test('status reuses the helper report while a build runs', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
   const calls = path.join(dir, 'calls.log')
-  const wrapper = path.join(dir, 'py')
-  // A real interpreter behind a counting wrapper: the page polls every 1.2 s
-  // during a build, and each poll used to spawn one of these.
-  await writeFile(wrapper, `#!/bin/sh\necho "$@" >> "${calls}"\nexec python3 "$@"\n`, { mode: 0o755 })
-  const { server, base } = await startServer({ python: wrapper, workDir: work }, {})
+  // A counting fake: the page polls every 1.2 s during a build, and each poll
+  // used to spawn one of these.
+  await fakeHelper(dir, { index: { exists: false, size: 0 } }, calls)
+  const { server, base } = await startServer({ python: PYTHON, workDir: work }, {})
   const spawns = async () => (await readFile(calls, 'utf8')).trim().split('\n').filter(Boolean).length
   try {
     const first = await (await fetch(`${base}/api/status`)).json()
@@ -700,14 +712,13 @@ test('status reuses the helper report while a build runs', {
   }
 })
 
-test('index select validates input and rejects a missing cache', {
-  skip: process.platform === 'win32' ? 'needs python3 on PATH' : false,
-}, async () => {
+test('index select validates input and rejects a missing cache', async () => {
+  clearHelper()
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
   const { server, base } = await startServer(
-    { python: 'python3', workDir: work, keepAccountIndexes: 3 }, {})
+    { python: PYTHON, workDir: work, keepAccountIndexes: 3 }, {})
   try {
     let response = await fetch(`${base}/api/index/select`, {
       method: 'POST',
@@ -777,15 +788,12 @@ test('migration leaves stale status and journal sidecars behind', async () => {
   }
 })
 
-test('lowering the cache limit spawns a prune with the new value', {
-  skip: process.platform === 'win32' ? 'needs a POSIX shell wrapper' : false,
-}, async () => {
+test('lowering the cache limit spawns a prune with the new value', async () => {
   const dir = await tempDir()
   try {
     const calls = path.join(dir, 'calls')
-    const wrapper = path.join(dir, 'py')
-    await writeFile(wrapper, `#!/bin/sh\necho "$@" >> "${calls}"\n`, { mode: 0o755 })
-    assert.equal(pruneAccountIndexes({ python: wrapper, workDir: dir }, 0), true)
+    const helper = await fakeHelper(dir, {}, calls)
+    assert.equal(pruneAccountIndexes({ python: PYTHON, workDir: dir }, 0), true)
     let argv = ''
     for (let attempt = 0; attempt < 60 && argv === ''; attempt += 1) {
       try {
@@ -794,7 +802,8 @@ test('lowering the cache limit spawns a prune with the new value', {
         await new Promise((resolve) => setTimeout(resolve, 50))
       }
     }
-    assert.match(argv, /qqnt_query\.py/)
+    // The fake replaced the bundled script path; the arguments are the contract.
+    assert.ok(existsSync(helper))
     assert.match(argv, /--work/)
     assert.match(argv, / prune --keep 0$/)
   } finally {
@@ -802,15 +811,14 @@ test('lowering the cache limit spawns a prune with the new value', {
   }
 })
 
-test('work dir migration is a guarded mutation', {
-  skip: process.platform === 'win32' ? 'needs python3 on PATH' : false,
-}, async () => {
+test('work dir migration is a guarded mutation', async () => {
+  clearHelper()
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
   let calls = 0
   const { server, base } = await startServer(
-    { python: 'python3', workDir: work, workDirLegacy: true }, {
+    { python: PYTHON, workDir: work, workDirLegacy: true }, {
       migrateWorkDir: async () => {
         calls += 1
         return { copied: ['key.txt'], skipped: [], from: work, to: '/persistent' }

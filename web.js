@@ -30,6 +30,21 @@ const MAX_BATCH_CHATS = 200
 const EXPORT_DIR_MAX_AGE_MS = 60 * 60 * 1000
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
 
+/**
+ * Path of the helper this process runs.
+ *
+ * `QQNT_HELPER_SCRIPT` is a **test-only** seam. The Node suites used a
+ * `#!/bin/sh` wrapper as a fake interpreter, which Windows cannot spawn, so the
+ * web routes were the 16 cases that never ran on the Windows CI job. A test now
+ * points this variable at a small `.py` fake and runs it with a real
+ * interpreter. Only an absolute path is accepted, and the variable is unset in
+ * every shipped install — nothing about the default path changes.
+ */
+function queryCli() {
+  const override = process.env.QQNT_HELPER_SCRIPT
+  return override && path.isAbsolute(override) ? override : QUERY_CLI
+}
+
 /** Reported in the diagnostics bundle; the installed copy ships package.json. */
 const BUNDLE_VERSION = (() => {
   try {
@@ -131,7 +146,7 @@ function spawnBuild(settings, argv) {
 
 /** argv prefix shared by every detached helper run. */
 function helperArgv(settings, command) {
-  const argv = ['-X', 'utf8', QUERY_CLI, '--work', settings.workDir]
+  const argv = ['-X', 'utf8', queryCli(), '--work', settings.workDir]
   if (settings.tencentRoot) argv.push('--root', settings.tencentRoot)
   if (settings.account) argv.push('--account', String(settings.account))
   argv.push(command)
@@ -188,7 +203,7 @@ export function spawnAutosync(settings, { keep, search } = {}) {
 /** One python invocation returning parsed JSON from stdout. */
 function runJson(settings, command, args = {}, { signal } = {}) {
   return new Promise((resolve, reject) => {
-    const argv = ['-X', 'utf8', QUERY_CLI, '--work', settings.workDir]
+    const argv = ['-X', 'utf8', queryCli(), '--work', settings.workDir]
     if (settings.tencentRoot) argv.push('--root', settings.tencentRoot)
     if (settings.account) argv.push('--account', String(settings.account))
     argv.push(command)
@@ -652,7 +667,7 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
 
   // Long exports belong to a queue, not to one request: parsing a 1.2M-row
   // account takes minutes and used to be cut at the 180-second timeout.
-  const queue = createExportQueue({ settings, queryCli: QUERY_CLI })
+  const queue = createExportQueue({ settings, queryCli: queryCli() })
 
   let pageHtml = ''
   try {
@@ -1246,7 +1261,7 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
         return
       }
       const refresh = params.get('refresh') === '1'
-      const argv = ['-X', 'utf8', QUERY_CLI, '--work', settings.workDir]
+      const argv = ['-X', 'utf8', queryCli(), '--work', settings.workDir]
       if (settings.tencentRoot) argv.push('--root', settings.tencentRoot)
       if (settings.account) argv.push('--account', String(settings.account))
       argv.push('build')

@@ -44,9 +44,10 @@ jobs:
         run: python -m py_compile scripts/qqnt_export.py scripts/qqnt_query.py
 
       # The incremental-build tests need SQLCipher to open their synthetic
-      # database; without it they skip, so a missing wheel must not fail CI.
-      - name: SQLCipher test dependency
-        run: python -m pip install --disable-pip-version-check sqlcipher3-wheels || echo "sqlcipher3 unavailable; encrypted tests will skip"
+      # database, and the password-ZIP cases need pyzipper; without them those
+      # tests skip, so a missing wheel must not fail CI.
+      - name: SQLCipher and pyzipper test dependencies
+        run: python -m pip install --disable-pip-version-check sqlcipher3-wheels pyzipper || echo "test wheels unavailable; encrypted/password cases will skip"
 
       - name: Unit tests
         run: |

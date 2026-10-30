@@ -325,7 +325,9 @@ python -m unittest discover -s tests -v
 node --test tests/*.test.mjs
 ```
 
-测试不会读取真实 QQ 数据；增量同步、FTS 与「没有 FTS5」的用例使用临时合成库（`tests/test_incremental.py`），它们需要 `sqlcipher3`，没装时自动跳过。CI 会在 Ubuntu/Windows 上安装 `sqlcipher3-wheels` 让这些用例真正执行；本地想跑全套，把解释器指向插件的私有虚拟环境即可。
+测试不会读取真实 QQ 数据；增量同步、FTS 与「没有 FTS5」的用例使用临时合成库（`tests/test_incremental.py`），它们需要 `sqlcipher3`，没装时自动跳过。CI 会在 Ubuntu/Windows 上安装 `sqlcipher3-wheels` 与 `pyzipper` 让这些用例真正执行；本地想跑全套，把解释器指向插件的私有虚拟环境即可（`PYTHON=<venv>/bin/python node --test tests/*.test.mjs`）。
+
+Node 侧的网页与导出队列用例原本用一个 `#!/bin/sh` 假解释器，Windows 上无法启动，所以那 26 个用例一直被跳过。现在假解释器改成 `.py`、由真实 Python 运行，测试通过环境变量 `QQNT_HELPER_SCRIPT`（**仅供测试**：只在它是绝对路径时生效，生产环境从不设置）把 `web.js` 指向临时脚本。两个平台因此跑同一套用例，不再有平台相关的 skip。
 
 ## 已知问题 / 注意
 

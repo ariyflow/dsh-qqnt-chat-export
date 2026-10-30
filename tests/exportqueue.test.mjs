@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -8,18 +8,23 @@ import { createExportQueue, MAX_CONCURRENT } from '../exportQueue.js'
 import { startWebServer } from '../web.js'
 
 const actionHeaders = { 'content-type': 'application/json', 'x-qqnt-action': '1' }
-const POSIX_ONLY = process.platform === 'win32' ? 'needs a POSIX shell wrapper' : false
+const PYTHON = process.env.PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3')
 
 async function tempDir() {
   return mkdtemp(path.join(os.tmpdir(), 'qqnt-queue-'))
 }
 
 /**
- * A stand-in interpreter that writes the requested file and prints the JSON
+ * A stand-in helper script that writes the requested file and prints the JSON
  * shape the real helper produces. `mode` switches to a slow or failing run.
+ *
+ * It is a plain `.py` run by the real interpreter rather than a `#!/bin/sh`
+ * wrapper: Windows cannot spawn the wrapper, which kept 26 cases skipped there.
+ * Direct queue tests pass the path as `queryCli`; the HTTP routes get it through
+ * `QQNT_HELPER_SCRIPT` (a test-only seam, see `queryCli()` in web.js).
  */
-async function fakePython(dir, mode = 'ok') {
-  const file = path.join(dir, `py-${mode}`)
+async function fakeHelper(dir, mode = 'ok') {
+  const file = path.join(dir, `py-${mode}.py`)
   const body = {
     ok: `import json, os, sys
 args = sys.argv[1:]
@@ -53,8 +58,7 @@ payload = json.loads(args[args.index('--json') + 1])
 print(json.dumps({'path': '/etc/passwd', 'format': payload['format'],
                   'rows': 1, 'bytes': 1, 'label': 'x'}))`,
   }[mode]
-  await writeFile(file, `#!/bin/sh\nexec python3 - "$@" <<'PYEOF'\n${body}\nPYEOF\n`)
-  await chmod(file, 0o755)
+  await writeFile(file, `${body}\n`)
   return file
 }
 
@@ -82,14 +86,12 @@ async function startServer(settings) {
   throw new Error('could not bind a test port')
 }
 
-test('a queued export runs in the background and becomes downloadable', {
-  skip: POSIX_ONLY,
-}, async () => {
+test('a queued export runs in the background and becomes downloadable', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
-  const python = await fakePython(dir)
-  const queue = createExportQueue({ settings: { python, workDir: work }, queryCli: 'x.py' })
+  const helper = await fakeHelper(dir)
+  const queue = createExportQueue({ settings: { python: PYTHON, workDir: work }, queryCli: helper })
   try {
     const task = queue.enqueue({ chatKind: 'group', chatId: '1' }, { label: '群 1', format: 'txt' })
     assert.ok(task)
@@ -109,12 +111,12 @@ test('a queued export runs in the background and becomes downloadable', {
   }
 })
 
-test('a failing export reports the helper error', { skip: POSIX_ONLY }, async () => {
+test('a failing export reports the helper error', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
-  const python = await fakePython(dir, 'fail')
-  const queue = createExportQueue({ settings: { python, workDir: work }, queryCli: 'x.py' })
+  const helper = await fakeHelper(dir, 'fail')
+  const queue = createExportQueue({ settings: { python: PYTHON, workDir: work }, queryCli: helper })
   try {
     const task = queue.enqueue({}, { label: '全部', format: 'csv' })
     const failed = await waitFor(() => queue.list().tasks.find((row) => row.state !== 'running'))
@@ -127,14 +129,12 @@ test('a failing export reports the helper error', { skip: POSIX_ONLY }, async ()
   }
 })
 
-test('a helper that reports a path outside exports is refused', {
-  skip: POSIX_ONLY,
-}, async () => {
+test('a helper that reports a path outside exports is refused', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
-  const python = await fakePython(dir, 'outside')
-  const queue = createExportQueue({ settings: { python, workDir: work }, queryCli: 'x.py' })
+  const helper = await fakeHelper(dir, 'outside')
+  const queue = createExportQueue({ settings: { python: PYTHON, workDir: work }, queryCli: helper })
   try {
     const task = queue.enqueue({}, { label: 'x', format: 'txt' })
     const done = await waitFor(() => queue.list().tasks.find((row) => row.state !== 'running'))
@@ -146,12 +146,12 @@ test('a helper that reports a path outside exports is refused', {
   }
 })
 
-test('only three exports run at once', { skip: POSIX_ONLY }, async () => {
+test('only three exports run at once', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
-  const python = await fakePython(dir, 'hang')
-  const queue = createExportQueue({ settings: { python, workDir: work }, queryCli: 'x.py' })
+  const helper = await fakeHelper(dir, 'hang')
+  const queue = createExportQueue({ settings: { python: PYTHON, workDir: work }, queryCli: helper })
   try {
     for (let index = 0; index < MAX_CONCURRENT; index += 1) {
       assert.ok(queue.enqueue({}, { label: `t${index}`, format: 'txt' }))
@@ -164,14 +164,12 @@ test('only three exports run at once', { skip: POSIX_ONLY }, async () => {
   }
 })
 
-test('a running export can be cancelled and frees its slot', {
-  skip: POSIX_ONLY,
-}, async () => {
+test('a running export can be cancelled and frees its slot', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
-  const python = await fakePython(dir, 'hang')
-  const queue = createExportQueue({ settings: { python, workDir: work }, queryCli: 'x.py' })
+  const helper = await fakeHelper(dir, 'hang')
+  const queue = createExportQueue({ settings: { python: PYTHON, workDir: work }, queryCli: helper })
   try {
     const task = queue.enqueue({}, { label: '慢任务', format: 'txt' })
     assert.ok(task)
@@ -191,14 +189,13 @@ test('a running export can be cancelled and frees its slot', {
   }
 })
 
-test('the HTTP route queues, reports and serves a finished export', {
-  skip: POSIX_ONLY,
-}, async () => {
+test('the HTTP route queues, reports and serves a finished export', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
-  const python = await fakePython(dir)
-  const { server, base } = await startServer({ python, workDir: work })
+  const helper = await fakeHelper(dir)
+  process.env.QQNT_HELPER_SCRIPT = helper
+  const { server, base } = await startServer({ python: PYTHON, workDir: work })
   try {
     let response = await fetch(`${base}/api/export/queue`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -238,12 +235,13 @@ test('the HTTP route queues, reports and serves a finished export', {
   }
 })
 
-test('the HTTP route bundles a batch selection as one zip', { skip: POSIX_ONLY }, async () => {
+test('the HTTP route bundles a batch selection as one zip', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
-  const python = await fakePython(dir, 'echo')
-  const { server, base } = await startServer({ python, workDir: work })
+  const helper = await fakeHelper(dir, 'echo')
+  process.env.QQNT_HELPER_SCRIPT = helper
+  const { server, base } = await startServer({ python: PYTHON, workDir: work })
   try {
     const response = await fetch(`${base}/api/export/queue`, {
       method: 'POST', headers: actionHeaders,
@@ -279,12 +277,13 @@ test('the HTTP route bundles a batch selection as one zip', { skip: POSIX_ONLY }
   }
 })
 
-test('a media export is bundled as a zip even for one chat', { skip: POSIX_ONLY }, async () => {
+test('a media export is bundled as a zip even for one chat', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
-  const python = await fakePython(dir, 'echo')
-  const { server, base } = await startServer({ python, workDir: work })
+  const helper = await fakeHelper(dir, 'echo')
+  process.env.QQNT_HELPER_SCRIPT = helper
+  const { server, base } = await startServer({ python: PYTHON, workDir: work })
   try {
     const response = await fetch(`${base}/api/export/queue`, {
       method: 'POST', headers: actionHeaders,
@@ -307,12 +306,13 @@ test('a media export is bundled as a zip even for one chat', { skip: POSIX_ONLY 
   }
 })
 
-test('an embedded HTML export stays one html file', { skip: POSIX_ONLY }, async () => {
+test('an embedded HTML export stays one html file', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
-  const python = await fakePython(dir, 'echo')
-  const { server, base } = await startServer({ python, workDir: work })
+  const helper = await fakeHelper(dir, 'echo')
+  process.env.QQNT_HELPER_SCRIPT = helper
+  const { server, base } = await startServer({ python: PYTHON, workDir: work })
   try {
     let response = await fetch(`${base}/api/export/queue`, {
       method: 'POST', headers: actionHeaders,
@@ -349,12 +349,13 @@ test('an embedded HTML export stays one html file', { skip: POSIX_ONLY }, async 
   }
 })
 
-test('a day-split export is bundled as a zip', { skip: POSIX_ONLY }, async () => {
+test('a day-split export is bundled as a zip', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
-  const python = await fakePython(dir, 'echo')
-  const { server, base } = await startServer({ python, workDir: work })
+  const helper = await fakeHelper(dir, 'echo')
+  process.env.QQNT_HELPER_SCRIPT = helper
+  const { server, base } = await startServer({ python: PYTHON, workDir: work })
   try {
     let response = await fetch(`${base}/api/export/queue`, {
       method: 'POST', headers: actionHeaders,
@@ -382,14 +383,13 @@ test('a day-split export is bundled as a zip', { skip: POSIX_ONLY }, async () =>
   }
 })
 
-test('a password export travels in the environment and comes back encrypted', {
-  skip: POSIX_ONLY,
-}, async () => {
+test('a password export travels in the environment and comes back encrypted', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
-  const python = await fakePython(dir, 'echo')
-  const { server, base } = await startServer({ python, workDir: work })
+  const helper = await fakeHelper(dir, 'echo')
+  process.env.QQNT_HELPER_SCRIPT = helper
+  const { server, base } = await startServer({ python: PYTHON, workDir: work })
   try {
     let response = await fetch(`${base}/api/export/queue`, {
       method: 'POST', headers: actionHeaders,
@@ -427,14 +427,13 @@ test('a password export travels in the environment and comes back encrypted', {
   }
 })
 
-test('CSV columns and Markdown front-matter reach the helper', {
-  skip: POSIX_ONLY,
-}, async () => {
+test('CSV columns and Markdown front-matter reach the helper', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
-  const python = await fakePython(dir, 'echo')
-  const { server, base } = await startServer({ python, workDir: work })
+  const helper = await fakeHelper(dir, 'echo')
+  process.env.QQNT_HELPER_SCRIPT = helper
+  const { server, base } = await startServer({ python: PYTHON, workDir: work })
   try {
     let response = await fetch(`${base}/api/export/queue`, {
       method: 'POST', headers: actionHeaders,
@@ -472,12 +471,13 @@ test('CSV columns and Markdown front-matter reach the helper', {
   }
 })
 
-test('the HTTP route refuses a malformed batch selection', { skip: POSIX_ONLY }, async () => {
+test('the HTTP route refuses a malformed batch selection', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
-  const python = await fakePython(dir)
-  const { server, base } = await startServer({ python, workDir: work })
+  const helper = await fakeHelper(dir)
+  process.env.QQNT_HELPER_SCRIPT = helper
+  const { server, base } = await startServer({ python: PYTHON, workDir: work })
   try {
     let response = await fetch(`${base}/api/export/queue`, {
       method: 'POST', headers: actionHeaders,
@@ -496,12 +496,13 @@ test('the HTTP route refuses a malformed batch selection', { skip: POSIX_ONLY },
   }
 })
 
-test('the HTTP route cancels a running export', { skip: POSIX_ONLY }, async () => {
+test('the HTTP route cancels a running export', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
-  const python = await fakePython(dir, 'hang')
-  const { server, base } = await startServer({ python, workDir: work })
+  const helper = await fakeHelper(dir, 'hang')
+  process.env.QQNT_HELPER_SCRIPT = helper
+  const { server, base } = await startServer({ python: PYTHON, workDir: work })
   try {
     const queued = await fetch(`${base}/api/export/queue`, {
       method: 'POST', headers: actionHeaders,
@@ -537,12 +538,13 @@ test('the HTTP route cancels a running export', { skip: POSIX_ONLY }, async () =
   }
 })
 
-test('the HTTP route answers 429 when every slot is busy', { skip: POSIX_ONLY }, async () => {
+test('the HTTP route answers 429 when every slot is busy', async () => {
   const dir = await tempDir()
   const work = path.join(dir, 'work')
   await mkdir(work)
-  const python = await fakePython(dir, 'hang')
-  const { server, base } = await startServer({ python, workDir: work })
+  const helper = await fakeHelper(dir, 'hang')
+  process.env.QQNT_HELPER_SCRIPT = helper
+  const { server, base } = await startServer({ python: PYTHON, workDir: work })
   try {
     for (let index = 0; index < MAX_CONCURRENT; index += 1) {
       const response = await fetch(`${base}/api/export/queue`, {
