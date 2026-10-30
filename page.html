@@ -174,6 +174,7 @@
   .chat-hits { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 16px; border-bottom: 1px solid var(--line); }
   .chat-hits .chip { font-size: 12px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--text); cursor: pointer; }
   .chat-hits .chip:hover { border-color: var(--accent); color: var(--accent); }
+  .chat-hits .chip-export { border-color: var(--accent); color: var(--accent); font-weight: 600; }
   .saved { border-bottom: 1px solid var(--line); font-size: 12px; }
   .saved summary { padding: 8px 12px; cursor: pointer; color: var(--muted); user-select: none; }
   .saved .saved-list { padding: 0 12px 8px; display: flex; flex-direction: column; gap: 3px; max-height: 180px; overflow: auto; }
@@ -181,6 +182,12 @@
   .saved .saved-item .apply { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; background: none; color: var(--text); cursor: pointer; font-size: 12px; padding: 2px 0; }
   .saved .saved-item .apply:hover { color: var(--accent); }
   .saved .saved-item .del { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; }
+  .preset-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+  .preset-row { display: flex; align-items: center; gap: 10px; font-size: 13px; padding: 4px 0; border-bottom: 1px dashed var(--line); }
+  .preset-row b { flex: none; }
+  .preset-row .preset-detail { flex: 1; min-width: 0; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .preset-save { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  .preset-save input { flex: 1; }
   .heat { display: grid; grid-template-columns: 34px repeat(24, 1fr); gap: 2px; font-size: 10px; align-items: center; }
   .heat .lbl { color: var(--muted); white-space: nowrap; }
   .heat .cell { aspect-ratio: 1; border-radius: 2px; background: var(--panel); }
@@ -419,6 +426,9 @@
       <button class="ghost" type="button" id="clear">清空</button>
       <button class="ghost" type="button" id="saveSearch" title="把当前筛选条件保存到本机浏览器，之后一键重放">保存搜索</button>
       <span class="spacer"></span>
+      <select id="presetPick" title="套用一个保存过的导出预设（格式/脱敏/媒体/列）">
+        <option value="">套用预设…</option>
+      </select>
       <select id="format">
         <option value="txt">纯文本 .txt</option>
         <option value="csv">表格 .csv</option>
@@ -577,6 +587,21 @@
       </div>
     </section>
 
+    <section class="card" id="presetsCard">
+      <div class="card-head">
+        <h3>导出预设</h3>
+        <button class="ghost" type="button" id="presetRefresh">刷新</button>
+      </div>
+      <p class="hint">把当前的导出格式 / 脱敏 / 媒体 / 列组合存成一个名字，导出区下拉即可套用；
+        模型工具也能用 <code>preset</code> 参数引用。列表写在 <code id="presetsFile"></code>，只有选项，不含聊天内容。</p>
+      <div class="preset-list" id="presetList"><span class="hint">正在读取预设…</span></div>
+      <div class="preset-save">
+        <input type="text" id="presetName" maxlength="40" placeholder="预设名字，例如「CSV 只要时间和正文」">
+        <button class="ghost" type="button" id="presetSave">保存当前导出设置</button>
+      </div>
+      <span class="hint" id="presetHint"></span>
+    </section>
+
     <section class="card" id="diagnosticsCard">
       <div class="card-head">
         <h3>诊断</h3>
@@ -677,6 +702,7 @@
     hiddenVisible: false,
     lastSyncCheck: 0,
     statsData: null,
+    presets: [],
     statsBusy: false,
     statsRun: 0,
     statsAbort: null,
@@ -1493,6 +1519,55 @@
       }
       host.appendChild(chip)
     })
+    // Cross-chat hits are exactly the "these chats" set a batch export wants,
+    // so offer it right there instead of ticking boxes one by one.
+    var exportChip = document.createElement('button')
+    exportChip.type = 'button'
+    exportChip.className = 'chip chip-export'
+    exportChip.textContent = '导出这些会话（' + rows.length + '）'
+    exportChip.title = '把命中的会话一起导出成一个 ZIP（每个会话一个文件 + 清单）'
+    exportChip.onclick = function () { exportSearchHits(rows) }
+    host.appendChild(exportChip)
+  }
+
+  /** Queue a batch export for the chats a cross-chat search hit. */
+  function exportSearchHits(rows) {
+    if (!rows || !rows.length) {
+      toast('当前没有命中的会话')
+      return
+    }
+    if (rows.length > 200) {
+      toast('命中 ' + rows.length + ' 个会话，一次最多导出 200 个：先用更具体的关键词缩小范围')
+      return
+    }
+    if ($('embed').checked) {
+      toast('内嵌图片只支持单个会话，不能用于批量导出')
+      return
+    }
+    var password = $('zipPassword').value
+    if (password && password.length < 4) {
+      toast('ZIP 密码至少 4 个字符')
+      return
+    }
+    api('/api/export/queue', {
+      method: 'POST',
+      body: Object.assign({}, exportExtras(), {
+        chats: rows.map(function (row) {
+          return { kind: row.kind, id: row.id, label: row.name }
+        }),
+        format: $('format').value,
+        label: '搜索命中 ' + rows.length + ' 个会话',
+        redact: $('redact').value,
+        media: $('media').checked,
+        split: $('split').checked ? 'day' : '',
+        password: password,
+      }),
+    }).then(function () {
+      $('zipPassword').value = ''
+      toast('已加入导出队列：' + rows.length + ' 个命中会话（ZIP）')
+      showTaskPanel()
+      pollTasks()
+    }).catch(function (error) { toast(error.message) })
   }
 
   function loadMessages(reset) {
@@ -1977,6 +2052,138 @@
     $('frontMatterWrap').classList.toggle('hidden', format !== 'md')
   }
 
+  // ------------------------------------------------------------ 导出预设
+  /** One line describing what a preset will do, for the lists and tooltips. */
+  function presetSummary(preset) {
+    var parts = [String(preset.format || 'txt').toUpperCase()]
+    if (preset.embed) parts.push('内嵌图片')
+    if (preset.media) parts.push('含媒体')
+    if (preset.split === 'day') parts.push('按天分文件')
+    if (preset.redact === 'names') parts.push('昵称打码')
+    else if (preset.redact === 'qq') parts.push('QQ 号打码')
+    else if (preset.redact === 'all') parts.push('昵称 + QQ 号打码')
+    if (preset.format === 'csv' && preset.columns && preset.columns.length) {
+      parts.push(preset.columns.join('/'))
+    }
+    if (preset.frontMatter) parts.push('MD 元信息')
+    return parts.join(' · ')
+  }
+
+  /** Read the current export controls as a preset (the page's own shape). */
+  function currentPreset(name) {
+    return {
+      name: name,
+      format: $('format').value,
+      redact: $('redact').value,
+      media: $('media').checked,
+      embed: $('embed').checked,
+      split: $('split').checked ? 'day' : '',
+      frontMatter: $('frontMatter').checked,
+      columns: $('format').value === 'csv' ? $('csvCols').value.split(',') : [],
+    }
+  }
+
+  function fillPresetSelect() {
+    var pick = $('presetPick')
+    var current = pick.value
+    pick.innerHTML = '<option value="">套用预设…</option>'
+    state.presets.forEach(function (preset) {
+      var option = document.createElement('option')
+      option.value = preset.name
+      option.textContent = preset.name
+      option.title = presetSummary(preset)
+      pick.appendChild(option)
+    })
+    pick.value = state.presets.some(function (item) { return item.name === current }) ? current : ''
+  }
+
+  function renderPresets() {
+    var host = $('presetList')
+    if (!state.presets.length) {
+      host.innerHTML = '<span class="hint">还没有预设：先调好导出区的格式/脱敏/媒体，再来这里保存。</span>'
+      return
+    }
+    host.innerHTML = ''
+    state.presets.forEach(function (preset) {
+      var row = document.createElement('div')
+      row.className = 'preset-row'
+      var name = document.createElement('b')
+      name.textContent = preset.name
+      var detail = document.createElement('span')
+      detail.className = 'preset-detail'
+      detail.textContent = presetSummary(preset)
+      var use = document.createElement('button')
+      use.className = 'ghost'
+      use.type = 'button'
+      use.textContent = '套用'
+      use.onclick = function () {
+        applyPresetToForm(preset)
+        closeSettings()
+        toast('已套用预设：' + preset.name)
+      }
+      var remove = document.createElement('button')
+      remove.className = 'ghost'
+      remove.type = 'button'
+      remove.textContent = '删除'
+      remove.onclick = function () {
+        state.presets = state.presets.filter(function (item) { return item.name !== preset.name })
+        savePresets()
+      }
+      row.appendChild(name)
+      row.appendChild(detail)
+      row.appendChild(use)
+      row.appendChild(remove)
+      host.appendChild(row)
+    })
+  }
+
+  function applyPresetToForm(preset) {
+    $('format').value = preset.format || 'txt'
+    $('redact').value = preset.redact || ''
+    $('media').checked = preset.media === true
+    $('embed').checked = preset.embed === true
+    $('split').checked = preset.split === 'day'
+    $('frontMatter').checked = preset.frontMatter === true
+    if (Array.isArray(preset.columns) && preset.columns.length > 0) {
+      var value = preset.columns.join(',')
+      // The dropdown only knows three fixed combinations; anything else keeps
+      // the current selection rather than silently exporting other columns.
+      if ($('csvCols').querySelector('option[value="' + value + '"]')) $('csvCols').value = value
+    }
+    syncFormatOptions()
+  }
+
+  function savePresets() {
+    api('/api/presets', { method: 'POST', body: { presets: state.presets } })
+      .then(function (payload) {
+        state.presets = payload.presets || []
+        renderPresets()
+        fillPresetSelect()
+        $('presetHint').textContent = '已保存 ' + state.presets.length + ' 个预设。'
+      })
+      .catch(function (error) { $('presetHint').textContent = '保存失败：' + error.message })
+  }
+
+  function loadPresets() {
+    return api('/api/presets').then(function (payload) {
+      state.presets = payload.presets || []
+      renderPresets()
+      fillPresetSelect()
+    }).catch(function (error) { $('presetHint').textContent = '读取预设失败：' + error.message })
+  }
+
+  function addPresetFromForm() {
+    var name = $('presetName').value.trim()
+    if (!name) {
+      $('presetHint').textContent = '先给预设起个名字。'
+      return
+    }
+    state.presets = state.presets.filter(function (item) { return item.name !== name })
+    state.presets.unshift(currentPreset(name))
+    $('presetName').value = ''
+    savePresets()
+  }
+
   function download() {
     if (!state.indexReady) { toast('先建立索引'); return }
     if (!state.total) { toast('当前没有可导出的消息'); return }
@@ -2078,7 +2285,8 @@
       head.className = 't-head'
       var name = document.createElement('span')
       name.className = 't-name'
-      name.textContent = task.label + ' · ' + String(task.format).toUpperCase()
+      name.textContent = (task.restored ? '上次 · ' : '') + task.label + ' · ' +
+        String(task.format).toUpperCase()
       var stateText = document.createElement('span')
       stateText.className = 't-state'
       if (task.state === 'running') {
@@ -2089,6 +2297,8 @@
           (task.encrypted ? ' · 加密' : '')
       } else if (task.state === 'cancelled') {
         stateText.textContent = '已取消'
+      } else if (task.state === 'gone') {
+        stateText.textContent = '文件已清理'
       } else {
         stateText.textContent = '失败'
       }
@@ -2116,7 +2326,7 @@
         }
         row.appendChild(stop)
       }
-      if (task.state === 'error' && task.error) {
+      if ((task.state === 'error' || task.state === 'gone') && task.error) {
         var err = document.createElement('div')
         err.className = 't-error'
         err.textContent = task.error
@@ -2656,6 +2866,7 @@
       updateIndexPath()
       loadDiagnostics()
       loadStorage()
+      loadPresets()
       syncSetup()
       syncKeyJob()
     }).catch(function (error) { toast('读取设置失败：' + error.message) })
@@ -2848,6 +3059,22 @@
     }
   })
   $('format').addEventListener('change', syncFormatOptions)
+  $('presetSave').addEventListener('click', addPresetFromForm)
+  $('presetRefresh').addEventListener('click', function () { loadPresets() })
+  $('presetName').addEventListener('keydown', function (event) {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      addPresetFromForm()
+    }
+  })
+  $('presetPick').addEventListener('change', function () {
+    var name = this.value
+    this.value = ''
+    var preset = state.presets.filter(function (item) { return item.name === name })[0]
+    if (!preset) return
+    applyPresetToForm(preset)
+    toast('已套用预设：' + preset.name)
+  })
   $('download').addEventListener('click', download)
   $('statsBtn').addEventListener('click', openStats)
   $('statsRetry').addEventListener('click', openStats)
@@ -2942,6 +3169,7 @@
   syncFormatOptions()
   loadHistory()
   loadSaved()
+  loadPresets()
   pollTasks()
   refreshStatus(false)
   startStatusPoll()

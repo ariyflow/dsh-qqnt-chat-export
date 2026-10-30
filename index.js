@@ -31,7 +31,8 @@ import {
   venvPython,
 } from './settings.js'
 import { buildRunning, cleanupStorage, migrateWorkDir, removeWorkDirEntries, storageSnapshot } from './storage.js'
-import { pruneAccountIndexes, spawnAutosync, startWebServer } from './web.js'
+import { applyPreset, readPresets } from './presets.js'
+import { BUNDLE_VERSION, panelInfo, pruneAccountIndexes, spawnAutosync, startWebServer } from './web.js'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'qqnt-chat-export'
@@ -533,6 +534,10 @@ export function exportChatTool(settings) {
           type: 'boolean',
           description: 'Markdown only: start the file with a YAML front-matter block (chat, account, exportedAt).',
         },
+        preset: {
+          type: 'string',
+          description: 'Name of an export preset saved in the web UI (settings → 导出预设). Explicit arguments win over the preset.',
+        },
       },
     },
     output: { schema: outputSchema({ outPath: { type: 'string' } }), render: renderReport },
@@ -544,6 +549,17 @@ export function exportChatTool(settings) {
       const chatId = String(args.chatId ?? '').trim()
       if (!['group', 'private'].includes(kind) || chatId === '') {
         return { ok: false, exitCode: 1, outPath: '', output: 'chatKind 必须是 group 或 private，且 chatId 不能为空' }
+      }
+      if (typeof args.preset === 'string' && args.preset.trim() !== '') {
+        const wanted = args.preset.trim()
+        const preset = readPresets(settings.workDir).find((row) => row.name === wanted)
+        if (!preset) {
+          return {
+            ok: false, exitCode: 1, outPath: '',
+            output: `没有名为「${wanted}」的导出预设：先在网页设置页的「导出预设」里保存一个`,
+          }
+        }
+        args = applyPreset(args, preset)
       }
       const format = typeof args.format === 'string' ? args.format : 'txt'
       if (!['txt', 'csv', 'json', 'md', 'html', 'sqlite'].includes(format)) {
@@ -613,6 +629,150 @@ export function exportChatTool(settings) {
         }
       }
       return { ok: true, exitCode: 0, outPath: target, output: `已导出 ${payload.rows} 条到 ${target}` }
+    },
+  }
+}
+
+/**
+ * Batch export: several chats into one ZIP with a manifest.json.
+ *
+ * The page already had this (200-chat limit, one file per chat); the tool was
+ * missing it, so an Agent had to call `qqnt_export_chat` in a loop. Arguments
+ * mirror the page's batch route so both produce the same archive.
+ */
+export function exportBatchTool(settings) {
+  const CHAT_LIMIT = 200
+  return {
+    name: 'qqnt_export_batch',
+    description: 'Export up to 200 chats from the local QQ index into one ZIP that also contains a manifest.json (one file per chat). Supports formats, redaction, media, day-splitting, password ZIPs and a saved export preset. Requires the sidecar index.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['chats'],
+      properties: {
+        chats: {
+          type: 'array',
+          minItems: 1,
+          maxItems: CHAT_LIMIT,
+          description: 'Which chats to export: `{ kind, id }` entries, optionally with `label`.',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['kind', 'id'],
+            properties: {
+              kind: { type: 'string', enum: ['group', 'private'] },
+              id: { type: 'string', description: 'Group number, or the other party\'s uid.' },
+              label: { type: 'string', description: 'Name used in the file name inside the ZIP.' },
+            },
+          },
+        },
+        format: { type: 'string', enum: ['txt', 'csv', 'json', 'md', 'html', 'sqlite'], description: 'File format inside the ZIP. Defaults to txt.' },
+        outDir: { type: 'string', description: 'Absolute output directory. Defaults to QQ导出_<N>个会话 inside the user\'s downloads folder.' },
+        zipName: { type: 'string', description: 'Base name of the ZIP (without .zip). Defaults to QQ导出_<N>个会话.' },
+        redact: { type: 'string', enum: ['names', 'qq', 'all'], description: 'Pseudonymise senders/QQ numbers before writing.' },
+        media: { type: 'boolean', description: 'Copy downloaded media for every chat into the same ZIP.' },
+        split: { type: 'string', enum: ['day'], description: 'One file per local day per chat inside the ZIP.' },
+        password: { type: 'string', minLength: 4, maxLength: 128, description: 'AES-256 password for the ZIP (needs pyzipper).' },
+        preset: { type: 'string', description: 'Name of a saved export preset; explicit arguments win.' },
+        columns: {
+          type: 'array',
+          items: { type: 'string', enum: ['time', 'sender', 'qq', 'direction', 'kinds', 'text'] },
+          minItems: 1,
+          description: 'CSV only: which columns to write.',
+        },
+        frontMatter: { type: 'boolean', description: 'Markdown only: start each file with YAML front matter.' },
+      },
+    },
+    output: {
+      schema: outputSchema({
+        outPath: { type: 'string' },
+        chats: { type: 'integer' },
+        rows: { type: 'integer' },
+      }),
+      render: renderReport,
+    },
+    timeoutMs: EXPORT_TIMEOUT_MS,
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const empty = { ok: false, exitCode: 1, outPath: '', chats: 0, rows: 0 }
+      if (!existsSync(indexPath(settings))) return missingIndex(settings, empty)
+      if (typeof args.preset === 'string' && args.preset.trim() !== '') {
+        const wanted = args.preset.trim()
+        const preset = readPresets(settings.workDir).find((row) => row.name === wanted)
+        if (!preset) {
+          return { ...empty, output: `没有名为「${wanted}」的导出预设：先在网页设置页的「导出预设」里保存一个` }
+        }
+        args = applyPreset(args, preset)
+      }
+      const raw = Array.isArray(args.chats) ? args.chats : []
+      if (raw.length === 0) return { ...empty, output: 'chats 不能为空：至少给一个会话' }
+      if (raw.length > CHAT_LIMIT) return { ...empty, output: `一次最多导出 ${CHAT_LIMIT} 个会话（收到 ${raw.length} 个）` }
+      const chats = []
+      for (const item of raw) {
+        const kind = String(item?.kind ?? '')
+        const id = String(item?.id ?? '').trim()
+        if (!['group', 'private'].includes(kind) || id === '') {
+          return { ...empty, output: '每个会话都需要 kind（group/private）和非空 id' }
+        }
+        const label = typeof item?.label === 'string' ? item.label.trim().slice(0, 120) : ''
+        chats.push(label === '' ? { kind, id } : { kind, id, label })
+      }
+      const format = typeof args.format === 'string' ? args.format : 'txt'
+      if (!['txt', 'csv', 'json', 'md', 'html', 'sqlite'].includes(format)) {
+        return { ...empty, chats: chats.length, output: `不支持的格式: ${format}` }
+      }
+      const password = typeof args.password === 'string' ? args.password : ''
+      if (password && (password.length < 4 || password.length > 128)) {
+        return { ...empty, chats: chats.length, output: '密码长度需要 4~128 个字符' }
+      }
+      const media = args.media === true
+      const split = args.split === 'day' ? 'day' : ''
+      const redact = ['names', 'qq', 'all'].includes(args.redact) ? args.redact : ''
+      const label = `批量导出 ${chats.length} 个会话`
+      const outDir = typeof args.outDir === 'string' && args.outDir.trim() !== ''
+        ? path.resolve(args.outDir.trim())
+        : path.join(defaultDownloadDir(), `QQ导出_${chats.length}个会话`)
+      mkdirSync(outDir, { recursive: true, mode: 0o700 })
+      // Same staging rule as the single-chat tool: the query layer may only
+      // write inside workDir/exports, then the finished ZIP is moved out.
+      const staging = path.join(settings.workDir, 'exports',
+        `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.zip`)
+      const payloadArgs = { format, chats, out: staging, label }
+      if (redact) payloadArgs.redact = redact
+      if (media) payloadArgs.media = true
+      if (split) payloadArgs.split = 'day'
+      if (format === 'csv' && Array.isArray(args.columns) && args.columns.length > 0) {
+        payloadArgs.columns = args.columns.map(String)
+      }
+      if (format === 'md' && args.frontMatter === true) payloadArgs.frontMatter = true
+      const { code, payload } = await runQueryJson(
+        settings, ['export', '--json', JSON.stringify(payloadArgs)], exec,
+        password ? { QQNT_EXPORT_PASSWORD: password } : undefined)
+      if (code !== 0) {
+        return {
+          ok: false, exitCode: code, outPath: '', chats: chats.length, rows: 0,
+          output: payload.error || '批量导出失败',
+        }
+      }
+      const wanted = typeof args.zipName === 'string' ? args.zipName.trim().replace(/\.zip$/i, '') : ''
+      const stem = fileStem(wanted, `QQ导出_${chats.length}个会话`)
+      const target = uniqueTarget(outDir, stem, 'zip')
+      try {
+        renameSync(payload.path, target)
+      } catch (error) {
+        if (error.code !== 'EXDEV') throw error
+        copyFileSync(payload.path, target)
+        try {
+          rmSync(payload.path)
+        } catch {
+          // Leaving the staged copy is harmless; it is inside workDir.
+        }
+      }
+      const rows = Number(payload.rows) || 0
+      return {
+        ok: true, exitCode: 0, outPath: target, chats: chats.length, rows,
+        output: `已导出 ${chats.length} 个会话 / ${rows} 条到 ${target}`,
+      }
     },
   }
 }
@@ -874,6 +1034,8 @@ export function apply(ctx, config) {
   ctx.tools.register(listChatsTool(settings))
   ctx.tools.register(searchTool(settings))
   ctx.tools.register(exportChatTool(settings))
+  // Batch export: one ZIP, one manifest, instead of N tool calls.
+  ctx.tools.register(exportBatchTool(settings))
 
   let webUrl = ''
   let webServer = null
@@ -1587,6 +1749,55 @@ function isInsideDir(parent, child) {
     }, () => {
       if (webServer === server) webUrl = ''
     })
+  }
+
+  // ── DSH sidebar panel ──────────────────────────────────────────────────
+  // The panel mounts an iframe of this plugin's own UI, so it only needs the
+  // address. Asking the host server (same origin as the DSH page) keeps the
+  // browser from guessing a port or needing CORS, and keeps chat text out of
+  // DSH's DOM entirely: this route answers with counts, never messages.
+  const panelRoute = async (req, res) => {
+    const head = req.method === 'HEAD'
+    if (req.method !== 'GET' && !head) {
+      res.writeHead(405, { allow: 'GET, HEAD', 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ error: '只支持 GET' }))
+      return
+    }
+    let status = null
+    if (webUrl) {
+      try {
+        // Reuses the web server's own five-second status cache; a slow helper
+        // must not hold the panel hostage.
+        const reply = await fetch(`${webUrl}api/status`, { signal: AbortSignal.timeout(2000) })
+        if (reply.ok) status = await reply.json()
+      } catch {
+        status = null
+      }
+    }
+    const body = JSON.stringify(panelInfo(settings, {
+      version: BUNDLE_VERSION,
+      running: webUrl !== '',
+      status,
+    }))
+    res.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+    })
+    res.end(head ? undefined : body)
+  }
+
+  if (typeof ctx.inject === 'function') {
+    // Optional dependency on purpose: the CLI host has no `webServer`, and the
+    // panel is a bonus there — `ctx.inject` simply never fires.
+    ctx.inject(['webServer'], (child) => {
+      child.effect(() => child.webServer.register({
+        kind: 'exact', path: '/api/qqnt/panel', handler: panelRoute,
+      }), 'qqnt: sidebar panel route')
+    })
+  } else if (typeof ctx.webServer?.register === 'function') {
+    ctx.effect(() => ctx.webServer.register({
+      kind: 'exact', path: '/api/qqnt/panel', handler: panelRoute,
+    }), 'qqnt: sidebar panel route')
   }
 
   if (typeof ctx.effect === 'function') {

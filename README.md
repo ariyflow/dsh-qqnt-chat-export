@@ -1,6 +1,6 @@
 # dsh-qqnt-chat-export
 
-把 **Windows / Linux 上的 NTQQ（QQ NT / 9.9.x）聊天记录**读出来、搜出来、导出来 —— 一个 DeepSeek Harness 插件包：七个模型工具 + 一个本地网页界面，支持群聊和私聊，可导出 6 种格式。
+把 **Windows / Linux 上的 NTQQ（QQ NT / 9.9.x）聊天记录**读出来、搜出来、导出来 —— 一个 DeepSeek Harness 插件包：八个模型工具 + 一个本地网页界面，支持群聊和私聊，可导出 6 种格式。
 
 Read, search, and export NTQQ chat history from a DeepSeek Harness session or from a local web page, on Windows or Linux.
 
@@ -20,7 +20,8 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
 | `qqnt_export_group` | 导出单个群为 txt / sqlite / csv |
 | `qqnt_list_chats` | 索引里的**全部会话**（群聊 + 私聊）：类型、id、名称、消息数、最后时间 |
 | `qqnt_search` | 跨会话关键词搜索（可限定会话、发送者、日期；`senderRegex` 可把发送者当正则），返回会话/发送者/时间 |
-| `qqnt_export_chat` | 按 `chatKind` + `chatId` 导出任意会话为 txt / csv / json / md / html / sqlite；可选 `redact`（脱敏）、`media`（含媒体，ZIP）、`split=day`（按天分文件，ZIP）、`embed`（图片内嵌的单文件 HTML） |
+| `qqnt_export_chat` | 按 `chatKind` + `chatId` 导出任意会话为 txt / csv / json / md / html / sqlite；可选 `redact`（脱敏）、`media`（含媒体，ZIP）、`split=day`（按天分文件，ZIP）、`embed`（图片内嵌的单文件 HTML）、`preset`（套用网页里保存的导出预设） |
+| `qqnt_export_batch` | 一次导出最多 200 个会话到一个 ZIP（每个会话一份文件 + `manifest.json`），支持格式、脱敏、媒体、按天、密码与预设 |
 
 后三个工具读的是网页建立的旁路索引，因此能覆盖私聊和跨会话搜索；没有索引时会提示先去网页点「从 QQ 同步」。
 
@@ -42,6 +43,9 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
 - **按天分文件**：勾选后每个会话按日期拆成多个文件再打包成 ZIP，`manifest.json` 列出每天的文件和条数；可以和脱敏、媒体一起用；
 - **导出字段**：CSV 可选列（全部 / 时间+发送者+内容 / 时间+发送者+类型+内容）；Markdown 可选在开头加 YAML 元信息（会话、账号、导出时间），默认关闭；
 - **密码 ZIP**：在导出区填一个 4~128 位的密码，导出包会用 AES-256 加密（需要 `pyzipper`，一键安装会装）；密码只经子进程环境变量传递，不会出现在命令行、任务列表或日志里。ZIP 内的文件名不加密，内容加密；打开请用 7-Zip / WinRAR / Bandizip / macOS 归档工具，**Windows 资源管理器自带的解压不支持 AES**；
+- **导出预设**：把「格式 + 脱敏 + 媒体 + 按天 + CSV 列 + MD 元信息」存成一个名字（设置页「导出预设」，写在 `workDir/presets.json`），导出区下拉一键套用，模型工具也能用 `preset` 参数引用；预设里只有选项，没有聊天内容；
+- **任务面板记得上次**：导出任务列表写在 `workDir/exports/tasks.json`，重启 DSH 后上次的导出仍可下载；导出文件只保留一小时，被清掉的任务显示「文件已清理」而不是死链接；
+- 跨会话搜索的命中分布条右侧有「导出这些会话」，一次把命中的会话打成 ZIP（超过 200 个会提示先缩小范围）；
 - 「从 QQ 同步」复制最新数据库后**增量追新消息**；消息总数对不上（删除/回溯/换账号）时自动全量重建；
 - **启动提示**：网页打开后显示一次启动横幅，告知默认访问地址，并检查 Python / sqlcipher3 / pyzipper / 密钥；缺依赖时可一键创建独立虚拟环境并安装（默认源或清华镜像）；
 - **密钥提取**：启动横幅和设置页都有「提取密钥」按钮，网页内显示扫描进度、日志和结果；已配置时可重新提取；点击前后都会提示查找密钥耗时较长（通常 1~3 分钟），请耐心等待；
@@ -52,6 +56,20 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
 统计面板按当前筛选（会话 / 关键词 / 日期）计算，全部在本机完成：
 
 ![统计面板](docs/screenshot-stats.png)
+
+## 在 DSH 里用（侧边栏面板）
+
+装进 DSH 后，左侧栏会多一个「QQ 聊天记录」图标（`sidebar.panellist`，排在 Plugins 之后）。点一下，主区
+直接显示这个插件的页面——搜索、统计、导出、设置都在，不用再切浏览器标签。
+
+- 面板是一个内嵌的 iframe，地址由宿主路由 `GET /api/qqnt/panel` 提供（同源，只回端口、版本、索引条数、
+  上次同步时间这类元数据，不含任何聊天内容）；面板顶部有「刷新」和「在浏览器打开」。
+- 端口设成 0（网页服务关闭）或服务没起来时，面板显示中文提示和「刷新」，不会白屏。
+- 装了 [`dsh-better-sidebar`](https://github.com/omdsh-dev/DSH-better-sidebar) 时，还会在**右侧栏的「+」列表**里
+  多一个「QQ 聊天记录」tab，内容是同一个页面，适合在对话旁边侧看；没装或禁用它时，这个入口自动消失，
+  左栏面板不受影响（走的是它的公开服务 `ctx.betterSidebar.registerTab`，不是改它）。
+- 切换回「对话」再切回来时，外壳只挂载当前面板，iframe 会重新加载一次——页面自己的状态（关键词、勾选）
+  不跨切换保留，这一点比原生重写的面板差，作为已知限制列在下面。
 
 ## 要求
 
@@ -139,7 +157,7 @@ kernel.yama.ptrace_scope = 0
 plugin_manager install_bundle → github:ariyflow/dsh-qqnt-chat-export
 ```
 
-装好后插件行 `qqnt-chat-export` 会自动启用，七个工具立刻可见，网页在 `http://127.0.0.1:46728/`。
+装好后插件行 `qqnt-chat-export` 会自动启用，八个工具立刻可见，网页在 `http://127.0.0.1:46728/`。
 
 也可以克隆到本地后用绝对路径安装（`install_bundle` 接受目录）：
 
@@ -251,6 +269,8 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 - 「默认源安装」/「清华镜像安装」会从 PyPI 或清华镜像下载 `sqlcipher3-wheels` 和 `pyzipper` 并安装到插件私有虚拟环境，需要网络；都不会修改系统 Python。镜像内容由清华镜像同步，若不可用可换默认源。uv 同样只写入该虚拟环境；它下载的托管 Python 落在 uv 自己的缓存目录（默认 `~/.local/share/uv/python`，可用 `UV_PYTHON_INSTALL_DIR` 覆盖）。
 - 网页服务**只绑 `127.0.0.1`**，并拒绝非本机的 `Host` 和跨站 `POST`，但仍然建议只在本机使用。
 - 设置页的「诊断」卡片与 `GET /api/diagnostics` 只回**元数据**：插件版本、系统与位数、解释器、`sqlcipher3`/`pyzipper` 是否可用、表结构指纹、消息数/会话数、上次构建的模式与原因。版本号本身不是隐私，写进卡片和诊断包是为了能一眼确认装的是哪一版（这次「重启后被 GitHub 版本覆盖」就是靠它发现的）。
+- 侧边栏面板只经 `GET /api/qqnt/panel` 取地址与计数：插件版本、端口、是否在跑、索引条数、会话数、上次同步时间，**不含**消息、昵称、会话 id；页面本体走 iframe，聊天内容不进入 DSH 的 DOM。
+- `workDir/presets.json` 只存导出选项（格式/脱敏/媒体/列），`workDir/exports/tasks.json` 只存任务 id、状态、条数、时间与路径，单会话导出的任务名落盘时写成「聊天记录」而不是会话名。
 - **诊断包**（设置 → 诊断 → 下载诊断包，`GET /api/diagnostics/bundle`）是白名单拼出来的，只含这些字段：
   - `version`（插件版本）、`generatedAt`（生成时间，ISO）；
   - `platform`：`os` / `arch` / `bits` / `python` 版本号、`sqlcipher3` 与 `pyzipper` 是否可用、QQ 进程数、内存读取方式、是否找到数据根、账号个数、**账号的 `sha1` 前 8 位**；
@@ -285,7 +305,8 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 - 群成员昵称只覆盖同步过的成员，查不到时回退显示 QQ 号 —— 有消息但没昵称是正常现象。
 - `in:` 只在群名/群号**唯一匹配**时生效；匹配不到或有多个候选就按全部会话查询，并在返回结果里给出提示。带空格的多个关键词会被当成一整句话搜索（和之前的行为一致）。
 - 导出使用页面上「查询」时生效的筛选条件，但`from:`/`in:`/`has:`/`-` 这些内联语法只作用于搜索框查询与 `qqnt_search`，导出时不会展开。
-- 导出任务列表只存在内存里，重启插件/DSH 后清空（生成的文件仍在 `exports/`，一小时后自动清理）；任务面板只显示最近 8 个，接口保留 20 个。
+- 导出任务列表写在 `workDir/exports/tasks.json`（只有 id、状态、选项和路径，不含会话名），重启 DSH 后还在；导出文件本身只保留一小时，被清掉的任务显示「文件已清理」。任务面板只显示最近 8 个，接口保留 20 个。
+- 侧边栏面板是内嵌 iframe：切回「对话」再切回来时外壳会重新挂载，页面状态（关键词、勾选、滚动位置）不保留；面板宽度跟随 DSH 主区。
 - Linux 取密钥依赖 `ptrace` 权限（见上文）。没有权限时，只要已有 `key.txt` 或已建好的 `index.sqlite`，查询和导出仍然可用。
 - 设置里把端口改成 `0` 会关闭网页；在浏览器里无法再打开设置页，需要编辑 `~/.config/dsh-qqnt-chat-export/settings.json`（把 `webPort` 改成有效端口或删除该文件）并重启插件/DSH。
 - 清理正在下载的临时导出文件可能让该次下载提前结束；需要完整文件时等下载完成再清理。
@@ -301,9 +322,11 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 ## 目录结构
 
 ```
-index.js              插件入口：七个工具 + 启动网页服务
+index.js              插件入口：八个工具 + 启动网页服务 + 侧边栏面板路由
+client.js             浏览器半边：侧边栏图标 / 主面板 / better-sidebar tab（原生 iframe）
 web.js                本地 HTTP 服务与 JSON API
-exportQueue.js        后台导出队列（并发 3、任务面板、下载校验）
+exportQueue.js        后台导出队列（并发 3、任务面板、落盘恢复、下载校验）
+presets.js            导出预设的读写与合并（workDir/presets.json）
 settings.js           设置持久化、校验与默认值
 storage.js            生成文件统计与白名单清理
 page.html             单文件前端（无构建、无外部依赖）

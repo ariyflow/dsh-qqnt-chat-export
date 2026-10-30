@@ -134,6 +134,15 @@
 | 失败先看哪里 | `/api/status` 的 `workDir`/`workDirLegacy`/`sync` → `work\sync-status.json` → `%APPDATA%\dsh-qqnt-chat-export\settings.json` 的 `workDir` → 插件 stderr 里重启后的首行监听地址。 |
 | 实测 | 迁移：本机工作目录已在持久目录，`POST /api/workdir/migrate` 按设计返回 400「工作目录已经在持久位置」；「先复制、再切设置、最后删旧」的语义由 `tests/plugin.test.mjs` 覆盖，真机复制路径未跑（下次换机器或把 `workDir` 指到临时盘时补）。<br>自动同步：✅ 重启后 72 秒首跑（14:28:49 启动 → 14:30:01 写 `sync-status.json`），`mode=incremental`、`added=0`、`step=已是最新`——重启**没有**触发重建；`walPending=false`。<br>重启后状态：✅ 1,245,859 条 / 293 会话 / 索引账号 12345 全在；启动横幅显示「Python 3.12.4 · sqlcipher3 已安装 · 密码 ZIP 可用 · 数据库密钥：已配置」，关闭后刷新不再出现；无 console 报错。 |
 
+## 13. 侧边栏面板与预设（0.13.0）
+
+| | |
+|---|---|
+| 步骤 | 1. 重启 DSH，看左侧栏是否出现「QQ 聊天记录」图标（排在 Plugins 之后）。<br>2. 点图标，主区打开插件页面：搜一次、点「统计」、导出一份 txt。<br>3. 切回「对话」再切回面板；点顶部「刷新」「在浏览器打开」。<br>4. 把设置里的网页端口临时改成 0 并保存，再看面板提示；改回 46728。<br>5. 装了 `dsh-better-sidebar` 时，看右侧栏「+」列表里是否多一个「QQ 聊天记录」tab。<br>6. 设置页「导出预设」保存一个「CSV 只要时间和正文」，回导出区下拉套用，再删掉。 |
+| 预期 | 图标可点、有 tooltip；面板内搜索/统计/导出与浏览器一致；「刷新」重载 iframe、「在浏览器打开」新开标签；端口 0 时面板显示中文提示 + 刷新，不白屏；右栏 tab 打开的是同一页面；预设保存后刷新仍在、套用后格式/脱敏/列都变、删除后下拉里消失。 |
+| 失败先看哪里 | `GET /api/qqnt/panel`（应返回 `{version, port, running, url, indexed, messages, chats, lastSync}`）→ 浏览器控制台 `Refused to frame`（套 iframe 被 CSP 拦）→ `node_modules/dsh-qqnt-chat-export/client.js` 是否被加载（`/plugins` 组合路由）→ DSH 日志里插件行是否 `active`。 |
+| 实测 | 待重启后补（本项需要重启 DSH 才生效）。 |
+
 ## 附：安装源与「跑的是哪一版」（仅本机/开发者）
 
 | | |

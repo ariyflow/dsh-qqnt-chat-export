@@ -7,7 +7,7 @@
  * them after an hour, so a page reload keeps its download links until then.
  */
 import { spawn } from 'node:child_process'
-import { existsSync, statSync, unlinkSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
 /** Concurrent helper processes. Each one parses the encrypted database. */
@@ -31,6 +31,118 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
 
   const running = () => tasks.filter((task) => task.state === 'running').length
   const exportsDir = () => path.resolve(settings.workDir, 'exports')
+  /** Where the finished list survives a restart; paths and counts only. */
+  const tasksFile = () => path.join(exportsDir(), 'tasks.json')
+
+  /** A task's file, when it is still inside `exports/` and still on disk. */
+  function insideExports(target) {
+    if (!target) return false
+    const root = exportsDir()
+    const resolved = path.resolve(String(target))
+    const rel = path.relative(root, resolved)
+    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return false
+    try {
+      return statSync(resolved).isFile()
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Labels that never contain a chat name, so they may be written to disk.
+   * A single-chat label is a group/contact name — the restored row says
+   * "聊天记录" instead, which is enough to find the file again.
+   */
+  function safeLabel(label) {
+    const text = String(label || '')
+    return /^(全部会话|批量导出 )/.test(text) ? text : '聊天记录'
+  }
+
+  /** Fields kept on disk: no chat id, no chat name, no traceback. */
+  function persisted(task) {
+    return {
+      id: task.id,
+      label: safeLabel(task.label),
+      format: task.format,
+      state: task.state,
+      rows: task.rows,
+      bytes: task.bytes,
+      path: task.path,
+      error: task.error,
+      createdAt: task.createdAt,
+      finishedAt: task.finishedAt,
+    }
+  }
+
+  /**
+   * Read the previous run's list back. `done` survives only while its file is
+   * still there; the hourly sweep that removes old files therefore also turns
+   * yesterday's rows into "文件已清理" instead of dead download links.
+   */
+  function restore() {
+    let rows
+    try {
+      rows = JSON.parse(readFileSync(tasksFile(), 'utf8'))
+    } catch {
+      return
+    }
+    if (!Array.isArray(rows)) return
+    for (const row of rows.slice(0, MAX_KEPT)) {
+      if (!row || typeof row !== 'object' || typeof row.id !== 'string' || row.id === '') continue
+      const state = row.state === 'done' ? 'done' : row.state === 'cancelled' ? 'cancelled' : 'gone'
+      const task = {
+        id: row.id,
+        label: typeof row.label === 'string' && row.label ? row.label : '聊天记录',
+        format: typeof row.format === 'string' && row.format ? row.format : 'txt',
+        state,
+        rows: Number(row.rows) || 0,
+        bytes: Number(row.bytes) || 0,
+        path: typeof row.path === 'string' ? row.path : '',
+        error: typeof row.error === 'string' ? row.error.slice(0, 400) : '',
+        detail: '',
+        createdAt: Number(row.createdAt) || 0,
+        finishedAt: Number(row.finishedAt) || 0,
+        restored: true,
+      }
+      if (task.state === 'done' && !insideExports(task.path)) {
+        task.state = 'gone'
+        task.error = '文件已清理（导出文件只保留一小时）'
+      }
+      tasks.push(task)
+    }
+    trim()
+  }
+
+  let saveTimer = null
+  function writeTasks() {
+    try {
+      mkdirSync(exportsDir(), { recursive: true })
+      const payload = tasks.filter((task) => task.state !== 'running').map(persisted)
+      const tmp = `${tasksFile()}.tmp`
+      writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
+      renameSync(tmp, tasksFile())
+    } catch {
+      // A read-only work directory must not break finished exports.
+    }
+  }
+
+  /** Debounced: a burst of finishes writes once. */
+  function scheduleSave() {
+    if (saveTimer) return
+    saveTimer = setTimeout(() => {
+      saveTimer = null
+      writeTasks()
+    }, 500)
+    if (typeof saveTimer.unref === 'function') saveTimer.unref()
+  }
+
+  function flushSave() {
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = null
+    }
+    writeTasks()
+  }
 
   function trim() {
     while (tasks.length > MAX_KEPT) {
@@ -57,6 +169,7 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
       task.state = 'error'
       task.error = String(error).split('\n').slice(-4).join(' ').slice(0, 400)
       task.detail = typeof detail === 'string' ? detail.slice(0, 4000) : ''
+      scheduleSave()
       return
     }
     task.state = 'done'
@@ -67,6 +180,7 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
       task.media = { files: Number(payload.media.files), missing: Number(payload.media.missing) || 0 }
     }
     if (typeof payload?.path === 'string' && payload.path !== '') task.path = payload.path
+    scheduleSave()
   }
 
   /**
@@ -184,6 +298,7 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
       path: out,
       error: '',
       detail: '',
+      restored: false,
       createdAt: Date.now(),
       finishedAt: 0,
     }
@@ -216,6 +331,7 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
     task.state = 'cancelled'
     task.finishedAt = Date.now()
     task.error = '已取消'
+    scheduleSave()
     try {
       child?.kill()
     } catch {
@@ -256,7 +372,12 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
       }
     }
     children.clear()
+    // The debounce may still be pending; losing the last finished row on a
+    // clean shutdown would make the panel forget the export it just showed.
+    flushSave()
   }
+
+  restore()
 
   return { enqueue, list: snapshot, get, cancel, file, close }
 }

@@ -17,7 +17,7 @@ import {
   validatePatch,
 } from '../settings.js'
 import { cleanupStorage, migrateWorkDir, removeWorkDirEntries, storageSnapshot } from '../storage.js'
-import { pruneAccountIndexes, startWebServer } from '../web.js'
+import { panelInfo, pruneAccountIndexes, startWebServer } from '../web.js'
 
 const actionHeaders = { 'content-type': 'application/json', 'x-qqnt-action': '1' }
 const PYTHON = process.env.PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3')
@@ -844,4 +844,47 @@ test('work dir migration is a guarded mutation', async () => {
     await server.close()
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+test('panelInfo points the sidebar at the running page', () => {
+  const info = panelInfo({ webPort: 46728, webHost: '127.0.0.1' }, {
+    version: '0.13.0',
+    running: true,
+    status: { index: { exists: true, messages: 1245880, chats: 293 }, sync: { lastSyncAt: 1793343694 } },
+  })
+  assert.deepEqual(info, {
+    version: '0.13.0',
+    port: 46728,
+    running: true,
+    url: 'http://127.0.0.1:46728/',
+    indexed: true,
+    messages: 1245880,
+    chats: 293,
+    lastSync: 1793343694,
+  })
+})
+
+test('panelInfo reports no url when the web server is off', () => {
+  const info = panelInfo({ webPort: 0 }, { version: '0.13.0', running: false })
+  assert.equal(info.url, '')
+  assert.equal(info.port, 0)
+  assert.equal(info.running, false)
+  assert.equal(info.indexed, false)
+  assert.equal(info.messages, 0)
+  assert.equal(info.chats, 0)
+  assert.equal(info.lastSync, 0)
+})
+
+test('panelInfo survives a missing index and a failed status call', () => {
+  const info = panelInfo({ webPort: 46728 }, { version: '0.13.0', running: true, status: null })
+  assert.equal(info.url, 'http://127.0.0.1:46728/')
+  assert.equal(info.indexed, false, 'a dead status call must not claim an index')
+  assert.equal(info.messages, 0)
+  assert.equal(info.chats, 0)
+  assert.equal(info.lastSync, 0)
+})
+
+test('panelInfo brackets an IPv6 host so the url stays valid', () => {
+  const info = panelInfo({ webPort: 46728, webHost: '::1' }, { running: true })
+  assert.equal(info.url, 'http://[::1]:46728/')
 })

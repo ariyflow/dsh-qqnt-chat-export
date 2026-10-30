@@ -7,7 +7,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { exportChatTool, listChatsTool, searchTool, statusTool } from '../index.js'
+import { exportBatchTool, exportChatTool, listChatsTool, searchTool, statusTool } from '../index.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const SCRIPTS = path.join(path.dirname(HERE), 'scripts')
@@ -256,6 +256,112 @@ test('index tools explain how to build a missing index', { skip: !hasPython() &&
       assert.match(result.output, /还没有索引/)
       assert.match(result.output, /46728/)
     }
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('an export preset bundles columns and format for the tool', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const { writePresets } = await import('../presets.js')
+    writePresets(work, [{
+      name: 'CSV 只要时间和正文',
+      format: 'csv',
+      columns: ['time', 'text'],
+    }])
+    const outDir = path.join(work, 'out')
+    const result = await exportChatTool(settings).execute(
+      { chatKind: 'group', chatId: 'g1', outDir, preset: 'CSV 只要时间和正文' },
+      { signal: signal() })
+    assert.equal(result.ok, true, result.output)
+    assert.match(result.outPath, /\.csv$/, 'the preset picked the format')
+    const lines = readFileSync(result.outPath, 'utf8').trim().split(/\r?\n/)
+    assert.equal(lines[0], '时间,内容', 'the preset picked the columns')
+
+    // An explicit argument still wins over the preset.
+    const marked = await exportChatTool(settings).execute(
+      {
+        chatKind: 'group', chatId: 'g1', outDir, preset: 'CSV 只要时间和正文',
+        columns: ['time', 'sender', 'text'],
+      },
+      { signal: signal() })
+    assert.equal(marked.ok, true, marked.output)
+    const header = readFileSync(marked.outPath, 'utf8').trim().split(/\r?\n/)[0]
+    assert.equal(header, '时间,发送者,内容')
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('an unknown preset is refused with a readable message', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const result = await exportChatTool(settings).execute(
+      { chatKind: 'group', chatId: 'g1', preset: '不存在' }, { signal: signal() })
+    assert.equal(result.ok, false)
+    assert.match(result.output, /没有名为「不存在」的导出预设/)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('the batch tool makes one zip with a manifest and every chat', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const outDir = path.join(work, 'out')
+    const result = await exportBatchTool(settings).execute({
+      chats: [
+        { kind: 'group', id: 'g1', label: '测试群' },
+        { kind: 'private', id: 'p1' },
+      ],
+      format: 'txt',
+      outDir,
+      zipName: '两个会话',
+    }, { signal: signal() })
+    assert.equal(result.ok, true, result.output)
+    assert.equal(result.chats, 2)
+    assert.ok(result.rows > 0)
+    assert.match(result.outPath, /两个会话_\d{8}-\d{6}\.zip$/)
+    // Inspect the archive with the helper's own layer (stdlib zipfile).
+    const inspect = path.join(work, 'inspect.py')
+    await writeFile(inspect, [
+      'import json, sys, zipfile',
+      'with zipfile.ZipFile(sys.argv[1]) as z:',
+      '    names = z.namelist()',
+      '    manifest = json.loads(z.read("manifest.json")) if "manifest.json" in names else None',
+      'print(json.dumps({"names": names, "manifest": manifest}, ensure_ascii=False))',
+      '',
+    ].join('\n'))
+    const raw = execFileSync(PYTHON, [inspect, result.outPath], { encoding: 'utf8' })
+    const parsed = JSON.parse(raw)
+    assert.ok(parsed.names.includes('manifest.json'), parsed.names.join(','))
+    assert.equal(parsed.manifest.chats.length, 2)
+    assert.ok(parsed.names.filter((name) => name.endsWith('.txt')).length >= 2,
+      parsed.names.join(','))
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('the batch tool refuses a bad chat entry with a sentence', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const missingKind = await exportBatchTool(settings).execute(
+      { chats: [{ id: 'g1' }] }, { signal: signal() })
+    assert.equal(missingKind.ok, false)
+    assert.equal(missingKind.chats, 0)
+    assert.match(missingKind.output, /kind（group\/private）/)
+
+    const empty = await exportBatchTool(settings).execute({ chats: [] }, { signal: signal() })
+    assert.equal(empty.ok, false)
+    assert.match(empty.output, /chats 不能为空/)
+
+    const tooMany = await exportBatchTool(settings).execute({
+      chats: Array.from({ length: 201 }, (_, index) => ({ kind: 'group', id: String(index) })),
+    }, { signal: signal() })
+    assert.equal(tooMany.ok, false)
+    assert.match(tooMany.output, /最多导出 200 个会话/)
   } finally {
     await rm(work, { recursive: true, force: true })
   }

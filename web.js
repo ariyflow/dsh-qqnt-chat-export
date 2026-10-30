@@ -18,6 +18,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createExportQueue, MAX_CONCURRENT } from './exportQueue.js'
+import { readPresets, writePresets } from './presets.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const QUERY_CLI = path.join(HERE, 'scripts', 'qqnt_query.py')
@@ -56,6 +57,34 @@ export const BUNDLE_VERSION = (() => {
 
 /** When this process last asked the helper to build; covers the spawn gap. */
 let lastBuildSpawnAt = 0
+
+/**
+ * Payload behind `GET /api/qqnt/panel`: the address of the local UI plus the
+ * counts the DSH sidebar header prints.
+ *
+ * Metadata only — the panel embeds the page in an iframe, so no chat text ever
+ * passes through here. `running` is the host's answer (it owns the listener),
+ * and `status` is the same `/api/status` document the page itself uses, so the
+ * counts cannot drift from what the page shows.
+ */
+export function panelInfo(settings, extra = {}) {
+  const port = Number(settings?.webPort) || 0
+  const host = String(settings?.webHost || '') || '127.0.0.1'
+  const urlHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
+  const status = extra.status && typeof extra.status === 'object' ? extra.status : null
+  const index = (status && status.index) || {}
+  const running = extra.running === true && port > 0
+  return {
+    version: String(extra.version || ''),
+    port,
+    running,
+    url: running ? `http://${urlHost}:${port}/` : '',
+    indexed: index.exists === true,
+    messages: Number(index.messages || 0),
+    chats: Number(index.chats || 0),
+    lastSync: Number((status && status.sync && status.sync.lastSyncAt) || 0),
+  }
+}
 
 /** Whether an Origin header names this machine. */
 function isLoopbackOrigin(value) {
@@ -1133,6 +1162,23 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       sendJson(res, 200, { task: cancelled })
       return
     }
+    if (pathname === '/api/presets' && req.method === 'GET') {
+      sendJson(res, 200, { presets: readPresets(settings.workDir) })
+      return
+    }
+    if (pathname === '/api/presets' && req.method === 'POST') {
+      readJsonBody(req)
+        .then((body) => {
+          // The page owns the whole list, so a POST replaces it. Naming a
+          // preset twice is a mistake, not a merge.
+          const rows = Array.isArray(body?.presets) ? body.presets : []
+          const saved = writePresets(settings.workDir, rows)
+          sendJson(res, 200, { presets: saved })
+        })
+        .catch((error) => sendJson(res, error.status ?? 400, { error: error.message }))
+      return
+    }
+
     if (req.method === 'GET' && pathname.startsWith('/api/export/queue/')) {
       const rest = pathname.slice('/api/export/queue/'.length)
       const match = /^([0-9a-z]+)(\/file)?$/.exec(rest)
@@ -1144,7 +1190,7 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       if (!match[2]) {
         // Polling one task: return its state even while it is still running.
         if (!task) {
-          sendJson(res, 404, { error: '没有这个导出任务（进程重启后任务列表会清空）' })
+          sendJson(res, 404, { error: '没有这个导出任务（可能已被清理）' })
           return
         }
         sendJson(res, 200, { task })
@@ -1153,7 +1199,11 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       const found = queue.file(match[1])
       if (!found) {
         sendJson(res, task ? 409 : 404, {
-          error: task ? '导出还没有完成' : '没有这个导出任务（进程重启后任务列表会清空）',
+          error: task
+            ? (task.state === 'gone'
+              ? '导出文件已清理（导出目录只保留一小时）'
+              : '导出还没有完成')
+            : '没有这个导出任务（可能已被清理）',
         })
         return
       }

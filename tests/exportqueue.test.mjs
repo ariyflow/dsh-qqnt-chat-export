@@ -589,3 +589,83 @@ test('the HTTP route answers 429 when every slot is busy', async () => {
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('finished tasks are written to tasks.json without chat names', async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  const helper = await fakeHelper(dir)
+  const queue = createExportQueue({ settings: { python: PYTHON, workDir: work }, queryCli: helper })
+  let task
+  try {
+    task = queue.enqueue({ chatKind: 'group', chatId: '1' }, { label: '班级群 2024', format: 'txt' })
+    await waitFor(() => queue.list().tasks.find((row) => row.state === 'done'))
+  } finally {
+    queue.close()
+  }
+  const raw = await readFile(path.join(work, 'exports', 'tasks.json'), 'utf8')
+  const rows = JSON.parse(raw)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].id, task.id)
+  assert.equal(rows[0].state, 'done')
+  assert.equal(rows[0].label, '聊天记录', 'a single-chat label must not reach disk')
+  assert.ok(!raw.includes('班级群'), 'the chat name leaked into tasks.json')
+})
+
+test('a restart keeps the finished list and its download link', async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  const helper = await fakeHelper(dir)
+  const first = createExportQueue({ settings: { python: PYTHON, workDir: work }, queryCli: helper })
+  let done
+  try {
+    first.enqueue({}, { label: '全部会话', format: 'txt' })
+    done = await waitFor(() => first.list().tasks.find((row) => row.state === 'done'))
+  } finally {
+    first.close()
+  }
+
+  const second = createExportQueue({ settings: { python: PYTHON, workDir: work }, queryCli: helper })
+  try {
+    const rows = second.list().tasks
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].id, done.id)
+    assert.equal(rows[0].state, 'done')
+    assert.equal(rows[0].restored, true)
+    assert.equal(rows[0].label, '全部会话', 'a whole-index label is safe to keep')
+    const file = second.file(done.id)
+    assert.ok(file, 'a restored task whose file is still there must download')
+    assert.equal(file.path, done.path)
+  } finally {
+    second.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a restored task whose file was swept away is marked gone', async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  const helper = await fakeHelper(dir)
+  const first = createExportQueue({ settings: { python: PYTHON, workDir: work }, queryCli: helper })
+  let done
+  try {
+    first.enqueue({}, { label: '全部会话', format: 'txt' })
+    done = await waitFor(() => first.list().tasks.find((row) => row.state === 'done'))
+  } finally {
+    first.close()
+  }
+  await rm(done.path, { force: true })
+
+  const second = createExportQueue({ settings: { python: PYTHON, workDir: work }, queryCli: helper })
+  try {
+    const row = second.list().tasks[0]
+    assert.equal(row.state, 'gone')
+    assert.match(row.error, /文件已清理/)
+    assert.equal(second.file(row.id), null)
+  } finally {
+    second.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
