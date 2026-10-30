@@ -21,3 +21,5 @@ QQ导出_*/
 .DS_Store
 .vscode/
 .idea/
+
+.bug.md
