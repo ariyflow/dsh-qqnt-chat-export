@@ -7,7 +7,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { exportChatTool, listChatsTool, searchTool } from '../index.js'
+import { exportChatTool, listChatsTool, searchTool, statusTool } from '../index.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const SCRIPTS = path.join(path.dirname(HERE), 'scripts')
@@ -137,6 +137,14 @@ test('export tool bundles, splits, and redacts', { skip: !hasPython() && 'python
     assert.equal(body.chat, '私聊1')
     assert.equal(body.messages[0].sender, '成员1')
     assert.equal(body.messages[0].qq, '')
+    assert.equal(body.messages[0].chatId, '')
+
+    const again = await exportChatTool(settings).execute(
+      { chatKind: 'private', chatId: 'p1', format: 'json', outDir, redact: 'all' },
+      { signal: signal() })
+    assert.equal(again.ok, true, again.output)
+    assert.notEqual(again.outPath, redacted.outPath, 'same-second export must not overwrite')
+    assert.ok(existsSync(again.outPath))
 
     const split = await exportChatTool(settings).execute(
       { chatKind: 'group', chatId: 'g1', format: 'txt', outDir, split: 'day' },
@@ -150,6 +158,26 @@ test('export tool bundles, splits, and redacts', { skip: !hasPython() && 'python
       { signal: signal() })
     assert.equal(bad.ok, false)
     assert.match(bad.output, /html/)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('status tool returns every field its schema requires', {
+  skip: !hasPython() && 'python is not installed',
+}, async () => {
+  const { work } = await fixture()
+  try {
+    const root = path.join(work, 'no-qq-here')
+    await mkdir(root)
+    const settings = { python: PYTHON, workDir: work, tencentRoot: root, account: '', webPort: 0 }
+    const result = await statusTool(settings).execute({}, { signal: signal() })
+    for (const key of ['ok', 'exitCode', 'output', 'pythonPath', 'pythonVersion',
+      'bits', 'sqlcipher3', 'pyzipper']) {
+      assert.ok(Object.prototype.hasOwnProperty.call(result, key), key)
+    }
+    assert.equal(typeof result.pyzipper, 'boolean')
+    assert.equal(typeof result.sqlcipher3, 'boolean')
   } finally {
     await rm(work, { recursive: true, force: true })
   }

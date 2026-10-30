@@ -594,6 +594,38 @@ def load_names(p, key):
 # --------------------------------------------------------------------------
 # 建索引
 # --------------------------------------------------------------------------
+def chat_row_for(kind, chat_id, group_names, friends):
+    """Display name and QQ for a chat that has no `chats` row yet."""
+    if kind == GROUP_KIND:
+        return (group_names.get(str(chat_id), ''), '')
+    friend = friends.get(str(chat_id))
+    if friend:
+        qq, nick, remark = friend
+        return (private_display_name(nick, remark) or qq or str(chat_id), qq or '')
+    return ('', '')
+
+
+def ensure_chat_rows(conn, group_names, friends):
+    """Give every chat with messages a `chats` row, without renaming existing ones.
+
+    A sender of `?` (system/recalled rows) used to skip the row entirely, which
+    made the session list disagree with the index and lost the group name.
+    """
+    existing = {(kind, str(chat_id))
+                for kind, chat_id in conn.execute('SELECT chat_kind, chat_id FROM chats')}
+    missing = []
+    for kind, chat_id in conn.execute(
+            'SELECT DISTINCT chat_kind, chat_id FROM messages'):
+        chat_id = str(chat_id)
+        if (kind, chat_id) in existing:
+            continue
+        name, qq = chat_row_for(kind, chat_id, group_names, friends)
+        missing.append((kind, chat_id, name, qq))
+    if missing:
+        conn.executemany('INSERT OR REPLACE INTO chats VALUES (?,?,?,?)', missing)
+    return len(missing)
+
+
 def acquire_lock(p):
     """序列化构建：两个 build 同时写 index.sqlite.tmp 会互相覆盖。
 
@@ -690,13 +722,14 @@ def require_build_prerequisites(p):
 
 
 def index_snapshot(path):
-    """Read account, per-kind counts, and per-chat msg_id watermarks.
+    """Read account, per-kind counts, and per-chat (msg_id, ts) watermarks.
 
     A single watermark per kind cannot work on real data: `msg_id` is not
     globally monotonic (one busy group sits ~1.6e17 above another chat), so
     every sync would see "new" rows below the global mark and fall back to a
     full rebuild. Per-chat marks are what the source can actually be compared
-    against.
+    against. `ts` is kept alongside `msg_id` because QQ sometimes reissues
+    lower ids for new messages; a newer timestamp still identifies them.
     """
     if not os.path.exists(path):
         return None
@@ -708,9 +741,10 @@ def index_snapshot(path):
             for kind in (GROUP_KIND, PRIVATE_KIND):
                 counts[kind] = conn.execute(
                     'SELECT count(*) FROM messages WHERE chat_kind=?', (kind,)).fetchone()[0]
-            for kind, chat_id, mark in conn.execute(
-                    'SELECT chat_kind, chat_id, max(msg_id) FROM messages GROUP BY 1, 2'):
-                marks[(kind, str(chat_id))] = int(mark or 0)
+            for kind, chat_id, mark, last_ts in conn.execute(
+                    'SELECT chat_kind, chat_id, max(msg_id), max(ts) '
+                    'FROM messages GROUP BY 1, 2'):
+                marks[(kind, str(chat_id))] = (int(mark or 0), int(last_ts or 0))
             return {'meta': meta, 'counts': counts, 'marks': marks}
         finally:
             conn.close()
@@ -723,13 +757,13 @@ MARKS_TABLE = 'qqnt_marks'
 
 def load_marks(src, marks):
     """Put per-chat watermarks in a temp table the source queries can join."""
-    src.execute('CREATE TEMP TABLE IF NOT EXISTS %s('
-                'chat_kind TEXT, chat_id TEXT, max_id INTEGER, '
+    src.execute('DROP TABLE IF EXISTS temp.%s' % MARKS_TABLE)
+    src.execute('CREATE TEMP TABLE %s('
+                'chat_kind TEXT, chat_id TEXT, max_id INTEGER, max_ts INTEGER, '
                 'PRIMARY KEY(chat_kind, chat_id))' % MARKS_TABLE)
-    src.execute('DELETE FROM temp.%s' % MARKS_TABLE)
     src.executemany(
-        'INSERT INTO temp.%s VALUES (?,?,?)' % MARKS_TABLE,
-        [(kind, str(chat_id), int(mark or 0))
+        'INSERT INTO temp.%s VALUES (?,?,?,?)' % MARKS_TABLE,
+        [(kind, str(chat_id), int(mark[0] or 0), int(mark[1] or 0))
          for (kind, chat_id), mark in marks.items()])
 
 
@@ -757,7 +791,8 @@ def plan_incremental(p, src, uin, source_counts, search='fts'):
         added = src.execute(
             'SELECT count(*) FROM %s s LEFT JOIN temp.%s w '
             'ON w.chat_kind=? AND w.chat_id=s.[40021] '
-            'WHERE s.[40001] > coalesce(w.max_id, 0)' % (table, MARKS_TABLE),
+            'WHERE s.[40050] > coalesce(w.max_ts, 0) '
+            'OR s.[40001] > coalesce(w.max_id, 0)' % (table, MARKS_TABLE),
             (kind,)).fetchone()[0]
         if source_counts.get(kind, 0) != snap['counts'].get(kind, 0) + added:
             return None
@@ -840,12 +875,17 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
             plan = plan_incremental(p, src, uin, source_counts, search)
         mode = 'incremental' if plan else 'full'
         if plan and plan['total_new'] == 0:
-            # Nothing new: keep the existing index, only refresh its builtAt.
+            # Nothing new: keep the existing index, refresh builtAt, and repair
+            # chat metadata written by versions that skipped unknown senders.
             try:
                 conn = sqlite3.connect(p['index'])
                 try:
+                    ensure_chat_rows(conn, group_names, friends)
                     conn.execute("INSERT OR REPLACE INTO meta VALUES ('builtAt', ?)",
                                  (str(int(time.time())),))
+                    conn.execute(
+                        "INSERT OR REPLACE INTO meta VALUES ('chats', ?)",
+                        (str(conn.execute('SELECT count(*) FROM chats').fetchone()[0]),))
                     conn.commit()
                 finally:
                     conn.close()
@@ -912,7 +952,8 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
             if plan:
                 sql += (' LEFT JOIN temp.%s w ON w.chat_kind=? '
                         'AND w.chat_id=s.[40021] '
-                        'WHERE s.[40001] > coalesce(w.max_id, 0)' % MARKS_TABLE)
+                        'WHERE s.[40050] > coalesce(w.max_ts, 0) '
+                        'OR s.[40001] > coalesce(w.max_id, 0)' % MARKS_TABLE)
                 params = (kind,)
             cur = src.execute(sql, params)
             batch, fts_batch, media_batch = [], [], []
@@ -943,8 +984,7 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
                             chat_id, ('', '', ''))
                         name = private_display_name(friend_name, friend_remark)
                         chat_qq = friend_qq
-                    if sender and sender != '?':
-                        chats[(kind, chat_id)] = (name, chat_qq if kind == PRIVATE_KIND else '')
+                    chats[(kind, chat_id)] = (name, chat_qq if kind == PRIVATE_KIND else '')
                     if qq_s and uin and qq_s == str(uin):
                         is_out = 1
                     elif direction in (0, None, ''):
@@ -1017,6 +1057,7 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
             idx.execute(
                 'UPDATE chats SET name=?, qq=? WHERE chat_kind=? AND chat_id=?',
                 (display, friend_qq or '', PRIVATE_KIND, chat_id))
+        ensure_chat_rows(idx, group_names, friends)
         if not plan:
             idx.execute('CREATE INDEX idx_chat_ts ON messages(chat_kind, chat_id, ts)')
             idx.execute('CREATE INDEX idx_ts ON messages(ts)')
@@ -1279,13 +1320,17 @@ def build_where(conn, args):
     clauses, params = [], []
     kind = args.get('chatKind')
     chat = args.get('chatId')
-    if chat and kind not in (GROUP_KIND, PRIVATE_KIND):
+    if kind not in (None, '') and kind not in (GROUP_KIND, PRIVATE_KIND):
         # 一个拼错的 chatKind 不能悄悄退化成「整库查询」
         raise BadInput('chatKind 必须是 %r 或 %r，收到 %r'
                        % (GROUP_KIND, PRIVATE_KIND, kind))
-    if kind in (GROUP_KIND, PRIVATE_KIND) and chat:
-        clauses.append('m.chat_kind=? AND m.chat_id=?')
-        params += [kind, str(chat)]
+    if kind in (GROUP_KIND, PRIVATE_KIND):
+        if chat:
+            clauses.append('m.chat_kind=? AND m.chat_id=?')
+            params += [kind, str(chat)]
+        else:
+            clauses.append('m.chat_kind=?')
+            params.append(kind)
     keyword = (args.get('keyword') or '').strip()
     if keyword:
         if len(keyword) >= MIN_FTS_CHARS and has_fts(conn):
@@ -1559,6 +1604,7 @@ def cmd_messages(p, args):
             payload = messages_page(conn, args)
     finally:
         conn.close()
+    payload['keyword'] = str(args.get('keyword') or '')
     if notes:
         payload['notes'] = notes
     print(json.dumps(payload, ensure_ascii=False))
@@ -1795,6 +1841,8 @@ class Redactor:
         if self.hide_names:
             item['sender'] = self.member(item.get('qq') or item.get('sender') or '?')
         item['qq'] = self.number(item.get('qq') or '')
+        if self.hide_numbers and 'chatId' in item:
+            item['chatId'] = ''
         return item
 
     def chat_label(self, kind, name, index=1):
@@ -1808,7 +1856,7 @@ class Redactor:
         if self.hide_numbers:
             plain = str(name or '').strip()
             if (not plain or plain == str(chat_id or '').strip()
-                    or re.fullmatch(r'(?:QQ\s*)?[0-9]+', plain)):
+                    or re.fullmatch(r'(?:(?:QQ|群|私聊)\s*)?[0-9]+', plain)):
                 return label
         return name
 
@@ -1822,8 +1870,12 @@ def export_writer(conn, args, label, redactor=None, media=None):
         'm.seg_kinds, m.chat_kind, m.chat_id '
         'FROM messages m' + where + ' ORDER BY m.ts ASC, m.msg_id ASC', params)
     account = str(args.get('account') or '')
-    head = ('# %s\n# 账号 %s   导出时间 %s\n'
-            % (label, account, datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    if redactor is not None:
+        account = redactor.number(account)
+    account_part = ('账号 %s   ' % account) if account else ''
+    head = ('# %s\n# %s导出时间 %s\n'
+            % (label, account_part,
+               datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
     state = {'rows': 0}
     csv_cols = csv_columns(args) if fmt == 'csv' else DEFAULT_CSV_COLUMNS
 
@@ -2288,8 +2340,10 @@ def cmd_export(p, args):
         else:
             redactor = Redactor(mode)
             kind = str(args.get('chatKind') or '')
-            if redactor.hide_names:
-                label = redactor.chat_label(kind, label, 1) if kind else '聊天记录'
+            chat_id = str(args.get('chatId') or '')
+            if redactor.hide_names or redactor.hide_numbers:
+                label = (redactor.chat_name(kind, label, chat_id, 1)
+                         if kind else ('聊天记录' if redactor.hide_names else label))
             rows = write_export_file(conn, args, out, label, redactor)
             q.private_file(out)
             payload = {'path': out, 'format': fmt, 'rows': rows,
@@ -2335,6 +2389,10 @@ def cmd_select(p, uin, keep=DEFAULT_KEEP_ACCOUNTS):
     try:
         keep = clamp_keep(keep)
         result = restore_cached(p, account, keep)
+        if (not result.get('switched') and not result.get('current')
+                and not result.get('cached') and not result.get('error')):
+            raise BadInput('没有找到账号 %s 的索引缓存；先在网页里同步该账号'
+                           % account)
         result['pruned'] = prune_cached(p, keep)
         print(json.dumps(result, ensure_ascii=False))
     finally:

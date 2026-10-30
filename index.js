@@ -1,7 +1,7 @@
 /**
  * Host half of the QQ NT chat export bundle.
  *
- * Registers four model-facing tools that drive `scripts/qqnt_export.py` — the
+ * Registers seven model-facing tools that drive `scripts/qqnt_export.py` — the
  * exporter from the `qqnt-chat-export-skill` — so an Agent can inspect the local
  * NTQQ install, recover the SQLCipher key from the running client, list group
  * chats, and export one group's history. The bundled Python file is used
@@ -267,7 +267,18 @@ function fileStem(text, fallback) {
 function fileStamp() {
   const now = new Date()
   const pad = (n) => String(n).padStart(2, '0')
-  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-`
+    + `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+}
+
+/** Never overwrite an earlier export from the same second. */
+function uniqueTarget(outDir, stem, container) {
+  const base = path.join(outDir, `${stem}_${fileStamp()}`)
+  let target = `${base}.${container}`
+  for (let index = 2; existsSync(target); index += 1) {
+    target = `${base}-${index}.${container}`
+  }
+  return target
 }
 
 /** Parse the exporter's fixed-width group table; a best-effort convenience. */
@@ -583,7 +594,7 @@ export function exportChatTool(settings) {
         settings, ['export', '--json', JSON.stringify(payloadArgs)], exec,
         password ? { QQNT_EXPORT_PASSWORD: password } : undefined)
       if (code !== 0) return { ok: false, exitCode: code, outPath: '', output: payload.error || '导出失败' }
-      const target = path.join(outDir, `${fileStem(label, chatId)}_${fileStamp()}.${container}`)
+      const target = uniqueTarget(outDir, fileStem(label, chatId), container)
       try {
         renameSync(payload.path, target)
       } catch (error) {
@@ -600,8 +611,8 @@ export function exportChatTool(settings) {
   }
 }
 
-/** Registers the exporter's four commands as tools. */
-function statusTool(settings) {
+/** Reports the Python/SQLCipher environment plus the exporter's data info. */
+export function statusTool(settings) {
   return {
     name: 'qqnt_status',
     description: 'Report whether this machine can export QQ chats: the running QQ client, each account\'s message-database size, any cached database key, and the Python SQLCipher dependency.',
@@ -643,6 +654,7 @@ function statusTool(settings) {
         pythonVersion,
         bits,
         sqlcipher3,
+        pyzipper,
       }
     },
   }

@@ -395,9 +395,14 @@ class AccountCacheTests(unittest.TestCase):
     def test_select_reports_a_missing_cache_without_touching_current(self):
         self.build()
         before = os.stat(self.p['index']).st_mtime_ns
-        result = self.run_cli('select', '--account', OTHER)
-        self.assertFalse(result['switched'])
-        self.assertFalse(result['cached'])
+        proc = subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
+             '--work', self.work, 'select', '--account', OTHER],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertIn('没有找到账号', payload['error'])
         self.assertEqual(self.index_account(), GROUP)
         self.assertEqual(os.stat(self.p['index']).st_mtime_ns, before)
 

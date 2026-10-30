@@ -931,9 +931,18 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
         sendJson(res, 404, { error: 'not found' })
         return
       }
-      const found = match[2] ? queue.file(match[1]) : null
+      const task = queue.get(match[1])
+      if (!match[2]) {
+        // Polling one task: return its state even while it is still running.
+        if (!task) {
+          sendJson(res, 404, { error: '没有这个导出任务（进程重启后任务列表会清空）' })
+          return
+        }
+        sendJson(res, 200, { task })
+        return
+      }
+      const found = queue.file(match[1])
       if (!found) {
-        const task = queue.get(match[1])
         sendJson(res, task ? 409 : 404, {
           error: task ? '导出还没有完成' : '没有这个导出任务（进程重启后任务列表会清空）',
         })

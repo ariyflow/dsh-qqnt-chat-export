@@ -1247,9 +1247,10 @@ def cmd_export(args):
         ts_s = fmt_timestamp(ts)
         if sq:
             batch.append((msg_id, as_seconds(ts), ts_s, uid, qq, name, direction, t11, t12, text, kinds))
-        if fx and ts_s:
-            fx.write('[%s] %s: %s\n' % (ts_s, name, text.replace('\n', ' \\n ')))
-        if cw and ts_s:
+        if fx:
+            fx.write('[%s] %s: %s\n' % (ts_s or '未知时间', name,
+                                        text.replace('\n', ' \\n ')))
+        if cw:
             cw.writerow([csv_cell(ts_s), csv_cell(name), csv_cell(qq or ''), csv_cell(text)])
         n += 1
         if sq and len(batch) >= 5000:

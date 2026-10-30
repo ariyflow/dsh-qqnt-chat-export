@@ -1,6 +1,6 @@
 # dsh-qqnt-chat-export
 
-把 **Windows / Linux 上的 NTQQ（QQ NT / 9.9.x）聊天记录**读出来、搜出来、导出来 —— 一个 DeepSeek Harness 插件包：四个模型工具 + 一个本地网页界面，支持群聊和私聊，可导出 6 种格式。
+把 **Windows / Linux 上的 NTQQ（QQ NT / 9.9.x）聊天记录**读出来、搜出来、导出来 —— 一个 DeepSeek Harness 插件包：七个模型工具 + 一个本地网页界面，支持群聊和私聊，可导出 6 种格式。
 
 Read, search, and export NTQQ chat history from a DeepSeek Harness session or from a local web page, on Windows or Linux.
 
@@ -37,7 +37,7 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
 - 会话列表悬停有「在本会话中搜索」，查询范围以蓝色徽标显示（`×` 回到全部会话）；
 - 把**当前查询结果**导出为 `.txt` / `.csv` / `.json` / `.md` / `.html` / `.sqlite`：大导出进入后台任务队列（最多同时 3 个，30 分钟上限），右下角任务面板显示「导出中 / 完成 / 失败 / 已取消」，可随时取消，不再受 180 秒请求超时限制；
 - **批量导出**：在会话列表勾选多个群聊/私聊，一次打成 ZIP（每个会话一份文件 + `manifest.json`），最多 200 个会话；
-- **脱敏分享**：导出时可选「昵称打码 / QQ 号打码 / 全部」，发送者变成 `成员1…`、会话名变成 `群聊1/私聊1`，QQ 号和群号清空；正文保持原样（改动会破坏对话）；
+- **脱敏分享**：导出时可选「昵称打码 / QQ 号打码 / 全部」，发送者变成 `成员1…`、会话名变成 `群聊1/私聊1`，QQ 号、群号、私聊 uid、导出账号和 JSON 里的 `chatId` 一并清空；正文保持原样（改动会破坏对话）；
 - **含媒体**：可选把本机已下载的图片、文件、语音、视频一起打包（ZIP 布局 `media/<会话>/…`）；缺失的媒体只记录不报错，单文件 100 MB、单次 1 GB 上限；**内嵌图片**把图片 base64 放进单个 HTML，方便直接分享（单会话、10 MB/图、200 MB/次）；
 - **按天分文件**：勾选后每个会话按日期拆成多个文件再打包成 ZIP，`manifest.json` 列出每天的文件和条数；可以和脱敏、媒体一起用；
 - **导出字段**：CSV 可选列（全部 / 时间+发送者+内容 / 时间+发送者+类型+内容）；Markdown 可选在开头加 YAML 元信息（会话、账号、导出时间），默认关闭；
@@ -139,7 +139,7 @@ kernel.yama.ptrace_scope = 0
 plugin_manager install_bundle → github:ariyflow/dsh-qqnt-chat-export
 ```
 
-装好后插件行 `qqnt-chat-export` 会自动启用，四个工具立刻可见，网页在 `http://127.0.0.1:46728/`。
+装好后插件行 `qqnt-chat-export` 会自动启用，七个工具立刻可见，网页在 `http://127.0.0.1:46728/`。
 
 也可以克隆到本地后用绝对路径安装（`install_bundle` 接受目录）：
 
@@ -244,7 +244,7 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 - `workDir` 里会出现 `key.txt`（**明文密钥**）、`nt_msg.db`（约 1 GB 的解密副本）、`index.sqlite`（**全部消息的明文副本**）。用完建议整个删掉，把 `key.txt` 给别人等于把整个 QQ 数据库给别人。Linux 上 `workDir` 会自动设为 `0700`、`key.txt` 为 `0600`，但这不能替代用完即删；网页「设置 → 存储与清理」可以按类别删除这些文件。提取密钥时不会把密钥回显到终端或日志，只写入 `key.txt`。
 - 设置文件只保存路径和端口，不含聊天内容或密钥；POSIX 上权限为 `0600`。设置页的写操作要求同源请求和自定义请求头，避免其他网页触发端口/目录修改或清理。
 - 密码 ZIP 的密码通过 `QQNT_EXPORT_PASSWORD` 环境变量交给 Python 子进程，不出现在命令行参数里（`ps` 能看到参数，看不到别的进程的环境块），任务列表和日志也不保存它；Python 读取后立即从环境里删除。加密使用 AES-256（pyzipper），压缩包内的文件**名**仍然是明文。
-- 导出目录和文件在 POSIX 上分别是 `0700` / `0600`，只允许写在 `workDir/exports` 内。CSV 里以 `=`、`+`、`-`、`@`、Tab、CR 开头的单元格会加前导单引号，避免 Excel / LibreOffice 把聊天内容当公式执行。 导出先写临时文件再原子改名，失败不会留下半截文件；Markdown 会转义 `|`、反斜杠和换行，HTML 会转义标签，SQLite 导出不会因群聊/私聊 `msg_id` 相同而丢消息。
+- 导出目录和文件在 POSIX 上分别是 `0700` / `0600`，只允许写在 `workDir/exports` 内。CSV 里以 `=`、`+`、`-`、`@`、Tab、CR 开头的单元格会加前导单引号，避免 Excel / LibreOffice 把聊天内容当公式执行。 导出先写临时文件再原子改名，失败不会留下半截文件；Markdown 会转义 `|`、反斜杠和换行，HTML 会转义标签，SQLite 导出不会因群聊/私聊 `msg_id` 相同而丢消息。QQ 里没有时间戳的行（`ts=0`）在 TXT 里显示「未知时间」、CSV 留空、SQLite 保留原值，TXT/CSV/SQLite 行数一致；新版 `qqnt_export_chat` 按天拆分时归入「未知」文件。
 - `key.json` 记录密钥属于哪个 QQ 账号；切换账号后建立索引或导出会直接提示重新提取，不会拿旧账号的密钥去试新库。
 - 「默认源安装」/「清华镜像安装」会从 PyPI 或清华镜像下载 `sqlcipher3-wheels` 和 `pyzipper` 并安装到插件私有虚拟环境，需要网络；都不会修改系统 Python。镜像内容由清华镜像同步，若不可用可换默认源。uv 同样只写入该虚拟环境；它下载的托管 Python 落在 uv 自己的缓存目录（默认 `~/.local/share/uv/python`，可用 `UV_PYTHON_INSTALL_DIR` 覆盖）。
 - 网页服务**只绑 `127.0.0.1`**，并拒绝非本机的 `Host` 和跨站 `POST`，但仍然建议只在本机使用。
@@ -258,8 +258,8 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 ## 已知限制
 
 - 自动同步会连 WAL 一起复制并回放，通常能拿到最新几条；只有 WAL 无法回放时才退回主库快照，状态行会标「WAL 待合并」，下个周期再试。
-- 增量同步按**每会话水位**（`chat_id → max(msg_id)`）追加，不再被不同会话之间不单调的 `msg_id` 拖成全量重建；32 万条真实数据上 `build --refresh` 约 1.7 秒（无新消息时 `added: 0`）。源库删除、回溯或换账号导致数量对不上时，仍会自动退回全量重建（约 8 秒），这是安全兜底。
-- 增量同步按 `msg_id` 追加：QQ 侧删除消息或大量回溯时会按数量校验自动全量重建；同一条消息被编辑（`msg_id` 不变）不会更新索引，需要清理索引后重建。
+- 增量同步按**每会话水位**（`chat_id → (max(msg_id), max(ts))`）追加：新消息即使拿到更小的 `msg_id`，只要时间更新也能增量入库；32 万条真实数据上 `build --refresh` 约 1.7 秒（无新消息时 `added: 0`），有 23 条新消息时约 2.2 秒。源库删除、回溯或换账号导致数量对不上时，仍会自动退回全量重建（约 8 秒），这是安全兜底。
+- 增量同步按 `(ts, msg_id)` 判断新行：QQ 侧删除消息或大量回溯时会按数量校验自动全量重建；同一条消息被编辑（`msg_id` 不变）不会更新索引，需要清理索引后重建。
 - 账号索引缓存会额外占磁盘：每份约等于当前索引（约 0.2~0.4 MB / 1000 条，含 FTS 时偏上限）。默认保留 2 份，可在设置里调成 `0`，或在「存储与清理」里单独删除缓存。
 - 从 0.6.x 升级后仍会先使用旧的临时工作目录（否则会突然找不到密钥和索引），网页横幅会提示迁移；迁移是「先复制、再切换设置、最后删除旧文件」，大索引需要几十秒，失败不会改动旧目录。
 - Windows 上切换账号索引需要重命名 `index.sqlite`；如果文件被其它程序（杀毒、其它查询窗口）占用，切换会失败并保持原状，关掉占用程序再试。
@@ -289,7 +289,7 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 ## 目录结构
 
 ```
-index.js              插件入口：四个工具 + 启动网页服务
+index.js              插件入口：七个工具 + 启动网页服务
 web.js                本地 HTTP 服务与 JSON API
 exportQueue.js        后台导出队列（并发 3、任务面板、下载校验）
 settings.js           设置持久化、校验与默认值

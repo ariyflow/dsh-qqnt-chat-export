@@ -1455,7 +1455,7 @@
     if (!state.indexReady) { toast('先建立索引'); return }
     if (!reset && state.loading) return
     if (reset) {
-      // 记住本次查询的筛选条件：翻页与高亮都用它，不受之后输入框改动影响
+      // 记住本次查询的筛选条件：翻页继续用它，高亮由服务端解析后的 keyword 决定
       state.filters = currentFilters()
       if (state.filters.keyword) rememberKeyword(state.filters.keyword)
       state.offset = 0
@@ -1485,8 +1485,12 @@
       }
       var fragment = document.createDocumentFragment()
       var anchorRow = null
+      // Inline filters (`from:`, `since:`, `-word`…) stay in the input, but only
+      // the service-side parsed keyword belongs in <mark>.
+      var keyword = typeof payload.keyword === 'string'
+        ? payload.keyword : (filters.keyword || '')
       rows.forEach(function (item) {
-        var node = renderRow(item, filters.keyword || '', !around && !state.chatId)
+        var node = renderRow(item, keyword, !around && !state.chatId)
         if (around && item.rowId === around) anchorRow = node
         fragment.appendChild(node)
       })

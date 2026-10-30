@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -229,6 +230,61 @@ class IncrementalBuildTests(unittest.TestCase):
         self.assertEqual(self.status()['added'], 1)
         self.assertEqual(self.count('老会话新消息'), 1)
 
+    def test_incremental_accepts_a_newer_timestamp_with_a_lower_id(self):
+        self.run_cli('build')
+        # Real QQ sometimes reissues lower ids for newer messages; the ts
+        # watermark must still pick the row up instead of forcing a rebuild.
+        self.add('group_msg_table', 0, 1700000200, '时间更新的低号消息', 'g1')
+        self.publish()
+        self.run_cli('build', '--refresh')
+        self.assertEqual(self.status()['mode'], 'incremental')
+        self.assertEqual(self.status()['added'], 1)
+        self.assertEqual(self.count('时间更新的低号消息'), 1)
+
+    def test_unknown_sender_still_gets_a_chat_row(self):
+        self.run_cli('build')
+        self.add_blob('group_msg_table', 7, 1700002000,
+                      _message_blob('系统消息'), 'g2', uid='')
+        self.publish()
+        self.run_cli('build', '--refresh')
+        conn = sqlite3.connect(os.path.join(self.work, 'index.sqlite'))
+        try:
+            rows = dict(conn.execute('SELECT chat_id, name FROM chats'))
+        finally:
+            conn.close()
+        self.assertIn('g2', rows, 'a ? sender must not drop the chat metadata')
+        self.assertEqual(self.meta()['chats'], '3')
+        # A no-op sync repairs a row lost by an older build.
+        conn = sqlite3.connect(os.path.join(self.work, 'index.sqlite'))
+        try:
+            conn.execute("DELETE FROM chats WHERE chat_id='g1'")
+            conn.commit()
+        finally:
+            conn.close()
+        self.run_cli('build', '--refresh')
+        self.assertEqual(self.status()['mode'], 'incremental')
+        self.assertEqual(self.status()['added'], 0)
+        conn = sqlite3.connect(os.path.join(self.work, 'index.sqlite'))
+        try:
+            self.assertEqual(conn.execute(
+                "SELECT count(*) FROM chats WHERE chat_id='g1'").fetchone()[0], 1)
+            self.assertEqual(self.meta()['chats'], '3')
+        finally:
+            conn.close()
+
+    def test_messages_report_a_parsed_keyword_and_filter_by_kind(self):
+        self.run_cli('build')
+        payload = self.run_cli('messages', '--json',
+                              json.dumps({'keyword': 'from:u 第一条'}))
+        self.assertEqual(payload['keyword'], '第一条')
+        self.assertEqual(payload['total'], 1)
+        payload = self.run_cli('messages', '--json',
+                              json.dumps({'chatKind': 'private'}))
+        self.assertEqual(payload['total'], 1)
+        stats = self.run_cli('stats', '--json', json.dumps({'chatKind': 'private'}))
+        self.assertEqual(stats['total'], 1)
+        self.assertEqual(stats['chats'], 1)
+
     def test_search_mode_switch_forces_a_full_rebuild(self):
         self.run_cli('build')
         self.assertEqual(self.meta().get('search'), 'fts')
@@ -354,8 +410,29 @@ class IncrementalBuildTests(unittest.TestCase):
         self.assertEqual([item['sender'] for item in payload['messages']],
                          ['成员1', '成员1'])
         self.assertEqual([item['qq'] for item in payload['messages']], ['', ''])
+        self.assertEqual([item['chatId'] for item in payload['messages']], ['', ''])
         # The conversation itself is never rewritten.
         self.assertEqual(payload['messages'][0]['text'], '第一条消息')
+
+    def test_redaction_hides_the_exporter_account(self):
+        self.run_cli('build')
+        txt = os.path.join(self.work, 'exports', 'redacted.txt')
+        md = os.path.join(self.work, 'exports', 'redacted.md')
+        os.makedirs(os.path.dirname(txt), exist_ok=True)
+        self.run_cli('export', '--json', json.dumps({
+            'format': 'txt', 'out': txt, 'label': 'g1',
+            'chatKind': 'group', 'chatId': 'g1', 'redact': 'all'}))
+        with open(txt, encoding='utf-8') as f:
+            body = f.read()
+        self.assertNotIn('12345', body)
+        self.assertIn('# 群聊1', body)
+        self.run_cli('export', '--json', json.dumps({
+            'format': 'md', 'out': md, 'label': 'g1', 'frontMatter': True,
+            'chatKind': 'group', 'chatId': 'g1', 'redact': 'qq'}))
+        with open(md, encoding='utf-8') as f:
+            body = f.read()
+        self.assertIn('account: ""', body)
+        self.assertNotIn('12345', body)
 
     def test_bundle_manifest_hides_numbers_when_asked(self):
         self.run_cli('build')

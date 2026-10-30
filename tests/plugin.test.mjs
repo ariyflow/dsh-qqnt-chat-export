@@ -700,7 +700,7 @@ test('status reuses the helper report while a build runs', {
   }
 })
 
-test('index select validates input and reports the helper JSON', {
+test('index select validates input and rejects a missing cache', {
   skip: process.platform === 'win32' ? 'needs python3 on PATH' : false,
 }, async () => {
   const dir = await tempDir()
@@ -732,11 +732,9 @@ test('index select validates input and reports the helper JSON', {
     response = await fetch(`${base}/api/index/select`, {
       method: 'POST', headers: actionHeaders, body: JSON.stringify({ account: '12345' }),
     })
-    assert.equal(response.status, 200)
+    assert.equal(response.status, 400)
     const body = await response.json()
-    assert.equal(body.account, '12345')
-    assert.equal(body.switched, false)
-    assert.equal(body.cached, false)
+    assert.match(body.error, /没有找到账号 12345/)
   } finally {
     await server.close()
     await rm(dir, { recursive: true, force: true })
