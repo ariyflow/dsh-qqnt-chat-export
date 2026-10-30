@@ -360,7 +360,10 @@ def index_counts(path):
             fts = meta.get('fts')
             search = 'fts' if fts == '1' else ('like' if fts == '0' else '')
         return {'messages': messages, 'chats': chats, 'builtAt': int(meta.get('builtAt', 0)),
-                'account': str(meta.get('account') or ''), 'search': search}, messages
+                'account': str(meta.get('account') or ''), 'search': search,
+                # The diagnostics bundle compares these with `info --json`.
+                'version': str(meta.get('version') or ''),
+                'schema': str(meta.get('schema') or '')}, messages
     except sqlite3.Error as exc:
         return {'error': str(exc)}, 0
 

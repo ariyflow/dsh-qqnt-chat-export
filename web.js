@@ -11,8 +11,10 @@
  * decrypted data out of the agent surface.
  */
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, createReadStream, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createExportQueue, MAX_CONCURRENT } from './exportQueue.js'
@@ -27,6 +29,15 @@ const REQUEST_TIMEOUT_MS = 180_000
 const MAX_BATCH_CHATS = 200
 const EXPORT_DIR_MAX_AGE_MS = 60 * 60 * 1000
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
+
+/** Reported in the diagnostics bundle; the installed copy ships package.json. */
+const BUNDLE_VERSION = (() => {
+  try {
+    return String(JSON.parse(readFileSync(path.join(HERE, 'package.json'), 'utf8')).version || '')
+  } catch {
+    return ''
+  }
+})()
 
 /** When this process last asked the helper to build; covers the spawn gap. */
 let lastBuildSpawnAt = 0
@@ -405,6 +416,150 @@ function sweepExports(dir) {
   }
 }
 
+/** Last path segment only: a bundle must not carry a user's home directory. */
+export function lastSegment(value) {
+  const text = String(value ?? '').replace(/[\\/]+$/, '')
+  if (text === '') return ''
+  const parts = text.split(/[\\/]/).filter((part) => part !== '')
+  return parts.length > 0 ? parts[parts.length - 1] : text
+}
+
+/** 8 hex digits stand in for an account number; enough to tell two apart. */
+export function accountDigest(value) {
+  const text = String(value ?? '').trim()
+  if (text === '') return ''
+  return createHash('sha1').update(text).digest('hex').slice(0, 8)
+}
+
+/** Epoch seconds → ISO, or '' when the stamp is missing. */
+function isoSeconds(value) {
+  const seconds = Number(value)
+  return Number.isFinite(seconds) && seconds > 0
+    ? new Date(seconds * 1000).toISOString()
+    : ''
+}
+
+/**
+ * Assemble the downloadable diagnostics bundle.
+ *
+ * White-listed field by field rather than filtered from the live payload: a new
+ * `diagnostics` field has to be added here on purpose, so a future release
+ * cannot leak chat text, a nickname, a cached key or an account number into a
+ * file the user attaches to a public issue. Paths keep their last segment only,
+ * account numbers become `sha1(...)[:8]`, and free-text errors are scrubbed of
+ * the paths and accounts this module already knows.
+ *
+ * Pure apart from the scrubbing list (and `now`/`storage` are injectable), so
+ * the tests can pin exactly what a user would upload.
+ *
+ * @returns {object} JSON-serialisable bundle
+ */
+export function diagnosticsBundle({
+  version = '', diagnostics = {}, status = {}, storage = null, now = new Date(),
+} = {}) {
+  const platform = diagnostics.platform || null
+  const paths = diagnostics.paths || null
+  const schema = diagnostics.schema || null
+  const index = status.index || {}
+  const build = status.build || {}
+  const sync = status.sync || {}
+  const uv = diagnostics.uv || {}
+
+  const scrubbers = [
+    [os.homedir(), '~'],
+    [platform?.account, accountDigest(platform?.account)],
+    [index.account, accountDigest(index.account)],
+    [paths?.workDir, lastSegment(paths?.workDir)],
+    [paths?.tencentRoot, lastSegment(paths?.tencentRoot)],
+    [paths?.dbDir, lastSegment(paths?.dbDir)],
+    [paths?.dataDir, lastSegment(paths?.dataDir)],
+    [paths?.python, lastSegment(paths?.python)],
+    [diagnostics.python, lastSegment(diagnostics.python)],
+  ].filter(([from]) => typeof from === 'string' && from !== '')
+  const scrub = (text) => {
+    let out = String(text ?? '')
+    if (out === '') return ''
+    for (const [from, to] of scrubbers) out = out.split(from).join(to)
+    return out.length > 300 ? `${out.slice(0, 300)}…` : out
+  }
+  const bytesFor = (id) => {
+    const item = (storage?.items || []).find((entry) => entry.id === id)
+    return item ? Number(item.bytes || 0) : 0
+  }
+  const startedAt = Number(build.startedAt || 0)
+  const finishedAt = Number(build.finishedAt || 0)
+  return {
+    version,
+    generatedAt: now.toISOString(),
+    platform: platform ? {
+      os: String(platform.os || ''),
+      arch: String(platform.arch || ''),
+      bits: Number(platform.bits || 0),
+      python: String(platform.python || ''),
+      sqlcipher: platform.sqlcipher === true,
+      pyzipper: platform.pyzipper === true,
+      qqProcesses: Number(platform.qqProcesses || 0),
+      memoryAccess: String(platform.memoryAccess || ''),
+      dataRootFound: platform.dataRootFound === true,
+      accounts: Number(platform.accounts || 0),
+      account: accountDigest(platform.account),
+    } : null,
+    paths: paths ? {
+      tencentRoot: lastSegment(paths.tencentRoot),
+      dbDir: lastSegment(paths.dbDir),
+      dataDir: lastSegment(paths.dataDir),
+      workDir: lastSegment(paths.workDir),
+      python: lastSegment(paths.python),
+      index: lastSegment(paths.index),
+      venv: lastSegment(paths.venv),
+    } : null,
+    schema: schema ? {
+      fingerprint: String(schema.fingerprint || ''),
+      missing: Array.isArray(schema.missing) ? schema.missing : [],
+      unchecked: Array.isArray(schema.unchecked) ? schema.unchecked : [],
+      tables: schema.tables || {},
+    } : null,
+    index: {
+      exists: index.exists === true,
+      version: String(index.version || ''),
+      schema: String(index.schema || ''),
+      messages: Number(index.messages || 0),
+      chats: Number(index.chats || 0),
+      search: String(index.search || ''),
+      account: accountDigest(index.account),
+      bytes: Number(index.size || 0),
+    },
+    build: {
+      state: String(build.state || 'idle'),
+      mode: String(build.mode || ''),
+      seconds: finishedAt > startedAt ? finishedAt - startedAt : 0,
+      walPending: build.walPending === true,
+      schemaChanged: build.schemaChanged === true,
+      error: scrub(build.error),
+    },
+    sync: {
+      autoSync: sync.autoSync !== false,
+      intervalMinutes: Number(sync.intervalMinutes || 60),
+      lastRun: isoSeconds(sync.lastSyncAt),
+      error: scrub(sync.error),
+    },
+    deps: {
+      sqlcipher3: platform ? platform.sqlcipher === true : false,
+      pyzipper: platform ? platform.pyzipper === true : false,
+      uv: String(uv.version || ''),
+      probeError: scrub(diagnostics.error),
+      infoError: scrub(diagnostics.infoError),
+    },
+    storage: {
+      decryptedBytes: bytesFor('decrypted'),
+      indexBytes: bytesFor('index'),
+      exportsBytes: bytesFor('exports'),
+      totalBytes: Number(storage?.totalBytes || 0),
+    },
+    errors: [scrub(build.error), scrub(sync.error)].filter((text) => text !== ''),
+  }
+}
+
 /**
  * Start the local UI.
  *
@@ -631,6 +786,41 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       Promise.resolve()
         .then(() => handlers.getDiagnostics())
         .then((result) => sendJson(res, 200, result))
+        .catch((error) => sendJson(res, 500, { error: error.message }))
+      return
+    }
+    if (req.method === 'GET' && pathname === '/api/diagnostics/bundle') {
+      // Read-only, so the loopback Host check above is enough; no action header.
+      if (typeof handlers.getDiagnostics !== 'function') {
+        sendJson(res, 501, { error: 'this build has no diagnostics API' })
+        return
+      }
+      Promise.resolve()
+        .then(async () => {
+          const diagnostics = await handlers.getDiagnostics()
+          // A broken helper still has to produce a bundle: the failure itself
+          // (`infoError`) is the most useful thing in it.
+          const status = await currentStatus().catch(() => ({}))
+          const storage = typeof handlers.getStorage === 'function'
+            ? handlers.getStorage()
+            : null
+          return diagnosticsBundle({ version: BUNDLE_VERSION, diagnostics, status, storage })
+        })
+        .then((bundle) => {
+          const stamp = new Date()
+          const pad = (n) => String(n).padStart(2, '0')
+          const name = `qqnt-diagnostics-${bundle.version || 'unknown'}`
+            + `-${stamp.getFullYear()}${pad(stamp.getMonth() + 1)}${pad(stamp.getDate())}`
+            + `-${pad(stamp.getHours())}${pad(stamp.getMinutes())}.json`
+          const body = Buffer.from(`${JSON.stringify(bundle, null, 2)}\n`, 'utf8')
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'content-disposition': `attachment; filename="${name}"`,
+            'content-length': body.length,
+            'cache-control': 'no-store',
+          })
+          res.end(body)
+        })
         .catch((error) => sendJson(res, 500, { error: error.message }))
       return
     }

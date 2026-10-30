@@ -206,6 +206,8 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 
 设置页的「存储与清理」会按类别列出本插件生成的文件和大小：解密数据库副本、查询索引、账号索引缓存、数据库密钥、临时导出、构建状态/锁。账号索引缓存是动态扫描出来的（`index.<账号>.sqlite`），删除它不会动当前索引。选中后点「删除选中」会弹出**二次确认**对话框，勾选确认后才能删除；服务端还会再次校验 `confirm: true`。只删除工作目录白名单内的文件，**不会修改或删除 QQ 原始数据**；索引构建进行中会拒绝清理。删除密钥后需要重新提取，删除索引后需要重建。
 
+设置页还有「诊断」卡片（在「存储与清理」上方），显示系统与位数、Python、`sqlcipher3`/`pyzipper` 是否可用、QQ 进程数、数据根目录、当前账号、工作目录、索引位置、表结构指纹与缺失列（缺列标红）。卡片里的「下载诊断包」会下载一个 `qqnt-diagnostics-<版本>-<日期>-<时分>.json`，内容见下方[隐私与安全](#隐私与安全)——它不含聊天内容，适合直接贴到 issue 里。
+
 ## 配置
 
 `cordis.patch.yml` 里都是可选项；网页「设置」保存的值会覆盖这里的默认值：
@@ -248,6 +250,15 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 - `key.json` 记录密钥属于哪个 QQ 账号；切换账号后建立索引或导出会直接提示重新提取，不会拿旧账号的密钥去试新库。
 - 「默认源安装」/「清华镜像安装」会从 PyPI 或清华镜像下载 `sqlcipher3-wheels` 和 `pyzipper` 并安装到插件私有虚拟环境，需要网络；都不会修改系统 Python。镜像内容由清华镜像同步，若不可用可换默认源。uv 同样只写入该虚拟环境；它下载的托管 Python 落在 uv 自己的缓存目录（默认 `~/.local/share/uv/python`，可用 `UV_PYTHON_INSTALL_DIR` 覆盖）。
 - 网页服务**只绑 `127.0.0.1`**，并拒绝非本机的 `Host` 和跨站 `POST`，但仍然建议只在本机使用。
+- **诊断包**（设置 → 诊断 → 下载诊断包，`GET /api/diagnostics/bundle`）是白名单拼出来的，只含这些字段：
+  - `version`（插件版本）、`generatedAt`（生成时间，ISO）；
+  - `platform`：`os` / `arch` / `bits` / `python` 版本号、`sqlcipher3` 与 `pyzipper` 是否可用、QQ 进程数、内存读取方式、是否找到数据根、账号个数、**账号的 `sha1` 前 8 位**；
+  - `paths`：数据根、`nt_db`、`nt_data`、工作目录、解释器、索引、虚拟环境的**最后一段**（例如 `Tencent Files`、`work`、`python.exe`）；
+  - `schema`：表结构指纹、缺失列（只有列号，不含数据）、表数量；
+  - `index` / `build` / `sync`：索引版本与指纹、消息数、会话数、搜索模式、上次构建的模式与耗时、是否 WAL 待合并、表结构是否变化、是否自动同步与间隔；
+  - `deps`：`sqlcipher3` / `pyzipper` / uv 版本，以及探测失败的原因（已把路径与账号替换掉）；
+  - `storage`：解密副本、索引、临时导出的**字节数**；`errors`：最近一次构建/同步的错误（截断到 300 字并脱敏）。
+  它**不含**消息正文、昵称、群名、会话 id、`key.txt` 内容，也不含任何 QQ 号明文；贴 issue 前可以自己打开看一眼，确认没有想保密的内容再上传。
 - 对所有 QQ 数据**只读**：不修改 Windows 的 `Documents\Tencent Files` 或 Linux 的 `~/.config/QQ` 下任何文件，不结束 QQ 进程。
 - 媒体文件**默认不复制**：`[图片]` `[视频]` `[语音]` `[文件]` 在普通导出里只是占位符，原文件仍在 `nt_qq\nt_data\`（Windows）或 `nt_qq_<hash>/nt_data/`（Linux）。勾选「含媒体」或 `--media` 时才会把本机已下载的文件复制进 ZIP；导出过程只读 `nt_data`，不修改、不移动任何原文件。
 - Linux 上为了读内存而放开 `ptrace_scope` 会降低本机进程间的隔离性，导出完成后请改回默认值。

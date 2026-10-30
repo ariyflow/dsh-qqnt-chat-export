@@ -577,7 +577,8 @@
       <p class="hint">运行环境、路径和 QQ 表结构；只有环境信息，不含聊天内容、昵称与密钥（下载的诊断包会进一步脱敏路径与账号）。</p>
       <div class="diag-grid" id="diagGrid"><span class="diag-value">正在读取诊断信息…</span></div>
       <div class="settings-actions">
-        <span class="hint" id="diagHint"></span>
+        <button class="ghost" type="button" id="downloadDiagnostics">下载诊断包</button>
+        <span class="hint" id="diagHint">贴 issue 前先下载：路径只留末段，账号做哈希，不含聊天内容与密钥。</span>
       </div>
     </section>
 
@@ -2415,6 +2416,9 @@
     return 'uv ' + (version || '可用')
   }
 
+  /** Restored whenever the card re-renders; a download overwrites it briefly. */
+  var DIAG_HINT = '贴 issue 前先下载：路径只留末段，账号做哈希，不含聊天内容与密钥。'
+
   /**
    * The diagnostics card: platform, paths and the source schema reported by
    * `info --json`. Everything here comes from the local helper, so paths may be
@@ -2426,7 +2430,7 @@
     if (!platform) {
       host.innerHTML = '<div class="banner error">' +
         esc(info.infoError || '无法读取环境信息') + '</div>'
-      $('diagHint').textContent = ''
+      $('diagHint').textContent = DIAG_HINT
       return
     }
     var paths = info.paths || {}
@@ -2465,7 +2469,40 @@
       add('表结构', '未读取（需要先提取密钥）')
     }
     host.innerHTML = rows.join('')
-    $('diagHint').textContent = ''
+    $('diagHint').textContent = DIAG_HINT
+  }
+
+  /**
+   * The downloadable diagnostics bundle. The server builds it from a white-list
+   * and names the file; the page only saves the bytes (same pattern as the stats
+   * CSV, which also lives entirely in the browser).
+   */
+  function downloadDiagnostics() {
+    var button = $('downloadDiagnostics')
+    button.disabled = true
+    $('diagHint').textContent = '正在生成诊断包…'
+    fetch('/api/diagnostics/bundle').then(function (response) {
+      if (!response.ok) {
+        return response.json().then(function (body) {
+          throw new Error(body.error || ('HTTP ' + response.status))
+        }, function () { throw new Error('HTTP ' + response.status) })
+      }
+      var disposition = response.headers.get('content-disposition') || ''
+      var match = /filename="?([^";]+)"?/.exec(disposition)
+      return response.blob().then(function (blob) {
+        var url = URL.createObjectURL(blob)
+        var link = document.createElement('a')
+        link.href = url
+        link.download = match ? match[1] : 'qqnt-diagnostics.json'
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+        setTimeout(function () { URL.revokeObjectURL(url) }, 1000)
+        $('diagHint').textContent = '已下载 ' + link.download
+      })
+    }).catch(function (error) {
+      $('diagHint').textContent = '下载失败：' + error.message
+    }).then(function () { button.disabled = false })
   }
 
   function updateIndexPath() {
@@ -2766,6 +2803,7 @@
   })
   $('refreshStorage').addEventListener('click', loadStorage)
   $('refreshDiagnostics').addEventListener('click', loadDiagnostics)
+  $('downloadDiagnostics').addEventListener('click', downloadDiagnostics)
   $('cleanupBtn').addEventListener('click', cleanupSelected)
   $('setWorkDir').addEventListener('input', updateIndexPath)
   $('storageList').addEventListener('change', updateCleanupButton)
