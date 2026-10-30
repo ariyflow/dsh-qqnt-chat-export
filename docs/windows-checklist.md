@@ -141,7 +141,7 @@
 | 步骤 | 1. 重启 DSH，看左侧栏是否出现「QQ 聊天记录」图标（排在 Plugins 之后）。<br>2. 点图标，主区打开插件页面：搜一次、点「统计」、导出一份 txt。<br>3. 切回「对话」再切回面板；点顶部「刷新」「在浏览器打开」。<br>4. 把设置里的网页端口临时改成 0 并保存，再看面板提示；改回 46728。<br>5. 装了 `dsh-better-sidebar` 时，看右侧栏「+」列表里是否多一个「QQ 聊天记录」tab。<br>6. 设置页「导出预设」保存一个「CSV 只要时间和正文」，回导出区下拉套用，再删掉。 |
 | 预期 | 图标可点、有 tooltip；面板内搜索/统计/导出与浏览器一致；「刷新」重载 iframe、「在浏览器打开」新开标签；端口 0 时面板显示中文提示 + 刷新，不白屏；右栏 tab 打开的是同一页面；预设保存后刷新仍在、套用后格式/脱敏/列都变、删除后下拉里消失。 |
 | 失败先看哪里 | `GET /api/qqnt/panel`（应返回 `{version, port, running, url, indexed, messages, chats, lastSync}`）→ 浏览器控制台 `Refused to frame`（套 iframe 被 CSP 拦）→ `node_modules/dsh-qqnt-chat-export/client.js` 是否被加载（`/plugins` 组合路由）→ DSH 日志里插件行是否 `active`。 |
-| 实测 | 待重启后补（本项需要重启 DSH 才生效）。 |
+| 实测 | 2026-10-30 重启后 ✅ 左侧栏出现「QQ 聊天记录」（在「上下文洞察」之后、「更多」之前）；点开主区就是插件页面，顶部条显示「1,246,348 条 · 293 个会话 · 上次同步 x 分钟前」+「刷新」「在浏览器打开」，iframe 里搜索/统计/导出/设置都在（截图 `docs/screenshot-sidebar.png`）；`GET /api/qqnt/panel` 返回 `version=0.13.0`、`port=46728`、`running=true`、`url=http://127.0.0.1:46728/`、`indexed=true`、`messages=1246063`、`chats=293`。切回「对话」再切回来：iframe **会**重新加载（关键词框内容被清空），与 README 已知限制一致。端口 0 的提示走单测 + 路由 `running:false` 的 payload 验证，真机没改端口（会打断当前网页服务）。better-sidebar 右栏 tab：`registerTab` 的调用与参数由 `tests/client.test.mjs` 覆盖，但本机右侧栏的「+」入口没定位到，**真机未确认**——下次开右栏时顺手看一眼。 |
 
 ## 附：安装源与「跑的是哪一版」（仅本机/开发者）
 

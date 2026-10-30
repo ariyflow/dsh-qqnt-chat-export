@@ -28,6 +28,10 @@
 - 本机验证：`client.js` 用 `node:vm` 造假 `window.__ModuleLoader__` 与 react 桩跑了 9 例（两处 slot 的 id/key
   一致、图标按 `{size}` 渲染、面板与 tab 都渲染出 iframe、没有 better-sidebar 时不抛错）；浏览器里点过预设的
   保存/套用/删除（刷新后还在）、恢复任务的「上次 ·」与「文件已清理」行、以及「导出这些会话」发出的批量请求体。
+  **重启 DSH 后真机确认**：左侧栏出现「QQ 聊天记录」图标，点开主区就是插件页面（顶部条 1,246,348 条 /
+  293 会话 / 上次同步，iframe 内搜索、统计、导出、设置都可用，截图 `docs/screenshot-sidebar.png`），
+  `GET /api/qqnt/panel` 返回 `version=0.13.0`、`running=true`、`url=http://127.0.0.1:46728/`；
+  切回「对话」再切回来时 iframe 会重新加载（外壳只挂载当前面板），已写进 README 已知限制。
   Python 145 个用例、Node 80 个用例全绿。
 
 ## 0.12.1
