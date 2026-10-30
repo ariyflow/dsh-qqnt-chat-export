@@ -148,7 +148,7 @@ class IncrementalBuildTests(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
              '--root', self.root, '--account', '12345', '--work', self.work, *args],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
             env={**os.environ, **(env or {})},
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
@@ -462,7 +462,7 @@ class IncrementalBuildTests(unittest.TestCase):
              '--root', self.root, '--account', '12345', '--work', self.work,
              'export', '--json', json.dumps({
                  'format': 'json', 'out': out, 'redact': 'everything'})],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
         )
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn('redact', json.loads(proc.stdout)['error'])
@@ -573,7 +573,7 @@ class IncrementalBuildTests(unittest.TestCase):
              'export', '--json', json.dumps({
                  'format': 'txt', 'out': out, 'chatKind': 'group', 'chatId': 'g1',
                  'embed': True})],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
         )
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn('html', json.loads(proc.stdout)['error'])
@@ -587,7 +587,7 @@ class IncrementalBuildTests(unittest.TestCase):
              '--root', self.root, '--account', '12345', '--work', self.work,
              'export', '--json', json.dumps({
                  'format': 'txt', 'out': out, 'media': True})],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
         )
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn('需要指定会话', json.loads(proc.stdout)['error'])
@@ -617,6 +617,36 @@ class IncrementalBuildTests(unittest.TestCase):
         self.assertTrue(any('2023-11-15' in name for name in names))
         self.assertTrue(any('2023-11-16' in name for name in names))
         self.assertEqual(len(names), 3, 'two daily files plus the manifest')
+
+    def test_split_export_keeps_the_unknown_day_bucket(self):
+        """ts=0 rows land on 1970-01-01, which Windows cannot turn into time_t.
+
+        `datetime.timestamp()` raises OSError for any local time before the
+        epoch, so on Windows every split-by-day export of a chat holding a
+        ts=0 row used to fail before writing anything.
+        """
+        self.run_cli('build')
+        self.add('group_msg_table', 9, 0, '零点消息', 'g1')
+        self.publish()
+        self.run_cli('build', '--refresh')
+        out = os.path.join(self.work, 'exports', 'split-zero.zip')
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        result = self.run_cli('export', '--json', json.dumps({
+            'format': 'txt', 'out': out, 'label': 'g1', 'chatKind': 'group',
+            'chatId': 'g1', 'split': 'day'}))
+        self.assertEqual(result['rows'], 3)
+        with zipfile.ZipFile(out) as archive:
+            manifest = json.loads(archive.read('manifest.json'))
+        files = manifest['chats'][0]['files']
+        unknown = [item for item in files if item['label'] == '未知']
+        self.assertEqual(len(unknown), 1, files)
+        self.assertEqual(unknown[0]['day'], '1970-01-01')
+        self.assertEqual(unknown[0]['rows'], 1)
+
+    def test_parse_day_handles_dates_before_the_epoch(self):
+        start = qq.parse_day('1970-01-01', end=False)
+        self.assertIsInstance(start, int)
+        self.assertEqual(qq.parse_day('1970-01-01', end=True) - start, 86399)
 
     def test_password_zip_is_aes_encrypted(self):
         try:
@@ -659,7 +689,7 @@ class IncrementalBuildTests(unittest.TestCase):
              '--root', self.root, '--account', '12345', '--work', self.work,
              'export', '--json', json.dumps({
                  'format': 'txt', 'out': out, 'chatKind': 'group', 'chatId': 'g1'})],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
             env={**os.environ, 'QQNT_EXPORT_PASSWORD': 'abc'},
         )
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
@@ -685,7 +715,7 @@ class IncrementalBuildTests(unittest.TestCase):
              '--root', self.root, '--account', '12345', '--work', self.work,
              'export', '--json', json.dumps({
                  'format': 'csv', 'out': out, 'columns': ['time', 'bogus']})],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
         )
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn('不支持的列', json.loads(proc.stdout)['error'])
@@ -719,7 +749,7 @@ class IncrementalBuildTests(unittest.TestCase):
              '--root', self.root, '--account', '12345', '--work', self.work,
              'export', '--json', json.dumps({
                  'format': 'txt', 'out': out, 'split': 'week'})],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
         )
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn('split', json.loads(proc.stdout)['error'])
@@ -734,7 +764,7 @@ class IncrementalBuildTests(unittest.TestCase):
              'export', '--json', json.dumps({
                  'format': 'txt', 'out': out,
                  'chats': [{'kind': 'group', 'id': 'g1'}]})],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
         )
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn('必须输出 .zip', json.loads(proc.stdout)['error'])
@@ -749,7 +779,7 @@ class IncrementalBuildTests(unittest.TestCase):
              'export', '--json', json.dumps({
                  'format': 'txt', 'out': out,
                  'chats': [{'kind': 'group'}]})],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
         )
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn('会话参数不完整', json.loads(proc.stdout)['error'])
@@ -787,7 +817,7 @@ class IncrementalBuildTests(unittest.TestCase):
             [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
              '--root', self.root, '--account', '12345', '--work', self.work,
              'messages', '--json', json.dumps({'around': 999999})],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
         )
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn('索引里没有', json.loads(proc.stdout)['error'])
@@ -886,7 +916,7 @@ class IncrementalBuildTests(unittest.TestCase):
             [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
              '--root', self.root, '--account', '12345', '--work', self.work,
              'messages', '--json', json.dumps({'sender': '[', 'senderRegex': True})],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
         )
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn('正则无效', json.loads(proc.stdout)['error'])
@@ -895,7 +925,7 @@ class IncrementalBuildTests(unittest.TestCase):
             [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
              '--root', self.root, '--account', '12345', '--work', self.work,
              'messages', '--json', json.dumps({'sender': 'a' * 201, 'senderRegex': True})],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
         )
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn('200', json.loads(proc.stdout)['error'])
@@ -937,7 +967,7 @@ class IncrementalBuildTests(unittest.TestCase):
             [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
              '--root', self.root, '--account', '12345', '--work', self.work,
              'media', '--json', json.dumps({'rowId': row['rowId'], 'seq': 9})],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
         )
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn('没有序号', json.loads(proc.stdout)['error'])
@@ -988,7 +1018,7 @@ class IncrementalBuildTests(unittest.TestCase):
             [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
              '--root', self.root, '--account', '12345', '--work', self.work,
              'messages', '--json', '{"limit":1}'],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
         )
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertIn('请先在网页点', proc.stderr)

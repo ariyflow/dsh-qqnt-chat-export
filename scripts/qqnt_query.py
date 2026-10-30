@@ -49,6 +49,7 @@ INDEX_VERSION = '6'            # bump when the sidecar schema changes
 STATUS_INTERVAL = 1.5          # seconds between progress writes
 BATCH = 2000
 LOCK_MAX_AGE = 15 * 60         # seconds before a stale build lock is taken over
+_NAIVE_EPOCH = datetime.datetime(1970, 1, 1)
 
 
 class BadInput(Exception):
@@ -1191,6 +1192,22 @@ def fts_phrase(keyword):
     return '"%s"' % keyword.replace('"', '""')
 
 
+def local_seconds(day):
+    """Naive local datetime -> Unix seconds.
+
+    Windows' C runtime rejects negative `time_t`, so `datetime.timestamp()`
+    raises `OSError: [Errno 22]` for any local time before the epoch - in a
+    UTC+8 zone that already includes 1970-01-01 00:00, which is exactly the
+    day QQ's `ts=0` rows fall into. Deriving the value from the naive epoch
+    and the zone's standard offset keeps those days working; it is only ever
+    used for pre-epoch stamps, where a DST hour cannot matter for these chats.
+    """
+    try:
+        return int(day.timestamp())
+    except (OSError, OverflowError):
+        return int((day - _NAIVE_EPOCH).total_seconds()) + time.timezone
+
+
 def parse_day(value, end):
     """'YYYY-MM-DD' 或 Unix 秒 -> 本地时区当天的起止时间戳。"""
     if value is None:
@@ -1206,8 +1223,8 @@ def parse_day(value, end):
         raise BadInput('日期格式应为 YYYY-MM-DD，收到 %r' % text)
     if end:
         day = day + datetime.timedelta(days=1)
-        return int(day.timestamp()) - 1
-    return int(day.timestamp())
+        return local_seconds(day) - 1
+    return local_seconds(day)
 
 
 # `has:` maps a word to the segment type stored in `seg_kinds` (45002).

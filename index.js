@@ -82,6 +82,12 @@ function defaultDownloadDir() {
 
 /** SQLCipher writes one native error block per rejected candidate key. */
 const SQLCIPHER_NOISE = /ERROR CORE (?:sqlcipher_|sqlite3Codec:)/
+/**
+ * Windows builds of sqlcipher3 hand the error text to the C runtime as wide
+ * characters, so every line arrives as `2\0 0\0 2\0 ...` and the noise pattern
+ * above never matches. Dropping NULs restores the plain line.
+ */
+const stripNul = (text) => text.replace(/\u0000/g, '')
 /** Cap on retained output; exporter progress lines are tiny. */
 const MAX_OUTPUT_CHARS = 256 * 1024
 
@@ -122,7 +128,7 @@ function run(command, argv, { signal, cwd, env } = {}) {
 
     const keepLine = (raw) => {
       // \r of a CRLF pair and trailing spaces are not part of the message.
-      const text = raw.trimEnd()
+      const text = stripNul(raw).trimEnd()
       if (SQLCIPHER_NOISE.test(text)) {
         foldedNoise += 1
         return
@@ -1375,7 +1381,7 @@ function isInsideDir(parent, child) {
       .replace(/(可强制重新提取[）)]?:\s*)([!-~]{16})/g, '$1<redacted>')
       .replace(/((?:key|密钥)\s*[:=]\s*)([!-~]{16})/gi, '$1<redacted>')
     const addLine = (raw) => {
-      const text = scrubPatterns(String(raw).replace(/\r/g, '').trimEnd())
+      const text = scrubPatterns(stripNul(raw).replace(/\r/g, '').trimEnd())
       if (text === '') return
       if (SQLCIPHER_NOISE.test(text)) {
         keyJob.folded += 1

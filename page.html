@@ -258,6 +258,12 @@
     .row .who { grid-column: 1; grid-row: 2; }
     .row .msg { grid-column: 1 / -1; grid-row: 3; }
     .row .tools { grid-column: 2; grid-row: 1; }
+    /* The header buttons used to squeeze into one character per line here. */
+    header.top { flex-wrap: wrap; }
+    header.top .actions button { white-space: nowrap; }
+    .brand { min-width: 0; }
+    .brand > div { min-width: 0; }
+    .brand h1, .brand .meta { overflow: hidden; text-overflow: ellipsis; }
   }
 
   button.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
@@ -482,7 +488,7 @@
       </label>
       <label class="field">
         <span>工作目录 / 索引位置</span>
-        <input type="text" id="setWorkDir" spellcheck="false" placeholder="默认系统临时目录">
+        <input type="text" id="setWorkDir" spellcheck="false" placeholder="留空使用默认持久目录">
         <small>key.txt、解密副本和索引都放在这里。当前索引文件：<code id="indexPath"></code></small>
       </label>
       <label class="field">

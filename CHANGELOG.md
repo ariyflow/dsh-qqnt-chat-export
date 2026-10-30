@@ -1,5 +1,16 @@
 # 更新记录
 
+## 0.11.2
+
+Windows 真机全量测试（QQ 9.9.x，1.2 M 条消息 / 293 个会话，zh-CN 系统）发现并修复：
+
+- **修复按天分文件导出在 Windows 上必然失败**：QQ 里 `ts=0` 的行会落到 `1970-01-01`，而 Windows 的 C 运行时拒绝负 `time_t`，`datetime.timestamp()` 对该日期抛 `OSError: [Errno 22]`，于是含这类行的会话（几乎每个群都有）执行「按天分文件」直接报错、一条都写不出来。日期换算改为在抛错时用「本地纪元 + 时区偏移」回退，Windows 与 Linux 得到同一组秒数。新增两个回归用例：`parse_day('1970-01-01')` 与含 `ts=0` 行的按天导出。
+- **修复密钥提取日志在 Windows 上被噪声淹没**：sqlcipher3 的 Windows 构建把逐候选项报错按宽字符写进 stderr，每行变成 `2\0 0\0 2\0 6\0…`，Node 端的「折叠 SQLCipher 噪声」正则匹配不到，工具输出被 256 KB 截断、真正的进度和结果行被挤掉。现在读取子进程输出时先去掉 NUL 字节再折叠，41 525 个候选的噪声收为一行「已折叠 N 条」。
+- **修复密钥校验进度估算**：预计剩余时间按「扫描 + 校验」总耗时算速率，41 525 个候选时报出「约 19 346 897 秒（224 天）」。改为只按校验阶段计时。
+- **修复测试套件在中文 Windows 上大面积报错**：`subprocess.run(..., text=True)` 用 ANSI 代码页解码子进程的 UTF-8 输出，30 个用例直接 `UnicodeDecodeError`（连带 `proc.stdout` 为 `None` 引发 28 个 `TypeError`）。`tests/test_accounts.py`、`tests/test_incremental.py` 的子进程调用统一加 `encoding='utf-8', errors='replace'`；现在 `python -m unittest discover -s tests` 在 zh-CN Windows 上直接全绿，不再需要先设 `PYTHONUTF8=1`。
+- **窄屏显示**：窗口 ≤760px 时右上角「从 QQ 同步 / 刷新 / 设置」被挤成一字一行，现在允许换行且按钮文字不折行；设置页工作目录输入框的空状态提示从过时的「默认系统临时目录」改为「留空使用默认持久目录」。
+- 本机验证：真实数据上导出 6 种格式、按天分文件、含媒体（73 个文件）、内嵌图片、批量、脱敏、密码 ZIP（AES-256）、增量同步（新增 17 条 / 22 秒）、一键 venv（uv + sqlcipher3 + pyzipper）、密钥提取、存储清理、会话别名/置顶/隐藏均通过；Python 111 个用例（venv 解释器）、Node 52 个用例全绿。
+
 ## 0.11.1
 
 - **修复 `qqnt_status` 不可用**：工具的 output schema 要求 `pyzipper`，但 `execute()` 没有返回该字段，DSH 每次都以 `missing required property "value.pyzipper"` 拒绝结果。现在返回对象补齐字段，并新增按 schema 校验的工具测试。

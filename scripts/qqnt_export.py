@@ -806,8 +806,11 @@ def cmd_key(args):
     print('')
     print('校验候选密钥（每个候选都要解密一次，这一步最慢）…')
     print('  候选总数: %s 个' % fmt_count(len(ordered)))
+    # The scan above can take minutes on a large client; measuring the rate
+    # from the scan start made the ETA off by orders of magnitude.
+    t_verify = time.time()
 
-    last_report = t0
+    last_report = t_verify
     for i, raw in enumerate(ordered, 1):
         key = raw.decode('ascii')
         if try_key(clear, key):
@@ -842,10 +845,11 @@ def cmd_key(args):
         now = time.time()
         if now - last_report >= 10 and i < len(ordered):
             last_report = now
-            rate = i / max(now - t0, 0.001)
+            rate = i / max(now - t_verify, 0.001)
             print('  已校验 %s / %s（%d%%），已用 %.0f 秒，预计还需约 %.0f 秒'
                   % (fmt_count(i), fmt_count(len(ordered)),
-                     100 * i // len(ordered), now - t0, (len(ordered) - i) / rate), flush=True)
+                     100 * i // len(ordered), now - t_verify,
+                     (len(ordered) - i) / rate), flush=True)
 
     die('没有找到有效密钥。请确认: 1) QQ 已登录 2) 数据目录正确 3) QQ 版本为 NT 架构')
 

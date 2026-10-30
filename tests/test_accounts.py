@@ -164,7 +164,7 @@ class AccountCacheTests(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
              '--root', self.root, '--work', self.work, *args],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         return json.loads(proc.stdout) if proc.stdout.strip() else {}
@@ -385,7 +385,7 @@ class AccountCacheTests(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
              '--root', self.root, '--work', self.work, '--account', GROUP, 'select'],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         result = json.loads(proc.stdout)
@@ -398,7 +398,7 @@ class AccountCacheTests(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
              '--work', self.work, 'select', '--account', OTHER],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
         )
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         payload = json.loads(proc.stdout)
@@ -425,7 +425,7 @@ class AccountCacheTests(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
              '--work', self.work, 'select', '--account', GROUP],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
         )
         os.remove(lock)
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
