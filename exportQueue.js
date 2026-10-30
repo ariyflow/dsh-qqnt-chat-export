@@ -2,9 +2,9 @@
  * Asynchronous export queue for the local web UI.
  *
  * An export of a whole account can take minutes; running it inside the HTTP
- * request hit the 180-second request timeout. Tasks are kept in memory only:
- * the generated files stay in `workDir/exports` and the existing sweep removes
- * them after an hour, so a page reload keeps its download links until then.
+ * request hit the 180-second request timeout. The finished list is written to
+ * `workDir/export-tasks.json` so a restart can restore it; the generated files
+ * stay in `workDir/exports`, where the sweep removes them after an hour.
  */
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -31,8 +31,15 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
 
   const running = () => tasks.filter((task) => task.state === 'running').length
   const exportsDir = () => path.resolve(settings.workDir, 'exports')
-  /** Where the finished list survives a restart; paths and counts only. */
-  const tasksFile = () => path.join(exportsDir(), 'tasks.json')
+  /**
+   * Where the finished list survives a restart. It lives beside `exports/`,
+   * not inside it: the hourly sweep and "清理临时导出文件" own that directory
+   * and must not delete the list itself. Rows keep only a basename, so moving
+   * the work directory keeps the download links working.
+   */
+  const tasksFile = () => path.join(path.resolve(settings.workDir), 'export-tasks.json')
+  /** 0.13.0 wrote the list inside `exports/`; read it once and rewrite it. */
+  const legacyTasksFile = () => path.join(exportsDir(), 'tasks.json')
 
   /** A task's file, when it is still inside `exports/` and still on disk. */
   function insideExports(target) {
@@ -58,7 +65,7 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
     return /^(全部会话|批量导出 )/.test(text) ? text : '聊天记录'
   }
 
-  /** Fields kept on disk: no chat id, no chat name, no traceback. */
+  /** Fields kept on disk: no chat id, no chat name, no traceback, no path. */
   function persisted(task) {
     return {
       id: task.id,
@@ -67,11 +74,32 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
       state: task.state,
       rows: task.rows,
       bytes: task.bytes,
-      path: task.path,
+      // A basename survives a work-dir move and never leaks the home path.
+      file: path.basename(String(task.path || '').replace(/\\/g, '/')),
+      encrypted: task.encrypted === true,
+      media: task.media || null,
       error: task.error,
       createdAt: task.createdAt,
       finishedAt: task.finishedAt,
     }
+  }
+
+  /** Parse one list file, or `null` when it is missing/garbage. */
+  function readRows(file) {
+    try {
+      const rows = JSON.parse(readFileSync(file, 'utf8'))
+      return Array.isArray(rows) ? rows : null
+    } catch {
+      return null
+    }
+  }
+
+  /** Old rows stored an absolute `path`; new rows store `file` alone. */
+  function restoredPath(row) {
+    const pick = typeof row.file === 'string' && row.file !== '' ? row.file
+      : (typeof row.path === 'string' ? row.path : '')
+    const name = pick === '' ? '' : path.basename(pick.replace(/\\/g, '/'))
+    return name === '' ? '' : path.join(exportsDir(), name)
   }
 
   /**
@@ -80,16 +108,15 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
    * yesterday's rows into "文件已清理" instead of dead download links.
    */
   function restore() {
-    let rows
-    try {
-      rows = JSON.parse(readFileSync(tasksFile(), 'utf8'))
-    } catch {
-      return
-    }
-    if (!Array.isArray(rows)) return
+    let rows = readRows(tasksFile())
+    const legacy = rows === null
+    if (legacy) rows = readRows(legacyTasksFile())
+    if (rows === null) return
     for (const row of rows.slice(0, MAX_KEPT)) {
       if (!row || typeof row !== 'object' || typeof row.id !== 'string' || row.id === '') continue
-      const state = row.state === 'done' ? 'done' : row.state === 'cancelled' ? 'cancelled' : 'gone'
+      const state = row.state === 'done' || row.state === 'cancelled' || row.state === 'error'
+        ? row.state
+        : 'gone'
       const task = {
         id: row.id,
         label: typeof row.label === 'string' && row.label ? row.label : '聊天记录',
@@ -97,12 +124,19 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
         state,
         rows: Number(row.rows) || 0,
         bytes: Number(row.bytes) || 0,
-        path: typeof row.path === 'string' ? row.path : '',
+        path: restoredPath(row),
         error: typeof row.error === 'string' ? row.error.slice(0, 400) : '',
         detail: '',
         createdAt: Number(row.createdAt) || 0,
         finishedAt: Number(row.finishedAt) || 0,
         restored: true,
+      }
+      if (row.encrypted === true) task.encrypted = true
+      if (row.media && Number.isFinite(Number(row.media.files))) {
+        task.media = {
+          files: Number(row.media.files),
+          missing: Number(row.media.missing) || 0,
+        }
       }
       if (task.state === 'done' && !insideExports(task.path)) {
         task.state = 'gone'
@@ -111,15 +145,17 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
       tasks.push(task)
     }
     trim()
+    // Rewrite straight away: the next sweep is free to delete the old file.
+    if (legacy) writeTasks()
   }
 
   let saveTimer = null
   function writeTasks() {
     try {
-      mkdirSync(exportsDir(), { recursive: true })
+      mkdirSync(path.dirname(tasksFile()), { recursive: true })
       const payload = tasks.filter((task) => task.state !== 'running').map(persisted)
       const tmp = `${tasksFile()}.tmp`
-      writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
+      writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
       renameSync(tmp, tasksFile())
     } catch {
       // A read-only work directory must not break finished exports.
@@ -362,6 +398,24 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
     return { task: { ...task }, path: target }
   }
 
+  /**
+   * Mark finished rows whose file disappeared as "gone".
+   *
+   * The startup sweep and "清理临时导出文件" delete files behind the queue's
+   * back; without this a restored row would keep a dead download link until
+   * the next restart.
+   */
+  function revalidate() {
+    let changed = false
+    for (const task of tasks) {
+      if (task.state !== 'done' || insideExports(task.path)) continue
+      task.state = 'gone'
+      task.error = '文件已清理（导出文件只保留一小时）'
+      changed = true
+    }
+    if (changed) scheduleSave()
+  }
+
   /** Kill running children when the listener stops. */
   function close() {
     for (const child of children.values()) {
@@ -379,5 +433,5 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
 
   restore()
 
-  return { enqueue, list: snapshot, get, cancel, file, close }
+  return { enqueue, list: snapshot, get, cancel, file, close, revalidate }
 }

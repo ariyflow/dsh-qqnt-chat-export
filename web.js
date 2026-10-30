@@ -819,7 +819,11 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
           }
           return handlers.cleanupStorage(body.ids)
         })
-        .then((result) => sendJson(res, 200, result))
+        .then((result) => {
+          // The cleanup may have deleted a finished export's file.
+          queue.revalidate()
+          sendJson(res, 200, result)
+        })
         .catch((error) => sendJson(res, error.status ?? 400, { error: error.message }))
       return
     }
@@ -1167,6 +1171,10 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       return
     }
     if (pathname === '/api/presets' && req.method === 'POST') {
+      if (!isTrustedMutation(req)) {
+        sendJson(res, 403, { error: 'cross-origin requests are refused' })
+        return
+      }
       readJsonBody(req)
         .then((body) => {
           // The page owns the whole list, so a POST replaces it. Naming a
@@ -1297,9 +1305,9 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       return
     }
     if (req.method === 'POST' && pathname === '/api/index/build') {
-      // A page on another origin must not be able to start a 1 GB rebuild.
-      const origin = req.headers.origin
-      if (origin !== undefined && !isLoopbackOrigin(origin)) {
+      // A page on another origin (or another local app without the custom
+      // header) must not be able to start a 1 GB rebuild.
+      if (!isTrustedMutation(req)) {
         sendJson(res, 403, { error: 'cross-origin requests are refused' })
         return
       }
@@ -1351,6 +1359,7 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
   server.listen(port, host, () => {
     console.log(`[qqnt-chat-export] web UI listening on ${state.url}`)
     sweepExports(path.join(settings.workDir, 'exports'))
+    queue.revalidate()
     resolveReady(state.url)
   })
   state.server = server

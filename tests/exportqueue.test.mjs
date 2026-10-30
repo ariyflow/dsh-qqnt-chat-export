@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
 import { createExportQueue, MAX_CONCURRENT } from '../exportQueue.js'
 import { startWebServer } from '../web.js'
+import { migrateWorkDir } from '../storage.js'
 
 const actionHeaders = { 'content-type': 'application/json', 'x-qqnt-action': '1' }
 const PYTHON = process.env.PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3')
@@ -603,7 +605,7 @@ test('finished tasks are written to tasks.json without chat names', async () => 
   } finally {
     queue.close()
   }
-  const raw = await readFile(path.join(work, 'exports', 'tasks.json'), 'utf8')
+  const raw = await readFile(path.join(work, 'export-tasks.json'), 'utf8')
   const rows = JSON.parse(raw)
   assert.equal(rows.length, 1)
   assert.equal(rows[0].id, task.id)
@@ -639,6 +641,130 @@ test('a restart keeps the finished list and its download link', async () => {
     assert.equal(file.path, done.path)
   } finally {
     second.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the task list lives beside exports, not inside the swept directory', async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  const helper = await fakeHelper(dir)
+  const queue = createExportQueue({ settings: { python: PYTHON, workDir: work }, queryCli: helper })
+  try {
+    queue.enqueue({}, { label: '全部会话', format: 'txt' })
+    await waitFor(() => queue.list().tasks.find((row) => row.state === 'done'))
+  } finally {
+    queue.close()
+  }
+  const kept = path.join(work, 'export-tasks.json')
+  assert.ok(existsSync(kept), 'the list must sit outside exports/')
+  assert.equal(existsSync(path.join(work, 'exports', 'tasks.json')), false)
+  // An old list is still left for the sweep, but the new location is untouched.
+  await utimes(kept, new Date(0), new Date(0))
+  const server = startWebServer({ python: PYTHON, workDir: work }, 24680, '127.0.0.1', { handlers: {} })
+  try {
+    await server.ready
+    assert.ok(existsSync(kept), 'sweepExports must not delete the task list')
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a 0.13.0 list inside exports is migrated to a basename row', async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  const exportsDir = path.join(work, 'exports')
+  await mkdir(exportsDir, { recursive: true })
+  const file = path.join(exportsDir, 'e1.txt')
+  await writeFile(file, 'old')
+  await writeFile(path.join(exportsDir, 'tasks.json'), JSON.stringify([{
+    id: 'e1', label: '全部会话', format: 'txt', state: 'done',
+    rows: 3, bytes: 3, path: file, error: '', createdAt: 1, finishedAt: 2,
+  }]))
+  const helper = await fakeHelper(dir)
+  const queue = createExportQueue({ settings: { python: PYTHON, workDir: work }, queryCli: helper })
+  try {
+    const row = queue.list().tasks[0]
+    assert.equal(row.state, 'done')
+    assert.equal(queue.file('e1').path, file)
+    const moved = JSON.parse(await readFile(path.join(work, 'export-tasks.json'), 'utf8'))
+    assert.equal(moved[0].file, 'e1.txt')
+    assert.equal(moved[0].path, undefined, 'the new list must not persist an absolute path')
+  } finally {
+    queue.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a moved work directory keeps the restored download link', async () => {
+  const dir = await tempDir()
+  const first = path.join(dir, 'work-first')
+  await mkdir(first)
+  const helper = await fakeHelper(dir)
+  const queue = createExportQueue({ settings: { python: PYTHON, workDir: first }, queryCli: helper })
+  let done
+  try {
+    queue.enqueue({}, { label: '全部会话', format: 'txt' })
+    done = await waitFor(() => queue.list().tasks.find((row) => row.state === 'done'))
+  } finally {
+    queue.close()
+  }
+  const moved = path.join(dir, 'work-moved')
+  await migrateWorkDir(first, moved, { removeSource: true })
+
+  const restored = createExportQueue({ settings: { python: PYTHON, workDir: moved }, queryCli: helper })
+  try {
+    const row = restored.list().tasks.find((item) => item.id === done.id)
+    assert.ok(row, 'the list must travel with the work directory')
+    assert.equal(row.state, 'done', 'a basename resolves inside the new exports/')
+    const file = restored.file(done.id)
+    assert.ok(file, 'the copied export must still download')
+    assert.equal(path.dirname(file.path), path.join(moved, 'exports'))
+  } finally {
+    restored.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a restored failed task keeps its error instead of becoming "gone"', async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  await writeFile(path.join(work, 'export-tasks.json'), JSON.stringify([{
+    id: 'e9', label: '聊天记录', format: 'txt', state: 'error',
+    rows: 0, bytes: 0, file: '', error: '磁盘满了', createdAt: 1, finishedAt: 2,
+  }]))
+  const helper = await fakeHelper(dir)
+  const queue = createExportQueue({ settings: { python: PYTHON, workDir: work }, queryCli: helper })
+  try {
+    const row = queue.list().tasks[0]
+    assert.equal(row.state, 'error')
+    assert.equal(row.error, '磁盘满了')
+  } finally {
+    queue.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('revalidate turns a deleted file into "gone" without a restart', async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  const helper = await fakeHelper(dir)
+  const queue = createExportQueue({ settings: { python: PYTHON, workDir: work }, queryCli: helper })
+  try {
+    queue.enqueue({}, { label: '全部会话', format: 'txt' })
+    const done = await waitFor(() => queue.list().tasks.find((row) => row.state === 'done'))
+    await rm(done.path, { force: true })
+    queue.revalidate()
+    const row = queue.list().tasks[0]
+    assert.equal(row.state, 'gone')
+    assert.match(row.error, /文件已清理/)
+    assert.equal(queue.file(row.id), null)
+  } finally {
+    queue.close()
     await rm(dir, { recursive: true, force: true })
   }
 })

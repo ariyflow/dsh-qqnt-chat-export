@@ -18,6 +18,7 @@ import {
 } from '../settings.js'
 import { cleanupStorage, migrateWorkDir, removeWorkDirEntries, storageSnapshot } from '../storage.js'
 import { panelInfo, pruneAccountIndexes, startWebServer } from '../web.js'
+import { panelRequestAllowed } from '../index.js'
 
 const actionHeaders = { 'content-type': 'application/json', 'x-qqnt-action': '1' }
 const PYTHON = process.env.PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3')
@@ -401,6 +402,61 @@ test('key extraction needs confirmation and reports 202', async () => {
     await server.close()
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+test('the preset list requires the loopback action header too', async () => {
+  const dir = await tempDir()
+  const settings = { python: process.execPath, workDir: dir }
+  const { server, base } = await startServer(settings, {})
+  try {
+    const body = JSON.stringify({ presets: [{ name: 'x', format: 'csv' }] })
+    let response = await fetch(`${base}/api/presets`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body,
+    })
+    assert.equal(response.status, 403)
+    response = await fetch(`${base}/api/presets`, {
+      method: 'POST', headers: actionHeaders, body,
+    })
+    assert.equal(response.status, 200)
+    assert.equal((await response.json()).presets[0].name, 'x')
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a cross-origin rebuild request is refused before it spawns Python', async () => {
+  const dir = await tempDir()
+  const settings = { python: path.join(dir, 'no-such-python'), workDir: dir }
+  const { server, base } = await startServer(settings, {})
+  try {
+    let response = await fetch(`${base}/api/index/build`, { method: 'POST' })
+    assert.equal(response.status, 403)
+    response = await fetch(`${base}/api/index/build`, {
+      method: 'POST',
+      headers: { ...actionHeaders, origin: 'http://evil.example' },
+    })
+    assert.equal(response.status, 403)
+    response = await fetch(`${base}/api/index/build`, { method: 'POST', headers: actionHeaders })
+    assert.equal(response.status, 500)
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the sidebar route only answers a loopback browser', () => {
+  const look = (host, remoteAddress = '127.0.0.1') => panelRequestAllowed({
+    headers: { host }, socket: { remoteAddress },
+  })
+  assert.equal(look('127.0.0.1:3080'), true)
+  assert.equal(look('localhost:3080'), true)
+  assert.equal(look('[::1]:3080', '::1'), true)
+  assert.equal(look('[::1]:3080', '::ffff:127.0.0.1'), true)
+  assert.equal(look('127.0.0.2:3080', '127.0.0.1'), true, 'any 127/8 literal is loopback')
+  assert.equal(look('192.168.1.5:3080', '192.168.1.9'), false)
+  assert.equal(look('example.com', '127.0.0.1'), false)
+  assert.equal(look(''), false)
 })
 
 test('a missing interpreter returns 500 without killing the server', async () => {

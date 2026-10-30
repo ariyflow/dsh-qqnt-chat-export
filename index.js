@@ -81,6 +81,35 @@ function defaultDownloadDir() {
   return path.join(os.homedir(), 'Downloads')
 }
 
+/**
+ * Whether the sidebar metadata request came from this machine's own browser.
+ *
+ * `/api/qqnt/panel` is an exact route, and DSH gives exact routes precedence
+ * over its authenticated `/api` prefix, so the DSH cookie fence never sees it.
+ * It only returns counts, but a DSH exposed through a trusted host or proxy
+ * must not publish even that: require a loopback Host header and peer.
+ */
+function isLoopbackName(name) {
+  const lower = String(name || '').toLowerCase()
+  return lower === 'localhost' || lower === '::1'
+    || lower === '::ffff:127.0.0.1' || /^127(?:\.\d{1,3}){3}$/.test(lower)
+}
+export function panelRequestAllowed(req) {
+  const host = String(req?.headers?.host || '')
+  if (host === '') return false
+  let name
+  if (host.startsWith('[')) {
+    const end = host.indexOf(']')
+    if (end === -1) return false
+    name = host.slice(1, end)
+  } else {
+    name = host.split(':')[0]
+  }
+  if (!isLoopbackName(name)) return false
+  const remote = String(req?.socket?.remoteAddress || '')
+  return remote === '' || isLoopbackName(remote)
+}
+
 /** SQLCipher writes one native error block per rejected candidate key. */
 const SQLCIPHER_NOISE = /ERROR CORE (?:sqlcipher_|sqlite3Codec:)/
 /**
@@ -1757,6 +1786,11 @@ function isInsideDir(parent, child) {
   // browser from guessing a port or needing CORS, and keeps chat text out of
   // DSH's DOM entirely: this route answers with counts, never messages.
   const panelRoute = async (req, res) => {
+    if (!panelRequestAllowed(req)) {
+      res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ error: '面板只在本机可用' }))
+      return
+    }
     const head = req.method === 'HEAD'
     if (req.method !== 'GET' && !head) {
       res.writeHead(405, { allow: 'GET, HEAD', 'content-type': 'application/json; charset=utf-8' })

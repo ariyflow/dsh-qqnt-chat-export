@@ -1,6 +1,6 @@
 {
   "name": "dsh-qqnt-chat-export",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "description": "Read, search, and export NTQQ chat history (groups and private chats) as text, CSV, JSON, Markdown, HTML, or SQLite on Windows and Linux — a DeepSeek Harness bundle with model tools and a local web UI at http://127.0.0.1:46728/ (port configurable).",
   "type": "module",
   "license": "MIT",
@@ -42,6 +42,7 @@
     "settings.js",
     "storage.js",
     "exportQueue.js",
+    "presets.js",
     "page.html",
     "cordis.patch.yml",
     "locale/*.json",
@@ -49,6 +50,7 @@
     "scripts/*.py",
     "docs/screenshot.png",
     "docs/screenshot-stats.png",
+    "docs/screenshot-sidebar.png",
     "docs/wal-notes.md",
     "docs/media-notes.md",
     "docs/windows-checklist.md",

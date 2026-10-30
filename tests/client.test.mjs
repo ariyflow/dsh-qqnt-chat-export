@@ -26,7 +26,7 @@ const PANEL_ID = 'qqnt-chat-export'
  * a test hands the panel an already-loaded (or failed) result without running a
  * live fetch.
  */
-async function boot(nextState) {
+async function boot(nextState, location) {
   const source = await readFile(path.join(ROOT, 'client.js'), 'utf8')
   let spec = null
   const react = {
@@ -40,7 +40,7 @@ async function boot(nextState) {
     Fragment: 'Fragment',
   }
   const sandbox = {
-    window: { __ModuleLoader__: { load: (value) => { spec = value } } },
+    window: { __ModuleLoader__: { load: (value) => { spec = value } }, location },
     document: {
       querySelector: () => null,
       createElement: () => ({ dataset: {}, textContent: '' }),
@@ -165,6 +165,16 @@ test('a stopped web server shows a Chinese hint instead of a blank frame', async
   assert.match(text(tree), /网页服务没有启动/)
   assert.match(text(tree), /还没有索引/)
   assert.match(text(tree), /刷新/)
+})
+
+test('an HTTPS shell explains the blocked iframe instead of rendering it', async () => {
+  const { exports } = await boot(LOADED, { protocol: 'https:' })
+  const entries = registered(exports)
+  const tree = expand({ type: entries.main.component, props: {} })
+  assert.equal(find(tree, (node) => node.type === 'iframe'), null)
+  assert.match(text(tree), /HTTPS/)
+  assert.match(text(tree), /内嵌页面/)
+  assert.match(text(tree), /在浏览器打开/)
 })
 
 test('no index yet says so instead of pretending to be empty', async () => {

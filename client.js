@@ -130,15 +130,40 @@ window.__ModuleLoader__.load({
       const openInBrowser = () => {
         if (info && info.url) window.open(info.url, '_blank', 'noopener')
       }
-      const body = info && info.url
-        ? jsx.jsx('iframe', {
-          className: 'qqnt-panel-frame',
-          src: info.url,
-          title: LABEL,
-          // Reloading the frame is the only "refresh" that reaches the page.
-          key: `${info.url}#${stamp}`,
+      // The plugin's own UI is loopback HTTP. An HTTPS DSH (--tls-cert or a
+      // TLS proxy) would have the browser block this iframe as mixed content,
+      // so say why instead of showing a blank pane.
+      const insecureFrame = typeof window !== 'undefined'
+        && window.location && window.location.protocol === 'https:'
+        && Boolean(info && info.url) && info.url.startsWith('http://')
+      const body = insecureFrame
+        ? jsx.jsx('div', {
+          className: 'qqnt-panel-note',
+          children: [
+            jsx.jsx('p', {
+              className: 'qqnt-panel-error',
+              children: 'DSH 正通过 HTTPS 打开，浏览器会拦截 http://127.0.0.1 的内嵌页面。',
+            }),
+            jsx.jsx('p', {
+              children: '请改用 http://127.0.0.1 打开 DSH，或在浏览器里单独打开插件页面。',
+            }),
+            jsx.jsx('button', {
+              className: 'qqnt-panel-btn',
+              type: 'button',
+              onClick: openInBrowser,
+              children: '在浏览器打开',
+            }),
+          ],
         })
-        : jsx.jsx('div', {
+        : info && info.url
+          ? jsx.jsx('iframe', {
+            className: 'qqnt-panel-frame',
+            src: info.url,
+            title: LABEL,
+            // Reloading the frame is the only "refresh" that reaches the page.
+            key: `${info.url}#${stamp}`,
+          })
+          : jsx.jsx('div', {
           className: 'qqnt-panel-note',
           children: [
             jsx.jsx('p', {
