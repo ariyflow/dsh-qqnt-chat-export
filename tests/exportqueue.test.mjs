@@ -37,6 +37,11 @@ print(json.dumps({'path': payload['out'], 'format': payload['format'],
     fail: `import json, sys
 print(json.dumps({'error': '磁盘满了'}))
 sys.exit(1)`,
+    crash: `import json, sys
+print('progress line that is not JSON')
+print(json.dumps({'error': '导出失败：OSError: boom',
+                  'detail': 'Traceback (most recent call last):\\n  ...'}))
+sys.exit(1)`,
     hang: `import time
 time.sleep(30)`,
     echo: `import json, os, sys
@@ -123,6 +128,26 @@ test('a failing export reports the helper error', async () => {
     assert.equal(failed.state, 'error')
     assert.match(failed.error, /磁盘满了/)
     assert.equal(queue.file(task.id), null, 'a failed task has no file')
+  } finally {
+    queue.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a crashed export keeps the one-liner and folds the traceback', async () => {
+  const dir = await tempDir()
+  const work = path.join(dir, 'work')
+  await mkdir(work)
+  const helper = await fakeHelper(dir, 'crash')
+  const queue = createExportQueue({ settings: { python: PYTHON, workDir: work }, queryCli: helper })
+  try {
+    queue.enqueue({}, { label: '全部', format: 'txt' })
+    const failed = await waitFor(() => queue.list().tasks.find((row) => row.state !== 'running'))
+    assert.equal(failed.state, 'error')
+    // The JSON is the last line even though the helper printed progress first.
+    assert.match(failed.error, /导出失败：OSError/)
+    assert.doesNotMatch(failed.error, /Traceback/, 'the sentence must not carry the stack')
+    assert.match(failed.detail, /Traceback/)
   } finally {
     queue.close()
     await rm(dir, { recursive: true, force: true })

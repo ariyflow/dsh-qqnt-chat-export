@@ -46,7 +46,7 @@ function queryCli() {
 }
 
 /** Reported in the diagnostics bundle; the installed copy ships package.json. */
-const BUNDLE_VERSION = (() => {
+export const BUNDLE_VERSION = (() => {
   try {
     return String(JSON.parse(readFileSync(path.join(HERE, 'package.json'), 'utf8')).version || '')
   } catch {
@@ -550,6 +550,7 @@ export function diagnosticsBundle({
       seconds: finishedAt > startedAt ? finishedAt - startedAt : 0,
       walPending: build.walPending === true,
       schemaChanged: build.schemaChanged === true,
+      fullReason: String(build.fullReason || ''),
       error: scrub(build.error),
     },
     sync: {
@@ -800,7 +801,10 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       }
       Promise.resolve()
         .then(() => handlers.getDiagnostics())
-        .then((result) => sendJson(res, 200, result))
+        // A separate key on purpose: `version` in this payload is the Python
+        // interpreter (the settings page prints "Python <version>"), so the
+        // plugin build gets its own name instead of shadowing it.
+        .then((result) => sendJson(res, 200, { ...result, pluginVersion: BUNDLE_VERSION }))
         .catch((error) => sendJson(res, 500, { error: error.message }))
       return
     }

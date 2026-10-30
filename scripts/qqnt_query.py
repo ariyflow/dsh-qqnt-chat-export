@@ -36,6 +36,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import urllib.parse
 import zipfile
 
@@ -47,6 +48,15 @@ PRIVATE_KIND = 'private'
 PAGE_LIMIT_MAX = 500
 INDEX_VERSION = '6'            # bump when the sidecar schema changes
 STATUS_INTERVAL = 1.5          # seconds between progress writes
+# Why a sync could not append and had to rebuild. The page prints these next
+# to the build state, so "重建" is not the only clue when it takes a minute.
+FULL_REASONS = {
+    'no-snapshot': '索引读不出来',
+    'account': '账号变了',
+    'version': '索引版本变了',
+    'search': '搜索模式变了',
+    'counts': '源库消息数对不上（有删除或回填）',
+}
 BATCH = 2000
 LOCK_MAX_AGE = 15 * 60         # seconds before a stale build lock is taken over
 _NAIVE_EPOCH = datetime.datetime(1970, 1, 1)
@@ -772,23 +782,27 @@ def load_marks(src, marks):
 
 
 def plan_incremental(p, src, uin, source_counts, search='fts'):
-    """Append-only sync, or None to request a full rebuild.
+    """Append-only sync, or ``(None, reason)`` to request a full rebuild.
 
     Only rows above their chat's watermark are read. The per-kind count
     equality check refuses the plan when the source gained or lost rows below
     a watermark (deletion, backfill, account switch), so those cases fall back
     to a full parse instead of silently keeping stale messages.
+
+    Returns ``(plan, reason)``. ``reason`` is ``''`` when a plan comes back,
+    otherwise one of :data:`FULL_REASONS` so the page can say why the run is
+    about to re-parse the whole database.
     """
     snap = index_snapshot(p['index'])
     if not snap:
-        return None
+        return None, 'no-snapshot'
     if str(snap['meta'].get('account') or '') != str(uin):
-        return None
+        return None, 'account'
     if str(snap['meta'].get('version') or '') != INDEX_VERSION:
-        return None
+        return None, 'version'
     # Changing the keyword strategy cannot be done by appending rows.
     if str(snap['meta'].get('search') or ('fts' if snap['meta'].get('fts') == '1' else 'like')) != search:
-        return None
+        return None, 'search'
     load_marks(src, snap['marks'])
     new_counts, total_new = {}, 0
     for kind, table in ((GROUP_KIND, 'group_msg_table'), (PRIVATE_KIND, 'c2c_msg_table')):
@@ -799,14 +813,14 @@ def plan_incremental(p, src, uin, source_counts, search='fts'):
             'OR s.[40001] > coalesce(w.max_id, 0)' % (table, MARKS_TABLE),
             (kind,)).fetchone()[0]
         if source_counts.get(kind, 0) != snap['counts'].get(kind, 0) + added:
-            return None
+            return None, 'counts'
         new_counts[kind] = added
         total_new += added
     return {
         'new_counts': new_counts, 'total_new': total_new,
         'old_total': sum(snap['counts'].values()),
         'new_total': sum(snap['counts'].values()) + total_new,
-    }
+    }, ''
 
 
 def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, search='fts',
@@ -886,10 +900,15 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
                 % table).fetchone()[0]
         source_total = sum(source_counts.values())
 
-        plan = None
+        plan, full_reason = None, ''
         if (refresh or switched) and os.path.exists(p['index']):
-            plan = plan_incremental(p, src, uin, source_counts, search)
+            plan, full_reason = plan_incremental(p, src, uin, source_counts, search)
         mode = 'incremental' if plan else 'full'
+        # Keep the reason in the status file: it is the only place that knows a
+        # "重建" is the fallback rather than the user's explicit refresh.
+        state['fullReason'] = full_reason if mode == 'full' else ''
+        state['fullReasonText'] = (FULL_REASONS.get(full_reason, '')
+                                   if mode == 'full' else '')
         if plan and plan['total_new'] == 0:
             # Nothing new: keep the existing index, refresh builtAt, and repair
             # chat metadata written by versions that skipped unknown senders.
@@ -1110,6 +1129,8 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
             'walPending': WAL_STATE['pending'], 'walError': WAL_STATE['error'],
             # A full rebuild just adopted the new shape, so only appends warn.
             'schemaChanged': schema_changed and bool(plan),
+            'fullReason': state.get('fullReason', ''),
+            'fullReasonText': state.get('fullReasonText', ''),
         })
         result = {'ok': True, 'mode': mode, 'processed': processed,
                   'added': plan['total_new'] if plan else processed,
@@ -2394,6 +2415,27 @@ def cmd_export(p, args):
     print(json.dumps(payload, ensure_ascii=False))
 
 
+def run_export_command(p, args):
+    """`export`, but a crash becomes one readable line plus a folded detail.
+
+    The web page runs this in a child process and shows its stdout in the task
+    panel; before this wrapper an unexpected `OSError` arrived there as a raw
+    traceback with no sentence saying what failed. `BadInput` keeps its 400
+    semantics (exit 2), and the full traceback rides along in `detail` so it is
+    still available when the one-liner is not enough.
+    """
+    try:
+        cmd_export(p, args)
+    except (BadInput, SystemExit):
+        raise
+    except BaseException as exc:      # noqa: BLE001 - 任何失败都要有可读出口
+        print(json.dumps({
+            'error': '导出失败：%s: %s' % (exc.__class__.__name__, exc),
+            'detail': traceback.format_exc(limit=20),
+        }, ensure_ascii=False))
+        sys.exit(1)
+
+
 def cmd_status(p, root=None, account=None):
     build = read_status(p)
     counts, _ = index_counts(p['index'])
@@ -2610,7 +2652,7 @@ def main(argv=None):
         elif args.cmd == 'media-list':
             cmd_media_list(p, json.loads(args.json))
         elif args.cmd == 'export':
-            cmd_export(p, json.loads(args.json))
+            run_export_command(p, json.loads(args.json))
     except BadInput as exc:
         # 参数错误走 400：只回一行可读原因，不泄漏调用栈
         print(json.dumps({'error': str(exc)}, ensure_ascii=False))

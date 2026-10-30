@@ -176,6 +176,25 @@ async function startServer(settings, handlers) {
   throw new Error('could not bind a test port')
 }
 
+test('GET /api/diagnostics names the running plugin version', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'qqnt-diag-'))
+  const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+  const handlers = { getDiagnostics: async () => sampleDiagnostics('', dir) }
+  const { server, base } = await startServer({ python: process.execPath, workDir: dir }, handlers)
+  try {
+    const response = await fetch(`${base}/api/diagnostics`)
+    assert.equal(response.status, 200)
+    const body = await response.json()
+    // `version` stays the Python interpreter; the plugin build is `pluginVersion`.
+    assert.equal(body.pluginVersion, pkg.version)
+    assert.equal(body.version, '3.12.4')
+    assert.equal(body.platform.python, '3.12.4')
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('GET /api/diagnostics/bundle downloads a scrubbed attachment', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'qqnt-bundle-'))
   const settings = { python: process.execPath, workDir: dir }

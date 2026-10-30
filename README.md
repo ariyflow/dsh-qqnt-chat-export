@@ -250,12 +250,13 @@ git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
 - `key.json` 记录密钥属于哪个 QQ 账号；切换账号后建立索引或导出会直接提示重新提取，不会拿旧账号的密钥去试新库。
 - 「默认源安装」/「清华镜像安装」会从 PyPI 或清华镜像下载 `sqlcipher3-wheels` 和 `pyzipper` 并安装到插件私有虚拟环境，需要网络；都不会修改系统 Python。镜像内容由清华镜像同步，若不可用可换默认源。uv 同样只写入该虚拟环境；它下载的托管 Python 落在 uv 自己的缓存目录（默认 `~/.local/share/uv/python`，可用 `UV_PYTHON_INSTALL_DIR` 覆盖）。
 - 网页服务**只绑 `127.0.0.1`**，并拒绝非本机的 `Host` 和跨站 `POST`，但仍然建议只在本机使用。
+- 设置页的「诊断」卡片与 `GET /api/diagnostics` 只回**元数据**：插件版本、系统与位数、解释器、`sqlcipher3`/`pyzipper` 是否可用、表结构指纹、消息数/会话数、上次构建的模式与原因。版本号本身不是隐私，写进卡片和诊断包是为了能一眼确认装的是哪一版（这次「重启后被 GitHub 版本覆盖」就是靠它发现的）。
 - **诊断包**（设置 → 诊断 → 下载诊断包，`GET /api/diagnostics/bundle`）是白名单拼出来的，只含这些字段：
   - `version`（插件版本）、`generatedAt`（生成时间，ISO）；
   - `platform`：`os` / `arch` / `bits` / `python` 版本号、`sqlcipher3` 与 `pyzipper` 是否可用、QQ 进程数、内存读取方式、是否找到数据根、账号个数、**账号的 `sha1` 前 8 位**；
   - `paths`：数据根、`nt_db`、`nt_data`、工作目录、解释器、索引、虚拟环境的**最后一段**（例如 `Tencent Files`、`work`、`python.exe`）；
   - `schema`：表结构指纹、缺失列（只有列号，不含数据）、表数量；
-  - `index` / `build` / `sync`：索引版本与指纹、消息数、会话数、搜索模式、上次构建的模式与耗时、是否 WAL 待合并、表结构是否变化、是否自动同步与间隔；
+  - `index` / `build` / `sync`：索引版本与指纹、消息数、会话数、搜索模式、上次构建的模式与耗时、**全量重建的原因**（`fullReason`，如源库删过消息）、是否 WAL 待合并、表结构是否变化、是否自动同步与间隔；
   - `deps`：`sqlcipher3` / `pyzipper` / uv 版本，以及探测失败的原因（已把路径与账号替换掉）；
   - `storage`：解密副本、索引、临时导出的**字节数**；`errors`：最近一次构建/同步的错误（截断到 300 字并脱敏）。
   它**不含**消息正文、昵称、群名、会话 id、`key.txt` 内容，也不含任何 QQ 号明文；贴 issue 前可以自己打开看一眼，确认没有想保密的内容再上传。

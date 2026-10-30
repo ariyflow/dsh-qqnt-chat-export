@@ -169,6 +169,8 @@
   .stat-row b { color: var(--muted); font-weight: 500; white-space: nowrap; }
   .stat-row i { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--accent); opacity: .5; }
   .stats-empty { color: var(--muted); font-size: 13px; }
+  .stats-error { display: flex; align-items: center; gap: 10px; margin: 0 0 10px; padding: 8px 10px; font-size: 12px; color: var(--danger); border: 1px solid var(--danger); border-radius: 6px; background: var(--panel); }
+  .stats-error span { flex: 1; word-break: break-word; }
   .chat-hits { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 16px; border-bottom: 1px solid var(--line); }
   .chat-hits .chip { font-size: 12px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--text); cursor: pointer; }
   .chat-hits .chip:hover { border-color: var(--accent); color: var(--accent); }
@@ -235,6 +237,8 @@
   .task-row.done .t-state { color: var(--out); }
   .task-row.error .t-state { color: var(--danger); }
   .task-row .t-error { color: var(--danger); word-break: break-word; }
+  .task-row .t-detail summary { cursor: pointer; color: var(--muted); font-size: 11px; }
+  .task-row .t-detail pre { margin: 4px 0 0; padding: 6px 8px; max-height: 160px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: 11px; color: var(--muted); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
   .task-row button { font-size: 11px; padding: 1px 8px; justify-self: start; }
   .spinner {
     display: inline-block; width: 8px; height: 8px; margin-right: 4px; border-radius: 50%;
@@ -462,6 +466,10 @@
         <button class="ghost" type="button" id="statsCsv">导出 CSV</button>
         <button class="ghost" type="button" id="statsClose">关闭</button>
       </div>
+      <div class="stats-error hidden" id="statsError">
+        <span id="statsErrorText"></span>
+        <button class="ghost" type="button" id="statsRetry">重试</button>
+      </div>
       <div class="stats-body" id="statsBody"></div>
     </div>
     <div class="messages" id="messages"></div>
@@ -669,6 +677,9 @@
     hiddenVisible: false,
     lastSyncCheck: 0,
     statsData: null,
+    statsBusy: false,
+    statsRun: 0,
+    statsAbort: null,
     gallery: null,
     kind: 'all',
     sessionKind: '',
@@ -791,7 +802,7 @@
       headers['content-type'] = 'application/json'
       body = JSON.stringify(options.body)
     }
-    return fetch(path, { method: method, headers: headers, body: body }).then(function (res) {
+    return fetch(path, { method: method, headers: headers, body: body, signal: options.signal }).then(function (res) {
       return res.json().catch(function () { return {} }).then(function (body) {
         if (!res.ok) throw new Error(body.error || ('请求失败 ' + res.status))
         return body
@@ -868,6 +879,12 @@
     if (sync.error) parts.push('同步失败：' + String(sync.error).slice(0, 60))
     if (sync.walPending) parts.push('WAL 待合并（QQ 运行中，最新消息稍后补齐）')
     if (status.build && status.build.schemaChanged) parts.push('表结构已变化（建议全量重建）')
+    // A sync that cannot append falls back to a full parse; say why, so a
+    // minute of "解析消息" is not mistaken for a bug.
+    if (status.build && status.build.mode === 'full' && status.build.fullReasonText) {
+      parts.push((status.build.state === 'running' ? '全量重建中' : '上次全量重建') +
+        '（' + String(status.build.fullReasonText).slice(0, 40) + '）')
+    }
     if (status.port) parts.push('端口 ' + status.port)
     $('meta').textContent = parts.join(' · ')
 
@@ -1853,15 +1870,95 @@
     setTimeout(function () { URL.revokeObjectURL(url) }, 1000)
   }
 
+  /**
+   * Statistics scan a whole chat (or the whole index) on the server, which
+   * takes seconds on a large library. Give the click immediate feedback, cap
+   * the wait at 30 s, and on failure keep the previous panel and show a
+   * retryable error bar instead of a toast that disappears.
+   */
+  function clearStatsError() {
+    $('statsError').classList.add('hidden')
+    $('statsErrorText').textContent = ''
+  }
+
+  function setStatsBusy(busy) {
+    state.statsBusy = busy
+    var button = $('statsBtn')
+    button.disabled = busy
+    button.textContent = busy ? '统计中…' : '统计'
+  }
+
+  /** Stop listening to whatever request is in flight (close/retry/next open). */
+  function cancelStats() {
+    state.statsRun += 1
+    if (state.statsAbort) {
+      state.statsAbort.abort()
+      state.statsAbort = null
+    }
+    setStatsBusy(false)
+  }
+
+  function closeStats() {
+    cancelStats()
+    clearStatsError()
+    $('statsPanel').classList.add('hidden')
+  }
+
   function openStats() {
+    if (state.statsBusy) return
     var filters = state.filters || currentFilters()
     var params = new URLSearchParams()
     Object.keys(filters).forEach(function (key) {
       if (filters[key]) params.set(key, filters[key])
     })
-    api('/api/stats?' + params.toString())
-      .then(renderStats)
-      .catch(function (error) { toast('读取统计失败：' + error.message) })
+    cancelStats()
+    var run = state.statsRun
+    clearStatsError()
+    setStatsBusy(true)
+    var controller = new AbortController()
+    state.statsAbort = controller
+    var timedOut = false
+    var timer = setTimeout(function () {
+      timedOut = true
+      controller.abort()
+    }, 30000)
+    // Show the panel on the first open so the click is visibly doing something;
+    // a later failure keeps whatever was rendered before.
+    if ($('statsPanel').classList.contains('hidden')) {
+      $('statsPanel').classList.remove('hidden')
+      $('statsScope').textContent = state.chatId
+        ? '会话：' + (state.chatName || state.chatId)
+        : '全部会话'
+      $('statsBody').innerHTML = '<div class="stats-empty">正在统计…（消息多时要几秒）</div>'
+    }
+    api('/api/stats?' + params.toString(), { signal: controller.signal })
+      .then(function (data) {
+        clearTimeout(timer)
+        if (run !== state.statsRun) return
+        state.statsAbort = null
+        setStatsBusy(false)
+        clearStatsError()
+        renderStats(data)
+      })
+      .catch(function (error) {
+        clearTimeout(timer)
+        if (run !== state.statsRun) return
+        state.statsAbort = null
+        var reason = error && error.message ? error.message : '未知错误'
+        // `fetch` rejects with the English "Failed to fetch" when the local
+        // service is gone; translate that one, keep everything else as-is.
+        if (/Failed to fetch|NetworkError|network error/i.test(reason)) {
+          reason = '连不上本地网页服务（可能已经退出），稍后点重试'
+        }
+        var message = timedOut || (error && error.name === 'AbortError')
+          ? '统计超时（30 秒）：消息太多，先选中一个会话再统计会快很多'
+          : '读取统计失败：' + reason
+        setStatsBusy(false)
+        $('statsPanel').classList.remove('hidden')
+        $('statsErrorText').textContent = message
+        $('statsError').classList.remove('hidden')
+        toast(message)
+      })
   }
 
   // ---------------------------------------------------------------- 下载
@@ -2024,6 +2121,19 @@
         err.className = 't-error'
         err.textContent = task.error
         row.appendChild(err)
+        // The helper folds its traceback into `detail`: keep the one-liner
+        // above and let whoever needs the stack open it.
+        if (task.detail) {
+          var fold = document.createElement('details')
+          fold.className = 't-detail'
+          var summary = document.createElement('summary')
+          summary.textContent = '详情'
+          var pre = document.createElement('pre')
+          pre.textContent = task.detail
+          fold.appendChild(summary)
+          fold.appendChild(pre)
+          row.appendChild(fold)
+        }
       }
       host.appendChild(row)
     })
@@ -2429,7 +2539,9 @@
     var platform = info.platform
     if (!platform) {
       host.innerHTML = '<div class="banner error">' +
-        esc(info.infoError || '无法读取环境信息') + '</div>'
+        esc(info.infoError || '无法读取环境信息') + '</div>' +
+        '<span class="diag-key">插件</span><span class="diag-value">' +
+        esc(info.pluginVersion || '未知版本') + '</span>'
       $('diagHint').textContent = DIAG_HINT
       return
     }
@@ -2441,6 +2553,10 @@
         '<span class="diag-value' + (cls ? ' ' + cls : '') + '">' +
         (value == null || value === '' ? '—' : value) + '</span>')
     }
+    // First row on purpose: "which version is actually installed" is the
+    // question a stale copy or an overwritten node_modules makes impossible to
+    // answer from the UI.
+    add('插件', esc(info.pluginVersion || '未知版本'), info.pluginVersion ? '' : 'bad')
     add('系统', esc(platform.os) + ' · ' + esc(platform.arch) + ' · ' + esc(platform.bits) + '-bit')
     add('Python', esc(platform.python) + (paths.python ? '（' + esc(paths.python) + '）' : ''))
     add('sqlcipher3', platform.sqlcipher ? '可用' : '未安装', platform.sqlcipher ? '' : 'bad')
@@ -2734,6 +2850,7 @@
   $('format').addEventListener('change', syncFormatOptions)
   $('download').addEventListener('click', download)
   $('statsBtn').addEventListener('click', openStats)
+  $('statsRetry').addEventListener('click', openStats)
   $('statsCsv').addEventListener('click', downloadStatsCsv)
   $('galleryBtn').addEventListener('click', openGallery)
   $('galleryMore').addEventListener('click', function () { loadGallery(false) })
@@ -2742,9 +2859,7 @@
   $('mediaDialog').addEventListener('click', function (event) {
     if (event.target === $('mediaDialog')) $('mediaDialog').close()
   })
-  $('statsClose').addEventListener('click', function () {
-    $('statsPanel').classList.add('hidden')
-  })
+  $('statsClose').addEventListener('click', closeStats)
   $('batchExport').addEventListener('click', downloadSelected)
   $('batchClear').addEventListener('click', clearSelection)
   $('taskClose').addEventListener('click', function () {

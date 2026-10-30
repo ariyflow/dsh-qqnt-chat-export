@@ -49,13 +49,14 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
     }
   }
 
-  function finish(task, { payload, error } = {}) {
+  function finish(task, { payload, error, detail } = {}) {
     children.delete(task.id)
     timers.delete(task.id)
     task.finishedAt = Date.now()
     if (error) {
       task.state = 'error'
       task.error = String(error).split('\n').slice(-4).join(' ').slice(0, 400)
+      task.detail = typeof detail === 'string' ? detail.slice(0, 4000) : ''
       return
     }
     task.state = 'done'
@@ -66,6 +67,26 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
       task.media = { files: Number(payload.media.files), missing: Number(payload.media.missing) || 0 }
     }
     if (typeof payload?.path === 'string' && payload.path !== '') task.path = payload.path
+  }
+
+  /**
+   * The last JSON object the helper printed, or `null`.
+   *
+   * `export` prints exactly one line, but a crash wrapper prints its payload
+   * after whatever the failing code already wrote, so walk up from the end
+   * instead of assuming the whole stdout is one document.
+   */
+  function lastJson(text) {
+    const lines = String(text).split('\n').map((line) => line.trim()).filter(Boolean)
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      try {
+        const value = JSON.parse(lines[index])
+        if (value && typeof value === 'object') return value
+      } catch {
+        // Not JSON; keep walking up.
+      }
+    }
+    return null
   }
 
   function start(task, args, password = '') {
@@ -126,18 +147,16 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
       clearTimeout(timer)
       const out = stdout.join('').trim()
       if (code !== 0) {
+        const parsed = lastJson(out)
         let message = stderr.join('').trim().split('\n').slice(-4).join(' ')
-        try {
-          const parsed = JSON.parse(out)
-          if (parsed && typeof parsed.error === 'string') message = parsed.error
-        } catch {
-          // Not a structured error.
-        }
-        finish(task, { error: message || `导出进程退出码 ${code}` })
+        if (parsed && typeof parsed.error === 'string') message = parsed.error
+        const detail = parsed && typeof parsed.detail === 'string' ? parsed.detail : ''
+        finish(task, { error: message || `导出进程退出码 ${code}`, detail })
         return
       }
       try {
-        finish(task, { payload: JSON.parse(out === '' ? '{}' : out) })
+        const payload = lastJson(out)
+        finish(task, { payload: payload || {} })
       } catch (error) {
         finish(task, { error: `无法读取导出结果：${error.message}` })
       }
@@ -164,6 +183,7 @@ export function createExportQueue({ settings, queryCli, concurrency = MAX_CONCUR
       bytes: 0,
       path: out,
       error: '',
+      detail: '',
       createdAt: Date.now(),
       finishedAt: 0,
     }

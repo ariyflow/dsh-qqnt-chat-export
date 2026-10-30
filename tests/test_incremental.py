@@ -386,6 +386,96 @@ class IncrementalBuildTests(unittest.TestCase):
         self.run_cli('build', '--refresh', '--search', 'fts')
         self.assertEqual(self.status()['mode'], 'incremental')
 
+    def test_a_fallback_rebuild_says_why(self):
+        """Every `mode=full` after a sync carries a machine reason + 中文."""
+        self.run_cli('build')
+        self.assertEqual(self.status()['mode'], 'full')
+        self.assertEqual(self.status().get('fullReason'), '')
+
+        # Deleting a row below the watermark breaks the append-only count check.
+        conn = self._connect()
+        conn.execute('DELETE FROM group_msg_table WHERE [40001]=2')
+        conn.commit()
+        conn.close()
+        self.publish()
+        self.run_cli('build', '--refresh')
+        state = self.status()
+        self.assertEqual(state['mode'], 'full')
+        self.assertEqual(state['fullReason'], 'counts')
+        self.assertTrue(state['fullReasonText'])
+
+        # A keyword-strategy switch cannot be done by appending rows.
+        self.run_cli('build', '--refresh', '--search', 'like')
+        state = self.status()
+        self.assertEqual(state['mode'], 'full')
+        self.assertEqual(state['fullReason'], 'search')
+        self.assertTrue(state['fullReasonText'])
+
+        # An index stamped by an older INDEX_VERSION is not appendable either.
+        import sqlite3
+        conn = sqlite3.connect(os.path.join(self.work, 'index.sqlite'))
+        try:
+            conn.execute("UPDATE meta SET v = '4' WHERE k = 'version'")
+            conn.commit()
+        finally:
+            conn.close()
+        self.run_cli('build', '--refresh', '--search', 'like')
+        state = self.status()
+        self.assertEqual(state['mode'], 'full')
+        self.assertEqual(state['fullReason'], 'version')
+        self.assertTrue(state['fullReasonText'])
+
+        # A file that is not a database anymore: snapshot unreadable, rebuild.
+        with open(os.path.join(self.work, 'index.sqlite'), 'wb') as handle:
+            handle.write(b'not a database')
+        self.run_cli('build', '--refresh', '--search', 'like')
+        state = self.status()
+        self.assertEqual(state['mode'], 'full')
+        self.assertEqual(state['fullReason'], 'no-snapshot')
+        self.assertTrue(state['fullReasonText'])
+
+        # The next append works again and clears the reason.
+        self.add('group_msg_table', 9, 1700009000, '新的消息', 'g1')
+        self.publish()
+        self.run_cli('build', '--refresh', '--search', 'like')
+        state = self.status()
+        self.assertEqual(state['mode'], 'incremental')
+        self.assertEqual(state.get('fullReason'), '')
+
+    def test_export_failure_is_one_sentence_plus_a_detail(self):
+        """A crash in `export` must not reach the task panel as a traceback."""
+        self.run_cli('build')
+        exports = os.path.join(self.work, 'exports')
+        os.makedirs(exports, exist_ok=True)
+        # A directory where the file should go: OSError, not BadInput.
+        target = os.path.join(exports, 'blocked.txt')
+        os.makedirs(target, exist_ok=True)
+        proc = subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
+             '--work', self.work, '--root', self.root, '--account', '12345',
+             'export', '--json', json.dumps(
+                 {'format': 'txt', 'out': target, 'label': 'x'})],
+            capture_output=True, text=True, encoding='utf-8', errors='replace')
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout.strip().split('\n')[-1])
+        self.assertIn('导出失败', payload['error'])
+        self.assertIn('Traceback', payload['detail'])
+        self.assertNotIn('Traceback', payload['error'])
+
+    def test_export_bad_input_still_exits_as_a_request_error(self):
+        self.run_cli('build')
+        target = os.path.join(self.work, 'exports', 'bad.csv')
+        proc = subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
+             '--work', self.work, '--root', self.root, '--account', '12345',
+             'export', '--json', json.dumps(
+                 {'format': 'csv', 'redact': 'bogus', 'out': target})],
+            capture_output=True, text=True, encoding='utf-8', errors='replace')
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout.strip().split('\n')[-1])
+        self.assertIn('redact', payload['error'])
+        self.assertNotIn('detail', payload)
+
     def test_keyword_search_falls_back_without_fts5(self):
         """The build must stay usable when SQLCipher has no FTS5/trigram."""
         import qqnt_query as qqq
