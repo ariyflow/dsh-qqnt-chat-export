@@ -132,13 +132,23 @@
 | 步骤 | 1. 若工作目录还在临时盘，点横幅「迁移到持久目录」；否则在设置里把工作目录改到另一个空目录并保存。<br>2. 保持 DSH 运行，等一个同步周期（默认 60 分钟，可临时改成 5 分钟）看状态行的「上次同步」。<br>3. **重启 DSH**，重新打开网页，确认密钥、索引、设置、诊断卡片都还在。 |
 | 预期 | 迁移是「先复制、再切设置、最后删旧」，失败时旧目录完好；状态行显示「上次同步 x 分钟前」，`sync-status.json` 的 `skipped` 说明为什么没动（`unchanged`/`busy`/`no-index`）；重启后密钥与索引不需要重新提取/重建，自动同步继续按间隔跑，启动横幅不再出现。 |
 | 失败先看哪里 | `/api/status` 的 `workDir`/`workDirLegacy`/`sync` → `work\sync-status.json` → `%APPDATA%\dsh-qqnt-chat-export\settings.json` 的 `workDir` → 插件 stderr 里重启后的首行监听地址。 |
-| 实测 | 迁移：上一次验证只在单测里覆盖（`tests/plugin.test.mjs` 的「先复制再清理」），**待复验**。自动同步：✅ 增量 17 条 / 22 秒、`walPending=false`。重启后状态：**待复验**（0.12.0 的 `index.js` / `page.html` 改动需要重启 DSH 才生效）。 |
+| 实测 | 迁移：本机工作目录已在持久目录，`POST /api/workdir/migrate` 按设计返回 400「工作目录已经在持久位置」；「先复制、再切设置、最后删旧」的语义由 `tests/plugin.test.mjs` 覆盖，真机复制路径未跑（下次换机器或把 `workDir` 指到临时盘时补）。<br>自动同步：✅ 重启后 72 秒首跑（14:28:49 启动 → 14:30:01 写 `sync-status.json`），`mode=incremental`、`added=0`、`step=已是最新`——重启**没有**触发重建；`walPending=false`。<br>重启后状态：✅ 1,245,859 条 / 293 会话 / 索引账号 12345 全在；启动横幅显示「Python 3.12.4 · sqlcipher3 已安装 · 密码 ZIP 可用 · 数据库密钥：已配置」，关闭后刷新不再出现；无 console 报错。 |
+
+## 附：安装源与「跑的是哪一版」（仅本机/开发者）
+
+| | |
+|---|---|
+| 步骤 | 1. 看 profile 的 `package.json` 里 `dsh-qqnt-chat-export` 的 specifier。<br>2. `GET /api/diagnostics/bundle` 读 `version`，或看 `node_modules/dsh-qqnt-chat-export/package.json` 的 `version`。 |
+| 预期 | specifier 是 `github:` 时，每次 DSH 启动都会用 pnpm 从 GitHub 重装并**覆盖**手改过的文件；`link:E:/…` 时 `node_modules` 里是指向仓库的 junction，重启即加载仓库代码；`file:E:/…` 是拷贝，改代码后要重新 `pnpm install`。`bundle.version` 必须等于你期望的版本。 |
+| 失败先看哪里 | `%USERPROFILE%\.dsh\profiles\<profile>\package.json` 与 `pnpm-lock.yaml` → `node_modules\dsh-qqnt-chat-export` 的 `LinkType`（Junction / 空）→ `.plugin-manager\logs`（在 DSH 重启时写入，可能被占用读不了）。 |
+| 实测 | 2026-10-30 ❌→✅ 本机原为 `github:ariyflow/dsh-qqnt-chat-export`（锁在 `f49e164` = 0.11.1），14:27:14 重启时全部文件被改写回 0.11.1，`/api/diagnostics/bundle` 变 404；改成 `link:E:/github/dsh-qqnt-chat-export` 后 `node_modules` 是 junction、`version=0.12.0`、诊断卡片与诊断包都在，且再次 `pnpm install` 为 `Already up to date`（不会覆盖）。 |
 
 ## 复跑记录
 
 | 日期 | 版本 | 结果 | 备注 |
 |---|---|---|---|
 | 2026-10-30 | 0.11.2 | 12 项中 11 项已验；第 12 项的「目录迁移」与「重启后状态」待复验 | 详见 `verification-windows.md` |
-| 2026-10-30 | 0.12.0（工作副本） | 第 1 项新增的诊断卡片与诊断包已验（指纹、字段清单、脱敏）；其余沿用上一轮 | Python 126 例全过（系统 Python 跳过 1 个 pyzipper 用例） |
+| 2026-10-30 | 0.12.0（工作副本） | 第 1 项新增的诊断卡片与诊断包已验（指纹、字段清单、脱敏）；第 12 项的重启后状态与自动同步已验；附录记录了安装源问题 | Python 126 例全过（系统 Python 跳过 1 个 pyzipper 用例） |
+| 2026-10-30 | 0.12.0（`link:` 安装） | 第 12 项「目录迁移」按设计拒绝（已持久目录），复制路径仍待真机补 | 重启后 DSH 加载的是仓库 HEAD |
 
 新增或改动的检查项请追加到对应小节，并在上表补一行日期——不要覆盖上一轮的记录。

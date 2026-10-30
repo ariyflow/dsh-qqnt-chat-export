@@ -340,7 +340,8 @@ Windows 真机验收按 [`docs/windows-checklist.md`](docs/windows-checklist.md)
 - 索引构建和网页服务都会独占地写 `workDir`，重复点「从 QQ 同步」会被拒绝（HTTP 409）而不是排队。
 - 导出的临时文件在响应结束后立即删除；进程被杀时可能残留，下次启动会清理一小时前的，也可以在设置页手动清理。
 - 修改 `settings.js` / `web.js` / `page.html` 后需要重启插件（或重启 DSH），网页才会加载新版本；Python 脚本改动会在下一次调用时生效。
-- 用 `file:` 目录安装时，pnpm 会把插件文件硬链接进 profile。如果源码已更新但启动时报 `does not provide an export named ...`，说明安装目录里还是旧副本：在 profile 目录执行 `dsh plugin --profile <name> install` 重新安装即可（必要时先删掉 `node_modules/dsh-qqnt-chat-export`）。
+- 用 `file:` 目录安装时，pnpm 会把插件文件复制进 profile：改完源码要重新装一次。如果源码已更新但启动时报 `does not provide an export named ...`，说明安装目录里还是旧副本：在 profile 目录执行 `dsh plugin --profile <name> install` 重新安装即可（必要时先删掉 `node_modules/dsh-qqnt-chat-export`）。
+- 想「改完代码重启就生效」，把 profile 的依赖写成 `link:E:/path/to/dsh-qqnt-chat-export`：pnpm 会在 `node_modules` 里建一个指向仓库的 junction，重启后加载的就是仓库代码，**不会再被覆盖**。反过来，依赖写成 `github:...` 时每次启动都会从 GitHub 重装并覆盖手改的文件——确认「跑的是哪一版」看 `node_modules/dsh-qqnt-chat-export/package.json` 的 `version`，或 `GET /api/diagnostics/bundle` 里的 `version`。
 
 ## 许可
 
