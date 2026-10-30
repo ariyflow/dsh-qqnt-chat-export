@@ -866,6 +866,7 @@
     if (sync.lastSyncAt) parts.push('上次同步 ' + ago(sync.lastSyncAt))
     if (sync.error) parts.push('同步失败：' + String(sync.error).slice(0, 60))
     if (sync.walPending) parts.push('WAL 待合并（QQ 运行中，最新消息稍后补齐）')
+    if (status.build && status.build.schemaChanged) parts.push('表结构已变化（建议全量重建）')
     if (status.port) parts.push('端口 ' + status.port)
     $('meta').textContent = parts.join(' · ')
 

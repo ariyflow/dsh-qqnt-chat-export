@@ -862,6 +862,18 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
 
         report(step='打开加密数据库')
         src = q.open_encrypted(p['db'], key)
+        # A QQ upgrade that renamed or dropped a column used to surface as
+        # `no such column: 40021` deep in the parse loop. Check the shape first
+        # and fail with one readable sentence instead.
+        report(step='检查表结构')
+        schema = q.schema_report({'nt_msg': src})
+        blocked = q.missing_columns(schema)
+        if blocked:
+            raise BadInput(q.schema_error_message(blocked))
+        previous_schema = str((read_meta(p['index']) or {}).get('schema') or '')
+        # Recorded for the page: an incremental append over a changed schema
+        # cannot fix rows the old shape already wrote, so suggest a rebuild.
+        schema_changed = bool(previous_schema) and previous_schema != schema['fingerprint']
         source_counts = {}
         for kind, table in ((GROUP_KIND, 'group_msg_table'), (PRIVATE_KIND, 'c2c_msg_table')):
             # Rows without a chat id are skipped by the indexer; counting them
@@ -884,6 +896,8 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
                     ensure_chat_rows(conn, group_names, friends)
                     conn.execute("INSERT OR REPLACE INTO meta VALUES ('builtAt', ?)",
                                  (str(int(time.time())),))
+                    conn.execute("INSERT OR REPLACE INTO meta VALUES ('schema', ?)",
+                                 (schema['fingerprint'],))
                     conn.execute(
                         "INSERT OR REPLACE INTO meta VALUES ('chats', ?)",
                         (str(conn.execute('SELECT count(*) FROM chats').fetchone()[0]),))
@@ -900,6 +914,7 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
                 'startedAt': started, 'finishedAt': int(time.time()), 'error': '',
                 'index': p['index'], 'account': uin, 'step': '已是最新', 'added': 0,
                 'walPending': WAL_STATE['pending'], 'walError': WAL_STATE['error'],
+                'schemaChanged': schema_changed,
             })
             result = {'ok': True, 'mode': 'incremental', 'added': 0,
                       'total': plan['new_total'],
@@ -1068,6 +1083,7 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
                 'chats': str(idx.execute('SELECT count(*) FROM chats').fetchone()[0]),
                 'fts': '1' if fts else '0',
                 'search': search,
+                'schema': schema['fingerprint'],
                 'version': INDEX_VERSION}
         idx.executemany('INSERT OR REPLACE INTO meta VALUES (?,?)', list(meta.items()))
         idx.commit()
@@ -1089,6 +1105,8 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
             'index': p['index'], 'account': uin, 'step': '完成',
             'added': plan['total_new'] if plan else processed,
             'walPending': WAL_STATE['pending'], 'walError': WAL_STATE['error'],
+            # A full rebuild just adopted the new shape, so only appends warn.
+            'schemaChanged': schema_changed and bool(plan),
         })
         result = {'ok': True, 'mode': mode, 'processed': processed,
                   'added': plan['total_new'] if plan else processed,

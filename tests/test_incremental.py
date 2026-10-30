@@ -207,6 +207,86 @@ class IncrementalBuildTests(unittest.TestCase):
         self.assertNotIn('第二条消息', {row['text'] for row in rows})
         self.assertEqual(self.count('第二条'), 0)
 
+    def info_json(self):
+        """`qqnt_export.py info --json`, the payload behind the diagnostics API."""
+        proc = subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_export.py'),
+             '--work', self.work, '--root', self.root, 'info', '--json'],
+            capture_output=True, text=True, encoding='utf-8', errors='replace')
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return json.loads(proc.stdout)
+
+    def test_build_records_the_schema_fingerprint_in_meta(self):
+        self.run_cli('build')
+        fingerprint = self.meta().get('schema')
+        self.assertEqual(len(fingerprint), 12)
+        report = self.info_json()
+        self.assertEqual(report['schemaReason'], '')
+        self.assertEqual(report['schema']['missing'], [])
+        # `info` reads the same decrypted copy, so the two must agree; that is
+        # the cross-check a support reply relies on.
+        self.assertEqual(report['schema']['fingerprint'], fingerprint)
+        # Neither database exists in this fixture: reported, never "missing".
+        self.assertEqual(report['schema']['unchecked'], ['group_info', 'profile_info'])
+
+    def test_missing_column_is_one_readable_sentence(self):
+        # A QQ upgrade that drops a column used to fail inside the parse loop
+        # with `no such column: 40021`.
+        conn = self._connect()
+        conn.execute('ALTER TABLE c2c_msg_table DROP COLUMN [40021]')
+        conn.commit()
+        conn.close()
+        self.publish()
+
+        proc = subprocess.run(
+            [sys.executable, os.path.join(ROOT, 'scripts', 'qqnt_query.py'),
+             '--root', self.root, '--account', '12345', '--work', self.work, 'build'],
+            capture_output=True, text=True, encoding='utf-8', errors='replace')
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertIn('[40021]', payload['error'])
+        self.assertIn('表结构', payload['error'])
+        self.assertIn('诊断包', payload['error'])
+        self.assertNotIn('Traceback', proc.stdout + proc.stderr)
+        # The page reads build-status.json, so it carries the same sentence.
+        self.assertEqual(self.status()['state'], 'error')
+        self.assertIn('[40021]', self.status()['error'])
+
+    def test_schema_change_is_flagged_on_incremental_appends_only(self):
+        self.run_cli('build')
+        first = self.meta()['schema']
+        self.add('group_msg_table', 5, 1700003000, '升级之后的新消息', 'g1')
+        conn = self._connect()
+        conn.execute('ALTER TABLE group_msg_table ADD COLUMN [40099] TEXT')
+        conn.commit()
+        conn.close()
+        self.publish()
+
+        self.run_cli('build', '--refresh')
+        self.assertEqual(self.status()['mode'], 'incremental')
+        self.assertEqual(self.status()['added'], 1)
+        self.assertTrue(self.status()['schemaChanged'])
+        second = self.meta()['schema']
+        self.assertNotEqual(second, first)
+        self.assertEqual(self.info_json()['schema']['fingerprint'], second)
+        # One-shot: the new fingerprint was adopted, so the next tick is quiet.
+        self.run_cli('build', '--refresh')
+        self.assertEqual(self.status()['added'], 0)
+        self.assertFalse(self.status()['schemaChanged'])
+
+    def test_a_full_rebuild_clears_the_schema_warning(self):
+        self.run_cli('build')
+        conn = self._connect()
+        conn.execute('ALTER TABLE group_msg_table ADD COLUMN [40098] TEXT')
+        conn.commit()
+        conn.close()
+        self.publish()
+        # Switching the keyword strategy forces a full parse over the new shape.
+        self.run_cli('build', '--refresh', '--search', 'like')
+        self.assertEqual(self.status()['mode'], 'full')
+        self.assertFalse(self.status()['schemaChanged'])
+        self.assertEqual(self.info_json()['schema']['missing'], [])
+
     def test_per_chat_watermarks_accept_a_new_chat_with_a_low_id(self):
         self.run_cli('build')
         # g9 pushes the global maximum to 9.

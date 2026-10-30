@@ -26,6 +26,7 @@ import ctypes
 import csv
 import datetime
 import errno
+import hashlib
 import json
 import os
 import platform
@@ -1061,6 +1062,157 @@ def render(blob):
 # --------------------------------------------------------------------------
 # 元数据
 # --------------------------------------------------------------------------
+# 建索引与查询真正用到的列。QQ 升级时可能改名、删列或整表换掉，缺一列就会让
+# SQL 抛 `no such column`；这张表让缺列变成一句可读的中文，而不是调用栈。
+EXPECTED_SCHEMA = {
+    'nt_msg': {
+        'group_msg_table': ('40001', '40050', '40020', '40033', '40013',
+                            '40011', '40012', '40800', '40021'),
+        'c2c_msg_table': ('40001', '40050', '40020', '40033', '40013',
+                          '40011', '40012', '40800', '40021'),
+    },
+    'group_info': {
+        'group_list': ('60001', '60007'),
+        'group_member3': ('60001', '1000', '20002', '64029'),
+    },
+    'profile_info': {
+        # [20009] 是备注名，缺了只影响显示，load_names() 已经会退回昵称。
+        'profile_info_v6': ('1000', '1002', '20002'),
+    },
+}
+
+SCHEMA_DBS = ('nt_msg', 'group_info', 'profile_info')
+
+
+def table_columns(conn, table):
+    """Existing column names of `table` in creation order, or None if absent."""
+    try:
+        rows = conn.execute('PRAGMA table_info(%s)' % table).fetchall()
+    except Exception:          # noqa: BLE001 - sqlcipher3 raises its own errors
+        return None
+    names = [str(row[1]) for row in rows]
+    return names or None
+
+
+def schema_report(sources):
+    """Expected columns per table, what is missing, and a stable fingerprint.
+
+    `sources` maps a database key (`nt_msg`, `group_info`, `profile_info`) to an
+    open connection, or to `None` when that database is unavailable (no key, no
+    decrypted copy, or QQ never created it). Unavailable databases are listed in
+    `unchecked` instead of `missing`, so a report can never block a build over a
+    database that was simply not copied.
+
+    The fingerprint hashes the message-table columns of `nt_msg` only. That is
+    the database a QQ upgrade actually breaks, it is always copied before a build
+    checks it, and both `build` and `info` see the same copy, so their
+    fingerprints are directly comparable. Nickname/group tables are reported in
+    `tables`/`missing` but stay out of the hash: a missing `profile_info.db`
+    must not look like a QQ upgrade.
+    """
+    tables, missing, columns = {}, [], {}
+    for db_key in SCHEMA_DBS:
+        conn = sources.get(db_key)
+        for table, required in EXPECTED_SCHEMA[db_key].items():
+            if conn is None:
+                tables[table] = {'db': db_key, 'present': 0, 'checked': False,
+                                 'missing': [], 'tableMissing': False}
+                continue
+            present = table_columns(conn, table)
+            if present is None:
+                tables[table] = {'db': db_key, 'present': 0, 'checked': True,
+                                 'missing': list(required), 'tableMissing': True}
+                missing.extend({'db': db_key, 'table': table, 'column': column}
+                               for column in required)
+                continue
+            gone = [column for column in required if column not in present]
+            tables[table] = {'db': db_key, 'present': len(present), 'checked': True,
+                             'missing': gone, 'tableMissing': False}
+            missing.extend({'db': db_key, 'table': table, 'column': column}
+                           for column in gone)
+            if db_key == 'nt_msg':
+                columns[table] = sorted(present)
+    fingerprint = ''
+    if columns:
+        fingerprint = hashlib.sha1(json.dumps(columns, sort_keys=True,
+                                              ensure_ascii=False)
+                                   .encode('utf-8')).hexdigest()[:12]
+    unchecked = [db for db in SCHEMA_DBS
+                 if any(not info['checked'] for info in tables.values()
+                        if info['db'] == db)]
+    return {
+        'fingerprint': fingerprint,
+        'tables': tables,
+        'missing': missing,
+        'unchecked': unchecked,
+    }
+
+
+def missing_columns(report, db_key='nt_msg'):
+    """The missing entries of one database (the build only reads nt_msg)."""
+    if not report:
+        return []
+    return [item for item in report.get('missing', []) if item['db'] == db_key]
+
+
+def schema_error_message(missing):
+    """One readable sentence for missing columns; never a traceback."""
+    if not missing:
+        return ''
+    listed = '、'.join('[%s]' % item['column'] for item in missing[:4])
+    more = '' if len(missing) <= 4 else ' 等 %d 列' % len(missing)
+    tables = sorted({item['table'] for item in missing})
+    return ('当前 QQ 版本的消息表结构与预期不符（%s 缺少列 %s%s）。'
+            '请升级插件，或把诊断包一起反馈：设置 → 诊断 → 下载诊断包。'
+            % ('、'.join(tables), listed, more))
+
+
+def work_key(work, explicit=''):
+    """The cached key, or `''`; unlike load_key() this never exits."""
+    if explicit:
+        return str(explicit).strip()
+    try:
+        with open(os.path.join(work, 'key.txt'), encoding='ascii', errors='replace') as f:
+            return f.read().strip()
+    except OSError:
+        return ''
+
+
+def schema_from_work(work, key=''):
+    """(report, reason) for the decrypted copy already in `work`.
+
+    Reads the existing copy instead of decrypting the ~1 GB source again: a
+    diagnostics request has to stay in the tens of milliseconds. `reason` is one
+    short Chinese sentence when the copy or the key is not there yet.
+    """
+    copy = os.path.join(work, 'nt_msg.db')
+    if not key:
+        return None, '还没有数据库密钥（先在网页点「提取密钥」）'
+    if not os.path.exists(copy):
+        return None, '还没有解密副本（先建立索引，或从 QQ 同步一次）'
+    sources = dict.fromkeys(SCHEMA_DBS)
+    opened = []
+    try:
+        for db_key, name in (('nt_msg', 'nt_msg.db'), ('group_info', 'group_info.db'),
+                             ('profile_info', 'profile_info.db')):
+            path = os.path.join(work, name)
+            if os.path.exists(path):
+                conn = open_encrypted(path, key)
+                opened.append(conn)
+                sources[db_key] = conn
+        return schema_report(sources), ''
+    except SystemExit:
+        return None, '缺少依赖 sqlcipher3，读不了表结构'
+    except Exception as exc:   # noqa: BLE001 - 任何解密失败都要降级成一句话
+        return None, '解密副本打不开（%s）；重新建立索引后再试' % exc
+    finally:
+        for conn in opened:
+            try:
+                conn.close()
+            except Exception:      # noqa: BLE001 - close must not mask the reason
+                pass
+
+
 def group_names(dbdir, key, work):
     """group_info.db -> {群号: 群名}"""
     src = os.path.join(dbdir, 'group_info.db')
@@ -1136,12 +1288,13 @@ def _module_present(name):
 def info_report(args):
     """Machine-readable form of `info`, also served through `/api/diagnostics`.
 
-    Deliberately cheap and content-free: no database is opened and the key is
-    never read, so the report still works on a machine where QQ never ran and
-    cannot leak message text. `schema` needs the decrypted copy, so it stays
-    `null` until `schema_report()` can reach one (see `cmd_build`/`cmd_info`).
-    Absolute paths are included for the local UI; the diagnostics bundle
-    redacts them before anything leaves the machine.
+    Deliberately cheap and content-free: it never reads a message, and the only
+    database it opens is the decrypted copy already in the work directory (page
+    one, for the schema) — the ~1 GB source is never decrypted here. So the
+    report still works on a machine where QQ never ran, and it cannot leak chat
+    text. `schema` stays `null` (with `schemaReason`) until both a key and a copy
+    exist. Absolute paths are for the local UI; the diagnostics bundle redacts
+    them before anything leaves the machine.
     """
     roots = [args.root] if args.root else default_roots()
     existing = [root for root in roots if os.path.isdir(root)]
@@ -1158,6 +1311,7 @@ def info_report(args):
     # layout nests `<root>/<uin>/nt_qq/nt_db`, Linux `<root>/nt_qq_<hash>/nt_db`.
     selected = next((acc for acc in accounts if acc['dbdir'] == dbdir), None)
     root_of_db = selected['root'] if selected else ''
+    schema, schema_reason = schema_from_work(work, work_key(work, args.key))
     return {
         'platform': {
             'os': sys.platform,
@@ -1183,7 +1337,8 @@ def info_report(args):
             'index': os.path.join(work, 'index.sqlite'),
             'venv': os.environ.get('VIRTUAL_ENV') or '',
         },
-        'schema': None,
+        'schema': schema,
+        'schemaReason': schema_reason,
     }
 
 
@@ -1209,6 +1364,10 @@ def cmd_info(args):
                   % (acc['label'], human(acc['size']), acc['dir']))
     keyfile = os.path.join(args.work, 'key.txt')
     print('密钥缓存    : %s' % (keyfile if os.path.exists(keyfile) else '无'))
+    schema, _reason = schema_from_work(args.work, work_key(args.work, args.key))
+    blocked = missing_columns(schema)
+    if blocked:
+        print('警告        : %s' % schema_error_message(blocked))
 
 
 def cmd_groups(args):
