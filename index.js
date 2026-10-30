@@ -793,9 +793,44 @@ async function probePython(current) {
   }
 }
 
+/**
+ * `info --json` from the bundled helper: platform, paths and the source schema.
+ *
+ * A diagnostics report has to answer even when the environment is broken, so a
+ * failed probe becomes `infoError` and the three sections stay `null` instead of
+ * rejecting the request. Absolute paths are shown in the local UI and redacted
+ * by the bundle download.
+ */
+async function infoReport(settings) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 8000)
+  try {
+    mkdirSync(settings.workDir, { recursive: true, mode: 0o700 })
+    const probe = await run(settings.python,
+      ['-X', 'utf8', CLI, ...globalArgs(settings), 'info', '--json'],
+      { signal: controller.signal, cwd: settings.workDir })
+    const text = probe.stdout.trim()
+    if (text === '') throw new Error(probe.output || `info 没有输出（exit code ${probe.code}）`)
+    const payload = JSON.parse(text.split('\n').pop())
+    return {
+      platform: payload.platform ?? null,
+      paths: payload.paths ?? null,
+      schema: payload.schema ?? null,
+      infoError: '',
+    }
+  } catch (error) {
+    const infoError = error?.name === 'AbortError'
+      ? '读取环境信息超时（8 秒），可能是 Python 解释器无响应'
+      : `无法读取环境信息：${error instanceof Error ? error.message : String(error)}`
+    return { platform: null, paths: null, schema: null, infoError }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /** Linux ptrace status so the startup checklist can show the exact blocker. */
 function ptraceInfo() {
-  if (process.platform !== 'linux') return { platform: process.platform, ptraceScope: null, restricted: false }
+  if (process.platform !== 'linux') return { ptraceScope: null, restricted: false }
   let scope = null
   try {
     const parsed = Number.parseInt(readFileSync('/proc/sys/kernel/yama/ptrace_scope', 'utf8').trim(), 10)
@@ -807,7 +842,6 @@ function ptraceInfo() {
   // A missing yama file means the kernel does not restrict ptrace at all;
   // treating `null` as "restricted" refuses extraction on those systems.
   return {
-    platform: 'linux',
     ptraceScope: scope,
     restricted: !root && scope !== null && scope !== 0,
   }
@@ -902,6 +936,7 @@ export function apply(ctx, config) {
     },
     getDiagnostics: async () => {
       const storage = storageSnapshot(settings.workDir)
+      const info = await infoReport(settings)
       return {
         ...(await probePython(settings)),
         ...ptraceInfo(),
@@ -909,6 +944,10 @@ export function apply(ctx, config) {
         venv: { dir: defaultVenvDir(), python: venvPython() },
         key: storage.key,
         index: storage.index,
+        platform: info.platform,
+        paths: info.paths,
+        schema: info.schema,
+        infoError: info.infoError,
       }
     },
     getSetup: () => setupSnapshot(),

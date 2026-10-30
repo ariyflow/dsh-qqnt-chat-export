@@ -28,6 +28,7 @@ import datetime
 import errno
 import json
 import os
+import platform
 import re
 import sqlite3
 import sys
@@ -1123,7 +1124,73 @@ def load_key(args, dbdir, uin):
     die('还没有密钥。先运行:\n    python qqnt_export.py key')
 
 
+def _module_present(name):
+    """Whether an optional dependency imports; a missing one must not exit here."""
+    try:
+        __import__(name)
+    except Exception:          # noqa: BLE001 - any import failure means "unusable"
+        return False
+    return True
+
+
+def info_report(args):
+    """Machine-readable form of `info`, also served through `/api/diagnostics`.
+
+    Deliberately cheap and content-free: no database is opened and the key is
+    never read, so the report still works on a machine where QQ never ran and
+    cannot leak message text. `schema` needs the decrypted copy, so it stays
+    `null` until `schema_report()` can reach one (see `cmd_build`/`cmd_info`).
+    Absolute paths are included for the local UI; the diagnostics bundle
+    redacts them before anything leaves the machine.
+    """
+    roots = [args.root] if args.root else default_roots()
+    existing = [root for root in roots if os.path.isdir(root)]
+    accounts = []
+    for root in (existing or roots[:1]):
+        accounts.extend(_iter_accounts(root))
+    uin, dbdir, datadir, _size = find_account(args.root, args.account, strict=False)
+    try:
+        pids = find_pids()
+    except Exception:          # noqa: BLE001 - diagnostics must still answer
+        pids = []
+    work = os.path.normpath(os.path.abspath(args.work))
+    # The account dict already records which root it came from: the Windows
+    # layout nests `<root>/<uin>/nt_qq/nt_db`, Linux `<root>/nt_qq_<hash>/nt_db`.
+    selected = next((acc for acc in accounts if acc['dbdir'] == dbdir), None)
+    root_of_db = selected['root'] if selected else ''
+    return {
+        'platform': {
+            'os': sys.platform,
+            'arch': platform.machine(),
+            'bits': ctypes.sizeof(ctypes.c_void_p) * 8,
+            'python': '%d.%d.%d' % sys.version_info[:3],
+            'sqlcipher': _module_present('sqlcipher3'),
+            'pyzipper': _module_present('pyzipper'),
+            'qqProcesses': len(pids),
+            'memoryAccess': memory_access_state(),
+            'dataRootFound': bool(existing),
+            'account': str(uin or ''),
+            'accounts': len(accounts),
+            'workDirExists': os.path.isdir(work),
+        },
+        'paths': {
+            'tencentRoot': root_of_db or (existing[0] if existing else
+                                          (roots[0] if roots else '')),
+            'dbDir': os.path.normpath(dbdir) if dbdir else '',
+            'dataDir': os.path.normpath(datadir) if datadir else '',
+            'workDir': work,
+            'python': sys.executable or '',
+            'index': os.path.join(work, 'index.sqlite'),
+            'venv': os.environ.get('VIRTUAL_ENV') or '',
+        },
+        'schema': None,
+    }
+
+
 def cmd_info(args):
+    if getattr(args, 'json', False):
+        print(json.dumps(info_report(args), ensure_ascii=False))
+        return
     print('%s 进程 : %s' % (qq_process_label(),
                             (', '.join(map(str, find_pids())) or '未运行')))
     print('内存读取    : %s' % memory_access_state())
@@ -1379,6 +1446,8 @@ def main(argv=None):
     sub = p.add_subparsers(dest='cmd', required=True)
 
     s = sub.add_parser('info', help='查看环境、账号和数据目录')
+    s.add_argument('--json', action='store_true',
+                   help='输出单行 JSON（供网页诊断使用）')
     s.set_defaults(func=cmd_info)
 
     s = sub.add_parser('key', help='从运行中的 QQ 进程提取数据库密钥')

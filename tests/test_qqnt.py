@@ -16,6 +16,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'scripts'))
@@ -418,6 +419,57 @@ class ExportTests(unittest.TestCase):
                 conn.execute('SELECT count(*) FROM messages WHERE msg_id=7').fetchone()[0], 2)
         finally:
             conn.close()
+
+
+class InfoReportTests(unittest.TestCase):
+    """`info --json` is the contract behind /api/diagnostics; keep it stable."""
+
+    def run_info(self, work, root):
+        buf = io.StringIO()
+        with mock.patch.object(q, 'find_pids', return_value=[11, 22]):
+            with contextlib.redirect_stdout(buf):
+                q.main(['--work', work, '--root', root, 'info', '--json'])
+        text = buf.getvalue()
+        self.assertEqual(text.count('\n'), 1)            # exactly one line
+        return json.loads(text)
+
+    def test_report_without_any_account(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, 'Tencent Files')
+            os.makedirs(root)
+            report = self.run_info(os.path.join(tmp, 'work') + os.sep, root)
+            platform_info = report['platform']
+            self.assertEqual(platform_info['os'], sys.platform)
+            self.assertIn(platform_info['bits'], (32, 64))
+            self.assertIsInstance(platform_info['sqlcipher'], bool)
+            self.assertIsInstance(platform_info['pyzipper'], bool)
+            self.assertEqual(platform_info['qqProcesses'], 2)
+            self.assertTrue(platform_info['dataRootFound'])
+            self.assertEqual(platform_info['accounts'], 0)
+            self.assertEqual(platform_info['account'], '')
+            paths = report['paths']
+            self.assertEqual(paths['workDir'], os.path.normpath(os.path.join(tmp, 'work')))
+            self.assertEqual(paths['index'],
+                             os.path.join(os.path.normpath(os.path.join(tmp, 'work')),
+                                          'index.sqlite'))
+            self.assertEqual(paths['tencentRoot'], root)
+            self.assertEqual(paths['dbDir'], '')
+            self.assertIsNone(report['schema'])          # no key, no schema
+
+    def test_report_selects_the_largest_account(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, 'Tencent Files')
+            for uin, size in (('12345', 2048), ('67890', 4096)):
+                dbdir = os.path.join(root, uin, 'nt_qq', 'nt_db')
+                os.makedirs(dbdir)
+                with open(os.path.join(dbdir, 'nt_msg.db'), 'wb') as f:
+                    f.write(b'x' * size)
+            report = self.run_info(os.path.join(tmp, 'work'), root)
+            self.assertEqual(report['platform']['accounts'], 2)
+            self.assertEqual(report['platform']['account'], '67890')
+            self.assertEqual(report['paths']['tencentRoot'], root)
+            self.assertEqual(report['paths']['dbDir'],
+                             os.path.join(root, '67890', 'nt_qq', 'nt_db'))
 
 
 if __name__ == '__main__':

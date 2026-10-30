@@ -306,6 +306,13 @@
   }
   .runtime-line.bad { border-color: var(--danger); color: var(--danger); }
   .runtime-line .copy { margin-left: 8px; font-size: 12px; padding: 2px 8px; }
+  .diag-grid { display: grid; grid-template-columns: 130px 1fr; gap: 6px 14px; margin-top: 10px; font-size: 13px; }
+  .diag-grid .diag-key { color: var(--muted); }
+  .diag-grid .diag-value { min-width: 0; overflow-wrap: anywhere; font-family: ui-monospace, monospace; font-size: 12px; }
+  .diag-grid .diag-value.bad { color: var(--danger); }
+  .diag-grid .diag-value.warn { color: var(--danger); }
+  .diag-grid .diag-sec { grid-column: 1 / -1; margin-top: 6px; color: var(--muted); font-size: 12px; font-weight: 600; }
+  @media (max-width: 700px) { .diag-grid { grid-template-columns: 1fr; gap: 2px 0; } .diag-grid .diag-key { margin-top: 6px; } }
   .setup-inline-actions { display: inline-flex; gap: 6px; flex-wrap: wrap; margin-left: 6px; }
   .setup-inline-actions button { font-size: 12px; padding: 2px 8px; }
   dialog.confirm-dialog {
@@ -559,6 +566,18 @@
       <div class="setup-box hidden" id="keyBox">
         <div class="setup-status" id="keyStatusLine"></div>
         <pre class="setup-log" id="keyLog"></pre>
+      </div>
+    </section>
+
+    <section class="card" id="diagnosticsCard">
+      <div class="card-head">
+        <h3>诊断</h3>
+        <button class="ghost" type="button" id="refreshDiagnostics">刷新</button>
+      </div>
+      <p class="hint">运行环境、路径和 QQ 表结构；只有环境信息，不含聊天内容、昵称与密钥（下载的诊断包会进一步脱敏路径与账号）。</p>
+      <div class="diag-grid" id="diagGrid"><span class="diag-value">正在读取诊断信息…</span></div>
+      <div class="settings-actions">
+        <span class="hint" id="diagHint"></span>
       </div>
     </section>
 
@@ -2360,6 +2379,7 @@
     line.textContent = '正在检测 Python、sqlcipher3 与 pyzipper…'
     api('/api/diagnostics').then(function (info) {
       state.diagnostics = info
+      renderDiagnostics(info)
       renderKeyStatus(info)
       if (!$('startup').classList.contains('hidden')) {
         renderStartupEnv(info)
@@ -2392,6 +2412,59 @@
   function uvLabel(info) {
     var version = String(info.uv.version || '').replace(/^uv\s+/, '')
     return 'uv ' + (version || '可用')
+  }
+
+  /**
+   * The diagnostics card: platform, paths and the source schema reported by
+   * `info --json`. Everything here comes from the local helper, so paths may be
+   * absolute; the downloadable bundle redacts them.
+   */
+  function renderDiagnostics(info) {
+    var host = $('diagGrid')
+    var platform = info.platform
+    if (!platform) {
+      host.innerHTML = '<div class="banner error">' +
+        esc(info.infoError || '无法读取环境信息') + '</div>'
+      $('diagHint').textContent = ''
+      return
+    }
+    var paths = info.paths || {}
+    var schema = info.schema
+    var rows = []
+    var add = function (key, value, cls) {
+      rows.push('<span class="diag-key">' + esc(key) + '</span>' +
+        '<span class="diag-value' + (cls ? ' ' + cls : '') + '">' +
+        (value == null || value === '' ? '—' : value) + '</span>')
+    }
+    add('系统', esc(platform.os) + ' · ' + esc(platform.arch) + ' · ' + esc(platform.bits) + '-bit')
+    add('Python', esc(platform.python) + (paths.python ? '（' + esc(paths.python) + '）' : ''))
+    add('sqlcipher3', platform.sqlcipher ? '可用' : '未安装', platform.sqlcipher ? '' : 'bad')
+    add('pyzipper',
+      platform.pyzipper ? '可用（密码 ZIP）' : '未安装（密码 ZIP 不可用）',
+      platform.pyzipper ? '' : 'bad')
+    add('QQ 进程', platform.qqProcesses > 0
+      ? (platform.qqProcesses + ' 个 · ' + esc(platform.memoryAccess))
+      : '未运行 · ' + esc(platform.memoryAccess))
+    add('数据目录', paths.tencentRoot ? esc(paths.tencentRoot) : '未找到', paths.tencentRoot ? '' : 'bad')
+    add('账号', platform.account
+      ? esc(platform.account) + '（共 ' + esc(platform.accounts) + ' 个）'
+      : '未识别（共 ' + esc(platform.accounts) + ' 个）')
+    add('工作目录', esc(paths.workDir))
+    add('索引', esc(paths.index))
+    if (paths.venv) add('虚拟环境', esc(paths.venv))
+    if (schema) {
+      var missing = schema.missing || []
+      add('表结构', esc(schema.fingerprint))
+      add('期望列', missing.length
+        ? ('缺少 ' + missing.length + ' 列：' +
+           esc(missing.map(function (item) { return item.table + '.' + item.column }).join('、')))
+        : ('全部存在（' + esc(Object.keys(schema.tables || {}).length) + ' 张表）'),
+        missing.length ? 'bad' : '')
+    } else {
+      add('表结构', '未读取（需要先提取密钥）')
+    }
+    host.innerHTML = rows.join('')
+    $('diagHint').textContent = ''
   }
 
   function updateIndexPath() {
@@ -2691,6 +2764,7 @@
     syncKeyJob()
   })
   $('refreshStorage').addEventListener('click', loadStorage)
+  $('refreshDiagnostics').addEventListener('click', loadDiagnostics)
   $('cleanupBtn').addEventListener('click', cleanupSelected)
   $('setWorkDir').addEventListener('input', updateIndexPath)
   $('storageList').addEventListener('change', updateCleanupButton)
