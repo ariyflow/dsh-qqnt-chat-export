@@ -71,8 +71,6 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
 - 切换回「对话」再切回来时，外壳只挂载当前面板，iframe 会重新加载一次——页面自己的状态（关键词、勾选）
   不跨切换保留，这一点比原生重写的面板差，作为已知限制列在下面。
 
-![DSH 侧边栏面板](docs/screenshot-sidebar.png)
-
 ## 要求
 
 - Windows 10/11 或 Linux（x86_64 / arm64）
@@ -345,8 +343,6 @@ docs/screenshot.png        界面截图（虚构数据）
 docs/screenshot-stats.png  统计面板截图（虚构数据）
 docs/windows-checklist.md  Windows 12 项验收清单（步骤 / 预期 / 失败先看哪里 / 实测）
 docs/verification-windows.md  某一轮 Windows 全量验证的实测记录
-docs/plan-0.12.md     0.12 计划书与验收结果
-docs/roadmap-0.12.md  后续路线（0.13 归档、0.14 规模与检索、0.15 维护）
 ```
 
 ## 开发与测试

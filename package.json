@@ -51,7 +51,6 @@
     "scripts/*.py",
     "docs/screenshot.png",
     "docs/screenshot-stats.png",
-    "docs/screenshot-sidebar.png",
     "docs/wal-notes.md",
     "docs/media-notes.md",
     "docs/windows-checklist.md",

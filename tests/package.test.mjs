@@ -51,7 +51,7 @@ test('every screenshot the README embeds is inside the tarball', () => {
   const packed = packedFiles()
   const readme = readFileSync(path.join(ROOT, 'README.md'), 'utf8')
   const images = [...readme.matchAll(/!\[[^\]]*\]\((docs\/[^)\s]+)\)/g)].map((match) => match[1])
-  assert.ok(images.length >= 3, 'the README should keep its screenshots')
+  assert.ok(images.length >= 2, 'the README should keep its screenshots')
   for (const image of images) {
     assert.ok(packed.has(image), `README embeds ${image} but files[] does not ship it`)
   }
