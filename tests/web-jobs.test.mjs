@@ -6,12 +6,15 @@
  * cancelled job stays cancelled through the route.
  */
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { makeExportRunner } from '../runners.js'
 import { startWebServer } from '../web.js'
+
+const PYTHON = process.env.PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3')
 
 const actionHeader = { 'content-type': 'application/json', 'x-qqnt-action': '1' }
 
@@ -145,6 +148,110 @@ test('a running job can be cancelled through the route', async () => {
     const detail = await response.json()
     assert.equal(detail.state, 'canceled')
     assert.equal(detail.canCancel, false)
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a finished export job downloads through its id prefix', async () => {
+  const dir = await tempDir()
+  const helper = path.join(dir, 'export-helper.py')
+  await writeFile(helper, [
+    'import json, os, sys',
+    "args = json.loads(sys.argv[-1])",
+    "os.makedirs(os.path.dirname(args['out']), exist_ok=True)",
+    "open(args['out'], 'w', encoding='utf-8').write('hello')",
+    "print(json.dumps({'rows': 3, 'bytes': 5}))",
+  ].join('\n'))
+  const settings = { python: PYTHON, workDir: dir }
+  const { server, base } = await startServer(settings, {
+    handlers: {},
+    runners: { export: makeExportRunner({ settings, queryCli: helper }) },
+  })
+  try {
+    const response = await fetch(`${base}/api/jobs`, {
+      method: 'POST',
+      headers: actionHeader,
+      body: JSON.stringify({
+        kind: 'export',
+        summary: '导出聊天记录',
+        params: { format: 'txt', label: '示例课程群', args: { keyword: '开会' } },
+      }),
+    })
+    assert.equal(response.status, 202)
+    const created = await response.json()
+
+    let detail = null
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await tick()
+      const polled = await fetch(`${base}/api/jobs/${created.id}`)
+      detail = await polled.json()
+      if (detail.state === 'done') break
+    }
+    assert.equal(detail.state, 'done')
+    assert.equal(detail.result.rows, 3)
+
+    const download = await fetch(`${base}/api/jobs/${created.id}/download`)
+    assert.equal(download.status, 200)
+    assert.match(download.headers.get('content-disposition'), /attachment/)
+    assert.equal(await download.text(), 'hello')
+
+    // A job that never produced a file says so instead of 500-ing.
+    const missing = await fetch(`${base}/api/jobs/nosuch/download`)
+    assert.equal(missing.status, 404)
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('POST /api/export validates and queues an export job', async () => {
+  const dir = await tempDir()
+  const seen = []
+  const { server, base } = await startServer(
+    { python: process.execPath, workDir: dir },
+    {
+      handlers: {},
+      runners: {
+        export: async (job) => {
+          seen.push(job.params)
+          return { rows: 1, bytes: 2, format: 'txt' }
+        },
+      },
+    },
+  )
+  try {
+    let response = await fetch(`${base}/api/export`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ format: 'txt' }),
+    })
+    assert.equal(response.status, 403)
+
+    response = await fetch(`${base}/api/export`, {
+      method: 'POST',
+      headers: actionHeader,
+      body: JSON.stringify({ format: 'exe' }),
+    })
+    assert.equal(response.status, 400)
+
+    response = await fetch(`${base}/api/export`, {
+      method: 'POST',
+      headers: actionHeader,
+      body: JSON.stringify({ format: 'csv', keyword: '开会', media: true }),
+    })
+    assert.equal(response.status, 202)
+    const job = await response.json()
+    assert.equal(job.kind, 'export')
+    assert.equal(job.state, 'queued')
+    // Params never appear on the public row.
+    assert.equal(job.params, undefined)
+    await tick()
+    assert.equal(seen.length, 1)
+    assert.deepEqual(seen[0].args, { keyword: '开会', media: true })
+    assert.equal(seen[0].format, 'zip')
+    assert.equal(seen[0].innerFormat, 'csv')
   } finally {
     await server.close()
     await rm(dir, { recursive: true, force: true })

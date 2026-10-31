@@ -11,6 +11,8 @@
  * and the runner resolves instead of rejecting so the job ends as `canceled`.
  */
 import { spawn } from 'node:child_process'
+import { unlinkSync } from 'node:fs'
+import path from 'node:path'
 
 /**
  * Argument prefix shared by every sidecar call.
@@ -169,5 +171,108 @@ export function makeAsrRunner({ settings, queryCli }) {
   return async function asrRunner(job, ctx) {
     const args = ['asr', '--json', JSON.stringify({ limit: job.params.limit ?? null })]
     return runNdjson({ settings, queryCli, args, ctx })
+  }
+}
+
+/** A chat name is also a file name; strip what Windows/Linux cannot store. */
+function safeStem(text) {
+  return String(text || '')
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
+    .replace(/^\.+/, '')
+    .trim()
+    .slice(0, 80) || 'export'
+}
+
+/** The last JSON object a helper printed (exports print one, crash wrappers more). */
+function lastJson(text) {
+  const lines = String(text).split('\n').map((line) => line.trim()).filter(Boolean)
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    try {
+      const value = JSON.parse(lines[index])
+      if (value && typeof value === 'object') return value
+    } catch {
+      // Keep walking up.
+    }
+  }
+  return null
+}
+
+/**
+ * The export job: one file (or one ZIP) written under `workDir/exports`.
+ *
+ * The file name is `<job id>--<label>.<format>`: the id prefix is how the
+ * download route finds the file after a restart without the job row having to
+ * carry a chat name on disk, and the label keeps the name readable for the
+ * person who opens it in a file manager.
+ *
+ * Returns only counts — never the path or the label — so `jobs.json` stays free
+ * of chat content. The password travels in the environment, never in argv.
+ *
+ * @param {{settings: object, queryCli: string}} options
+ * @returns {(job: object, ctx: object) => Promise<object>}
+ */
+export function makeExportRunner({ settings, queryCli }) {
+  return function exportRunner(job, ctx) {
+    return new Promise((resolve, reject) => {
+      const params = job.params || {}
+      const format = String(params.format || 'txt')
+      const label = String(params.label || '聊天记录')
+      const out = path.join(settings.workDir, 'exports', `${job.id}--${safeStem(label)}.${format}`)
+      const args = { ...params.args, format: params.innerFormat || format, out, label }
+      delete args.password
+      const argv = helperArgv(settings, queryCli, ['export', '--json', JSON.stringify(args)])
+      const env = { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' }
+      if (params.password) env.QQNT_EXPORT_PASSWORD = String(params.password)
+      const child = spawn(settings.python, argv, {
+        windowsHide: true, env, stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      const stdout = []
+      const stderr = []
+      let settled = false
+      const watch = setInterval(() => {
+        if (ctx.isCanceled()) child.kill()
+      }, 300)
+      const finish = (fn, value) => {
+        if (settled) return
+        settled = true
+        clearInterval(watch)
+        fn(value)
+      }
+      child.stdout.setEncoding('utf8')
+      child.stderr.setEncoding('utf8')
+      child.stdout.on('data', (chunk) => stdout.push(chunk))
+      child.stderr.on('data', (chunk) => stderr.push(chunk))
+      child.on('error', (error) => finish(reject, error.code === 'ENOENT'
+        ? new Error(`无法运行 Python 解释器「${settings.python}」：找不到可执行文件`)
+        : error))
+      child.on('close', (code) => {
+        if (ctx.isCanceled()) {
+          // A cancelled export must not leave half a file behind.
+          try { unlinkSync(out) } catch { /* the sweep will get it */ }
+          finish(resolve, { canceled: true })
+          return
+        }
+        const text = stdout.join('').trim()
+        const parsed = lastJson(text)
+        if (code !== 0) {
+          const message = (parsed && typeof parsed.error === 'string' && parsed.error)
+            || stderr.join('').trim().split('\n').slice(-3).join(' ')
+            || `导出进程退出码 ${code}`
+          const error = new Error(message)
+          error.detail = parsed && typeof parsed.detail === 'string' ? parsed.detail : ''
+          finish(reject, error)
+          return
+        }
+        finish(resolve, {
+          rows: Number(parsed?.rows) || 0,
+          bytes: Number(parsed?.bytes) || 0,
+          encrypted: parsed?.encrypted === true,
+          media: parsed?.media && Number.isFinite(Number(parsed.media.files))
+            ? { files: Number(parsed.media.files), missing: Number(parsed.media.missing) || 0 }
+            : null,
+          format,
+        })
+      })
+    })
   }
 }

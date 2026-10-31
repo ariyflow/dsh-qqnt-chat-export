@@ -8,6 +8,7 @@
 import { ApiError, createApi } from './api.js'
 import { createStore } from './state.js'
 import { mountAsk } from './views/ask.js'
+import { mountExport } from './views/export.js'
 import { mountChats } from './views/chats.js'
 import { mountModels } from './views/models.js'
 import { mountJobs } from './views/jobs.js'
@@ -63,7 +64,7 @@ store.subscribe(render)
 
 let unmount = null
 let unmountJobs = null
-const NAV = { chats: 'viewChats', ask: 'viewAsk', models: 'viewModels' }
+const NAV = { chats: 'viewChats', export: 'viewExport', ask: 'viewAsk', models: 'viewModels' }
 // Deep links: `/app/?view=models` and `/app/?view=ask` open that view directly.
 const requested = new URLSearchParams(location.search).get('view')
 let view = Object.prototype.hasOwnProperty.call(NAV, requested || '') ? requested : 'chats'
@@ -103,8 +104,17 @@ function mount() {
     })
   } else if (view === 'models') {
     unmount = mountModels(main, { api })
+  } else if (view === 'export') {
+    unmount = mountExport(main, { api, initialChat })
+    initialChat = null
   } else {
-    unmount = mountChats(main, { api, initial: initialChat })
+    unmount = mountChats(main, {
+      api,
+      initial: initialChat,
+      onExport: (session) => setView('export', {
+        chat: { kind: session.kind, id: session.id, name: session.name || session.id },
+      }),
+    })
     initialChat = null
   }
   // The task panel floats over the reader so it survives view switches.

@@ -398,3 +398,46 @@ a:hover { text-decoration: underline; }
 .component-meta { grid-column: 1; color: var(--muted); font-size: 11px; }
 .component-actions { grid-row: 1 / span 2; grid-column: 3; }
 .component-actions .ghost { margin: 0; padding: 4px 10px; font-size: 12px; }
+
+/* Export form: two rows of options, then the task table. */
+.export-view { padding: 16px 20px; max-width: 1000px; }
+.export-form { display: flex; flex-direction: column; gap: 10px; margin: 8px 0 16px; }
+
+.export-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+.export-row input[type="search"],
+.export-row input[type="date"],
+.export-row input[type="password"],
+.export-row select {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.export-keyword { flex: 1; min-width: 180px; }
+.export-chat { min-width: 200px; }
+.check { display: flex; gap: 4px; align-items: center; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.export-columns { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.export-derived { margin: 0; font-size: 12px; }
+
+.export-tasks { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.export-task {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 4px 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.export-task-name { font-weight: 500; }
+.export-task-meta { grid-column: 1; color: var(--muted); font-size: 11px; }
+.export-task-actions { grid-row: 1 / span 2; grid-column: 3; display: flex; gap: 6px; align-items: center; }
+.export-task-actions .ghost { margin: 0; padding: 3px 8px; font-size: 12px; text-decoration: none; }
+.export-task.is-failed .export-task-meta { color: #d92d20; }
+.export-task.is-done .export-task-meta { color: var(--muted); }

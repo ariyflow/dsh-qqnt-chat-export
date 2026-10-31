@@ -88,12 +88,14 @@ function messageRow(row) {
  * Mount the view.
  *
  * @param {HTMLElement} root - empty container owned by the caller
- * @param {{api: {get: Function}, initial?: {kind: string, id: string, around?: number}}} options
+ * @param {{api: {get: Function}, initial?: {kind: string, id: string, around?: number},
+ *   onExport?: (session: object) => void}} options
  *   `initial` opens one chat directly; `around` centers the reader on a message
- *   (used when a citation card is clicked from the answer view).
+ *   (used when a citation card is clicked from the answer view); `onExport`
+ *   hands the selected chat to the export view.
  * @returns {() => void} cleanup
  */
-export function mountChats(root, { api, initial = null }) {
+export function mountChats(root, { api, initial = null, onExport = null }) {
   const shell = document.createElement('div')
   shell.className = 'app-shell'
 
@@ -135,7 +137,16 @@ export function mountChats(root, { api, initial = null }) {
   ocrLabel.className = 'chat-search-label'
   ocrLabel.append(ocrToggle, document.createElement('span'))
   ocrLabel.children[1].textContent = '含图片文字'
-  searchBar.append(searchInput, ocrLabel)
+  const exportButton = document.createElement('button')
+  exportButton.type = 'button'
+  exportButton.className = 'ghost'
+  exportButton.textContent = '导出本会话'
+  exportButton.title = '用这个会话打开导出页'
+  exportButton.addEventListener('click', () => {
+    if (state.selected && typeof onExport === 'function') onExport(state.selected)
+    else title.textContent = '先选择一个会话，再导出'
+  })
+  searchBar.append(searchInput, ocrLabel, exportButton)
   const more = document.createElement('button')
   more.type = 'button'
   more.className = 'ghost'

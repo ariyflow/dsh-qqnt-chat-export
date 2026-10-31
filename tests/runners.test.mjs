@@ -6,12 +6,12 @@
  * cancel path are exercised without onnxruntime.
  */
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { helperArgv, makeChunksRunner, makeComponentsRunner, makeOcrRunner, runNdjson } from '../runners.js'
+import { helperArgv, makeChunksRunner, makeComponentsRunner, makeExportRunner, makeOcrRunner, runNdjson } from '../runners.js'
 
 const PYTHON = process.env.PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3')
 
@@ -176,6 +176,62 @@ test('the components runner forwards the groups and keeps pip output as log line
     const result = await run({ params: { groups: ['ocr'] } }, ctx)
     assert.deepEqual(logs, ['Collecting rapidocr-onnxruntime'])
     assert.deepEqual(result.groups, ['ocr'])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the export runner writes an id-prefixed file and returns counts only', async () => {
+  const dir = await tempDir()
+  try {
+    const helper = await fakeHelper(dir, [
+      'import json, os, sys',
+      "args = json.loads(sys.argv[-1])",
+      "os.makedirs(os.path.dirname(args['out']), exist_ok=True)",
+      "open(args['out'], 'w', encoding='utf-8').write('hello')",
+      "print(json.dumps({'rows': 7, 'bytes': 5, 'encrypted': True, 'media': {'files': 2, 'missing': 1}}))",
+    ].join('\n'))
+    const { ctx } = ctxRecorder()
+    const settings = { python: PYTHON, workDir: dir }
+    const run = makeExportRunner({ settings, queryCli: helper })
+    const result = await run({
+      id: 'abc123',
+      params: { format: 'txt', label: '示例课程群', args: { keyword: 'x' } },
+    }, ctx)
+    assert.equal(result.rows, 7)
+    assert.equal(result.bytes, 5)
+    assert.equal(result.encrypted, true)
+    assert.equal(result.media.files, 2)
+    // No path in the returned shape: `jobs.json` must stay free of chat names.
+    assert.equal(result.path, undefined)
+    const name = (await readdir(path.join(dir, 'exports')))[0]
+    assert.equal(name, 'abc123--示例课程群.txt')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a cancelled export kills the helper and removes its partial file', async () => {
+  const dir = await tempDir()
+  try {
+    const helper = await fakeHelper(dir, [
+      'import json, os, sys, time',
+      "args = json.loads(sys.argv[-1])",
+      "os.makedirs(os.path.dirname(args['out']), exist_ok=True)",
+      "open(args['out'], 'w', encoding='utf-8').write('partial')",
+      'time.sleep(30)',
+    ].join('\n'))
+    const { ctx } = ctxRecorder()
+    let canceled = false
+    ctx.isCanceled = () => canceled
+    const run = makeExportRunner({ settings: { python: PYTHON, workDir: dir }, queryCli: helper })
+    const pending = run({ id: 'cancelme', params: { format: 'txt', label: 'x', args: {} } }, ctx)
+    await new Promise((resolve) => setTimeout(resolve, 700))
+    canceled = true
+    const result = await pending
+    assert.deepEqual(result, { canceled: true })
+    const leftovers = await readdir(path.join(dir, 'exports'))
+    assert.deepEqual(leftovers, [], 'a cancelled export must not leave a partial file')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

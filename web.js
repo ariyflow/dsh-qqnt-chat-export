@@ -1239,6 +1239,60 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
           res, error.status === 400 ? 404 : (error.status ?? 500), { error: error.message }))
       return
     }
+
+/**
+ * Normalise one export request into the arguments the helper and the job
+ * runner need. Shared by the legacy queue route and `POST /api/export`, so the
+ * two cannot drift on validation while both exist.
+ *
+ * Throws errors carrying `status: 400` for the HTTP layer.
+ */
+function exportRequest(body) {
+  const innerFormat = String(body?.format || 'txt').toLowerCase()
+  const allowed = new Set(['txt', 'csv', 'json', 'md', 'html', 'sqlite'])
+  if (!allowed.has(innerFormat)) {
+    throw Object.assign(new Error(`unsupported format: ${innerFormat}`), { status: 400 })
+  }
+  const chats = chatsFromBody(body?.chats)
+  const media = body?.media === true
+  const embed = body?.embed === true
+  const split = body?.split === 'day' ? 'day' : ''
+  const password = typeof body?.password === 'string' ? body.password : ''
+  if (password && (password.length < 4 || password.length > 128)) {
+    throw Object.assign(new Error('ZIP 密码长度需要 4~128 个字符'), { status: 400 })
+  }
+  if (password && embed) {
+    throw Object.assign(new Error('内嵌图片不能和密码 ZIP 同时使用'), { status: 400 })
+  }
+  if (body?.split && body.split !== 'day') {
+    throw Object.assign(new Error('split 只支持 day'), { status: 400 })
+  }
+  if (embed && innerFormat !== 'html') {
+    throw Object.assign(new Error('内嵌图片只支持 html 格式'), { status: 400 })
+  }
+  if (embed && chats.length > 1) {
+    throw Object.assign(new Error('内嵌图片只支持单个会话'), { status: 400 })
+  }
+  if (embed && split) {
+    throw Object.assign(new Error('内嵌图片不能和按天分文件同时使用'), { status: 400 })
+  }
+  const container = embed ? innerFormat
+    : (chats.length > 0 || media || split || password ? 'zip' : innerFormat)
+  const label = String(body?.label || (chats.length > 1
+    ? `批量导出 ${chats.length} 个会话` : 'QQ聊天记录')).slice(0, 120)
+  const columns = Array.isArray(body?.columns)
+    ? body.columns.map((name) => String(name).trim()).filter(Boolean)
+    : null
+  const args = filtersFromBody(body)
+  if (chats.length > 0) args.chats = chats
+  if (media || embed) args.media = true
+  if (embed) args.embed = true
+  if (split) args.split = 'day'
+  if (columns && columns.length > 0) args.columns = columns
+  if (body?.frontMatter === true) args.frontMatter = true
+  return { args, label, format: container, innerFormat, password }
+}
+
     if (req.method === 'POST' && pathname === '/api/export/queue') {
       if (!isTrustedMutation(req)) {
         sendJson(res, 403, { error: 'cross-origin requests are refused' })
@@ -1246,50 +1300,12 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       }
       readJsonBody(req)
         .then((body) => {
-          const innerFormat = String(body.format || 'txt').toLowerCase()
-          const allowed = new Set(['txt', 'csv', 'json', 'md', 'html', 'sqlite'])
-          if (!allowed.has(innerFormat)) {
-            throw Object.assign(new Error(`unsupported format: ${innerFormat}`), { status: 400 })
-          }
-          const chats = chatsFromBody(body.chats)
-          const media = body.media === true
-          const embed = body.embed === true
-          const split = body.split === 'day' ? 'day' : ''
-          const password = typeof body.password === 'string' ? body.password : ''
-          if (password && (password.length < 4 || password.length > 128)) {
-            throw Object.assign(new Error('ZIP 密码长度需要 4~128 个字符'), { status: 400 })
-          }
-          if (password && embed) {
-            throw Object.assign(new Error('内嵌图片不能和密码 ZIP 同时使用'), { status: 400 })
-          }
-          if (body.split && body.split !== 'day') {
-            throw Object.assign(new Error('split 只支持 day'), { status: 400 })
-          }
-          if (embed && innerFormat !== 'html') {
-            throw Object.assign(new Error('内嵌图片只支持 html 格式'), { status: 400 })
-          }
-          if (embed && chats.length > 1) {
-            throw Object.assign(new Error('内嵌图片只支持单个会话'), { status: 400 })
-          }
-          if (embed && split) {
-            throw Object.assign(new Error('内嵌图片不能和按天分文件同时使用'), { status: 400 })
-          }
-          const container = embed ? innerFormat
-            : (chats.length > 0 || media || split || password ? 'zip' : innerFormat)
-          const label = String(body.label || (chats.length > 1
-            ? `批量导出 ${chats.length} 个会话` : 'QQ聊天记录')).slice(0, 120)
-          const columns = Array.isArray(body.columns)
-            ? body.columns.map((name) => String(name).trim()).filter(Boolean)
-            : null
-          const args = filtersFromBody(body)
-          if (chats.length > 0) args.chats = chats
-          if (media || embed) args.media = true
-          if (embed) args.embed = true
-          if (split) args.split = 'day'
-          if (columns && columns.length > 0) args.columns = columns
-          if (body.frontMatter === true) args.frontMatter = true
-          const queued = queue.enqueue(args, {
-            label, format: container, innerFormat, password,
+          const request = exportRequest(body)
+          const queued = queue.enqueue(request.args, {
+            label: request.label,
+            format: request.format,
+            innerFormat: request.innerFormat,
+            password: request.password,
           })
           if (!queued) {
             throw Object.assign(new Error(
@@ -1387,6 +1403,25 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
         else res.end()
       })
       stream.pipe(res)
+      return
+    }
+    // Exports as generic jobs: the file is written under exports/<job id>--<label>
+    // and downloaded later through `/api/jobs/<id>/download`.
+    if (req.method === 'POST' && pathname === '/api/export') {
+      if (!isTrustedMutation(req)) {
+        sendJson(res, 403, { error: 'cross-origin requests are refused' })
+        return
+      }
+      readJsonBody(req)
+        .then((body) => {
+          const request = exportRequest(body)
+          const job = jobs.submit('export', {
+            summary: `导出 ${request.format.toUpperCase()}`,
+            params: request,
+          })
+          sendJson(res, 202, job)
+        })
+        .catch((error) => sendJson(res, error.status ?? 500, { error: error.message }))
       return
     }
     if (req.method === 'GET' && pathname === '/api/export') {
@@ -1627,6 +1662,44 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
     }
     if (pathname.startsWith('/api/jobs/')) {
       const rest = pathname.slice('/api/jobs/'.length)
+      const downloadMatch = /^([0-9a-z-]+)\/download$/.exec(rest)
+      if (req.method === 'GET' && downloadMatch) {
+        const job = jobs.get(downloadMatch[1])
+        if (!job) {
+          sendJson(res, 404, { error: '没有这个任务' })
+          return
+        }
+        if (job.state !== 'done') {
+          sendJson(res, 409, { error: '任务还没有完成' })
+          return
+        }
+        // The file name starts with the job id; the rest is the readable label.
+        const dir = path.join(settings.workDir, 'exports')
+        let name = ''
+        try {
+          name = readdirSync(dir).find((entry) => entry.startsWith(`${job.id}--`)) || ''
+        } catch {
+          name = ''
+        }
+        const target = name === '' ? '' : path.join(dir, name)
+        if (target === '' || !existsSync(target)) {
+          sendJson(res, 404, { error: '导出文件已清理（导出目录只保留一小时）' })
+          return
+        }
+        const label = name.slice(job.id.length + 2)
+        res.writeHead(200, {
+          'content-type': label.endsWith('.html')
+            ? 'text/html; charset=utf-8' : 'application/octet-stream',
+          'content-disposition':
+            `attachment; filename="qqnt-export-${Date.now()}${path.extname(label)}"; ` +
+            `filename*=UTF-8''${encodeURIComponent(label)}`,
+          'cache-control': 'no-store',
+        })
+        const stream = createReadStream(target)
+        stream.on('error', () => res.destroy())
+        stream.pipe(res)
+        return
+      }
       const slash = rest.indexOf('/')
       const id = slash === -1 ? rest : rest.slice(0, slash)
       const action = slash === -1 ? '' : rest.slice(slash + 1)
