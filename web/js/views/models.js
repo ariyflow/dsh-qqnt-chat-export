@@ -1,12 +1,19 @@
 /**
- * Model files: what each one is for, how big it is, and how to delete it.
+ * Model files and the Python packages the content features need.
  *
- * Deleting is the important half of this view. Models are 15–230 MB and live
- * outside the export directory, so "清理存储" would otherwise never reclaim
- * them; a user who tries OCR once and moves on needs a one-click way out.
+ * Two kinds of optional weight live behind this view:
  *
- * Deletion is two-step (删除 → 确认删除) because the files are not in the npm
- * package and re-downloading 230 MB on a metered connection is a real cost.
+ * - **models** (15–230 MB) in `workDir/models/`, downloaded on demand and
+ *   deletable per feature — a user who tries OCR once and moves on should get
+ *   the disk back without hunting for a filesystem path;
+ * - **components**: `pip` packages installed into the plugin's own virtualenv
+ *   (`rapidocr-onnxruntime`, `av` + `sherpa-onnx`, `numpy`/`onnxruntime`/
+ *   `tokenizers`). They are shown here because "why does OCR do nothing" is
+ *   answered by the same screen as "which model is missing".
+ *
+ * Deletion is two-step (删除 → 确认删除) because re-downloading is a real cost;
+ * installing is one step plus a confirmation in the job panel, because pip is
+ * itself the expensive, visible part.
  */
 
 /** `12345678` → `11.8 MB`; the view never shows raw bytes. */
@@ -37,6 +44,25 @@ export function modelList(payload) {
     .sort((a, b) => String(a.feature).localeCompare(String(b.feature)))
 }
 
+/** The `components` block of `/api/components`; empty when unavailable. */
+export function componentList(payload) {
+  const items = payload && payload.components && typeof payload.components === 'object'
+    ? payload.components
+    : {}
+  return Object.values(items)
+    .filter((item) => item && item.id)
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)))
+}
+
+/** 已安装 / 缺少 <module> / 需要虚拟环境. */
+export function componentState(item) {
+  if (!item) return '未知'
+  if (item.venv === false) return '需要虚拟环境'
+  if (item.installed) return '已安装'
+  const missing = Array.isArray(item.missing) ? item.missing : []
+  return missing.length > 0 ? `缺少 ${missing.join('、')}` : '未安装'
+}
+
 /**
  * @param {HTMLElement} root
  * @param {{api: object}} options
@@ -54,16 +80,66 @@ export function mountModels(root, { api }) {
   hint.className = 'hint'
   hint.textContent = '模型文件放在工作目录的 models/ 下，可按功能单独下载和删除；删除不影响索引与聊天记录。'
 
+  const componentsTitle = document.createElement('h3')
+  componentsTitle.className = 'models-subtitle'
+  componentsTitle.textContent = '运行组件'
+  const componentsHint = document.createElement('p')
+  componentsHint.className = 'hint'
+  componentsHint.textContent = '组件是装进插件虚拟环境的 Python 包，装一次即可；模型文件在下面单独下载。'
+  const components = document.createElement('ul')
+  components.className = 'components-list'
+
+  const modelsTitle = document.createElement('h3')
+  modelsTitle.className = 'models-subtitle'
+  modelsTitle.textContent = '模型文件'
   const list = document.createElement('ul')
   list.className = 'models-list'
 
-  section.append(title, hint, list)
+  section.append(title, hint, componentsTitle, componentsHint, components,
+    modelsTitle, list)
   root.append(section)
 
   let closed = false
   /** id → timestamp of the first click on 删除. */
   const pending = new Map()
   let timer = null
+
+  function componentRow(item) {
+    const row = document.createElement('li')
+    row.className = 'component-row'
+
+    const name = document.createElement('span')
+    name.className = 'component-name'
+    name.textContent = item.label
+
+    const info = document.createElement('span')
+    info.className = 'component-meta'
+    info.textContent = `${componentState(item)} · 约 ${formatBytes(item.expectedBytes)}`
+
+    const actions = document.createElement('span')
+    actions.className = 'component-actions'
+    if (item.installed) {
+      const done = document.createElement('span')
+      done.className = 'meta'
+      done.textContent = '已安装'
+      actions.append(done)
+    } else {
+      const install = document.createElement('button')
+      install.type = 'button'
+      install.className = 'ghost'
+      install.textContent = '安装'
+      install.title = `pip install ${(item.packages || []).join(' ')}`
+      if (item.venv === false) {
+        install.setAttribute('disabled', 'true')
+        install.title = '当前解释器不是虚拟环境；先在设置里创建插件虚拟环境'
+      }
+      install.addEventListener('click', () => installGroup(item, install))
+      actions.append(install)
+    }
+
+    row.append(name, info, actions)
+    return row
+  }
 
   function rowFor(item) {
     const row = document.createElement('li')
@@ -101,6 +177,19 @@ export function mountModels(root, { api }) {
     return row
   }
 
+  async function installGroup(item, button) {
+    button.setAttribute('disabled', 'true')
+    button.textContent = '已加入任务'
+    try {
+      await api.post('/api/components/install', { groups: [item.id] })
+      hint.textContent = `正在后台安装 ${item.label} 组件，进度见右下角任务面板；装完刷新即可。`
+    } catch (error) {
+      button.removeAttribute('disabled')
+      button.textContent = '安装'
+      hint.textContent = `安装失败：${error.message}`
+    }
+  }
+
   async function remove(item, button) {
     const seen = pending.get(item.id)
     if (!seen || Date.now() - seen > 4000) {
@@ -135,11 +224,21 @@ export function mountModels(root, { api }) {
   async function refresh() {
     if (closed) return
     try {
-      const payload = await api.get('/api/models')
+      const [modelPayload, componentPayload] = await Promise.all([
+        api.get('/api/models'),
+        // An older helper without the components endpoint must not blank the
+        // model list; the components block simply stays empty.
+        api.get('/api/components').catch(() => null),
+      ])
       if (closed) return
-      const items = modelList(payload)
+      components.replaceChildren()
+      for (const item of componentList(componentPayload)) components.append(componentRow(item))
       list.replaceChildren()
-      for (const item of items) list.append(rowFor(item))
+      for (const item of modelList(modelPayload)) list.append(rowFor(item))
+      if (componentList(componentPayload).length === 0) {
+        componentsTitle.hidden = true
+        componentsHint.hidden = true
+      }
     } catch (error) {
       hint.textContent = `读取模型状态失败：${error.message}`
     }

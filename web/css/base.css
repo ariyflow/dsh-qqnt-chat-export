@@ -370,3 +370,31 @@ a:hover { text-decoration: underline; }
 .ask-note { color: var(--muted); font-size: 12px; }
 
 .app-nav .ghost.is-active { border-color: var(--accent); color: var(--accent); }
+
+/* Components: same table shape as models, above them. */
+.models-subtitle { margin: 18px 0 0; font-size: 13px; font-weight: 600; }
+
+.components-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.component-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 4px 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.component-name { font-weight: 500; }
+.component-meta { grid-column: 1; color: var(--muted); font-size: 11px; }
+.component-actions { grid-row: 1 / span 2; grid-column: 3; }
+.component-actions .ghost { margin: 0; padding: 4px 10px; font-size: 12px; }

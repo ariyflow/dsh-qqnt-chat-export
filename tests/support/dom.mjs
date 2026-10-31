@@ -60,3 +60,22 @@ export function installDocument() {
     globalThis.document = previous
   }
 }
+
+/** First element in the subtree whose class list contains `name`. */
+export function findByClass(node, name) {
+  const classes = String(node.className || '').split(/\s+/)
+  if (classes.includes(name)) return node
+  for (const child of node.children || []) {
+    const found = findByClass(child, name)
+    if (found) return found
+  }
+  return null
+}
+
+/** Every element in the subtree whose class list contains `name`. */
+export function findAllByClass(node, name, out = []) {
+  const classes = String(node.className || '').split(/\s+/)
+  if (classes.includes(name)) out.push(node)
+  for (const child of node.children || []) findAllByClass(child, name, out)
+  return out
+}

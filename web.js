@@ -51,6 +51,8 @@ const DEFAULT_HOST = '127.0.0.1'
 const REQUEST_TIMEOUT_MS = 180_000
 /** One export may combine at most this many chats. */
 const MAX_BATCH_CHATS = 200
+/** Installed-on-demand Python packages, mirroring `qqnt_components.COMPONENTS`. */
+const COMPONENT_GROUPS = ['ocr', 'asr', 'embed']
 const EXPORT_DIR_MAX_AGE_MS = 60 * 60 * 1000
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
 
@@ -261,7 +263,8 @@ function runJson(settings, command, args = {}, { signal } = {}) {
     argv.push(command)
     if (command === 'messages' || command === 'export' || command === 'stats'
       || command === 'media' || command === 'media-list' || command === 'models'
-      || command === 'ask' || command === 'recall' || command === 'chunks') {
+      || command === 'ask' || command === 'recall' || command === 'chunks'
+      || command === 'components') {
       argv.push('--json', JSON.stringify(args))
     }
     if (command === 'select') {
@@ -1584,6 +1587,36 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
         return
       }
       sendJson(res, 404, { error: 'not found' })
+      return
+    }
+    if (req.method === 'GET' && pathname === '/api/components') {
+      runJson(settings, 'components', { action: 'status' })
+        .then((payload) => sendJson(res, 200, payload))
+        .catch((error) => sendJson(res, 500, { error: error.message }))
+      return
+    }
+    if (req.method === 'POST' && pathname === '/api/components/install') {
+      if (!isTrustedMutation(req)) {
+        sendJson(res, 403, { error: 'cross-origin requests are refused' })
+        return
+      }
+      readJsonBody(req)
+        .then((body) => {
+          const groups = Array.isArray(body?.groups) ? body.groups.map(String) : []
+          const unknown = groups.filter((name) => !COMPONENT_GROUPS.includes(name))
+          if (groups.length === 0 || unknown.length > 0) {
+            sendJson(res, 400, {
+              error: unknown.length > 0
+                ? `未知的组件：${unknown.join('、')}`
+                : '没有指定要安装的组件',
+            })
+            return
+          }
+          sendJson(res, 202, jobs.submit('components', {
+            summary: `安装组件：${groups.join('、')}`, params: { groups },
+          }))
+        })
+        .catch(() => sendJson(res, 400, { error: '请求体无法解析' }))
       return
     }
     if (req.method === 'GET' && pathname === '/api/models') {

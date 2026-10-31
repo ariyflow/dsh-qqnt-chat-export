@@ -29,7 +29,7 @@
 - **模型文件按需下载**：OCR 模型约 15 MB（安装包自带权重，下载项用于固定版本）、嵌入模型约 24 MB、语音模型约 78 MB。全部在 `workDir/models/<id>/` 下，`lock.json` 记录每个文件的 sha256；
 - **可删除**：「模型与组件」视图列出每个模型的大小、状态与用途，删除要点两次（4 秒内确认），删掉后下次要用时重新下载即可，不影响已识别的文本。
 
-识别与转写需要额外的 Python 组件（`rapidocr-onnxruntime`、`av` + `sherpa-onnx`），向量检索还需要 `numpy` / `onnxruntime` / `tokenizers`。它们和 `sqlcipher3` 一样只装在插件自己的虚拟环境里，安装命令见 [setup.md](setup.md#可选组件识别--转写--向量)。
+识别与转写需要额外的 Python 组件（`rapidocr-onnxruntime`、`av` + `sherpa-onnx`），向量检索还需要 `numpy` / `onnxruntime` / `tokenizers`。在「模型与组件」页的「运行组件」里点一次「安装」就会用插件虚拟环境的 pip 装好，输出进右下角任务日志；当前解释器不是虚拟环境时按钮是灰的，避免装进系统 Python。不想用界面时也可以照 [setup.md](setup.md#可选组件识别--转写--向量) 里的命令手动装。
 
 ## 问答与引用
 

@@ -11,7 +11,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { helperArgv, makeChunksRunner, makeOcrRunner, runNdjson } from '../runners.js'
+import { helperArgv, makeChunksRunner, makeComponentsRunner, makeOcrRunner, runNdjson } from '../runners.js'
 
 const PYTHON = process.env.PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3')
 
@@ -156,6 +156,26 @@ test('the chunks runner forwards force and returns the final stats', async () =>
     const result = await run({ params: { force: true } }, ctx)
     assert.deepEqual(calls, [[0.5, '已处理 1/2 个会话']])
     assert.deepEqual(result, { ok: true, chunks: 3, vectors: 3 })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the components runner forwards the groups and keeps pip output as log lines', async () => {
+  const dir = await tempDir()
+  try {
+    const helper = await fakeHelper(dir, [
+      'import json',
+      "print('Collecting rapidocr-onnxruntime', flush=True)",
+      "print(json.dumps({'ok': True, 'groups': ['ocr'], 'packages': ['rapidocr-onnxruntime']}), flush=True)",
+    ].join('\n'))
+    const { ctx, logs } = ctxRecorder()
+    const run = makeComponentsRunner({
+      settings: { python: PYTHON, workDir: dir }, queryCli: helper,
+    })
+    const result = await run({ params: { groups: ['ocr'] } }, ctx)
+    assert.deepEqual(logs, ['Collecting rapidocr-onnxruntime'])
+    assert.deepEqual(result.groups, ['ocr'])
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

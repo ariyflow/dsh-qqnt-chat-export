@@ -143,6 +143,22 @@ export function makeChunksRunner({ settings, queryCli }) {
 }
 
 /**
+ * Install the optional Python packages for a feature group (`ocr`, `asr`,
+ * `embed`). pip's output is plain text, which `runNdjson` treats as log lines;
+ * the last JSON object is the result.
+ *
+ * @param {{settings: object, queryCli: string}} options
+ * @returns {(job: object, ctx: object) => Promise<object>}
+ */
+export function makeComponentsRunner({ settings, queryCli }) {
+  return async function componentsRunner(job, ctx) {
+    const groups = Array.isArray(job.params.groups) ? job.params.groups : []
+    const args = ['components', '--json', JSON.stringify({ action: 'install', groups })]
+    return runNdjson({ settings, queryCli, args, ctx })
+  }
+}
+
+/**
  * The ASR job: transcribe pending voice messages into `derived.sqlite`.
  * Same protocol as OCR, only the subcommand differs.
  *

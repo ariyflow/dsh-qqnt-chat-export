@@ -41,6 +41,7 @@ import urllib.parse
 import zipfile
 
 import qqnt_asr as asr
+import qqnt_components as components
 import qqnt_derived as derived
 import qqnt_embed as embed
 import qqnt_export as q
@@ -1262,6 +1263,31 @@ def cmd_ocr(p, args):
     stats['ok'] = True
     stats['models'] = 'work' if engine_dir else 'bundled'
     print(json.dumps(stats, ensure_ascii=False))
+
+
+def cmd_components(p, args):
+    """Report or install the optional Python packages OCR/ASR/embeddings need."""
+    action = str(args.get('action') or 'status')
+    if action == 'status':
+        print(json.dumps({'ok': True, 'components': components.status()},
+                         ensure_ascii=False))
+        return
+    if action != 'install':
+        raise BadInput('未知操作：%s' % action)
+    groups = args.get('groups') or []
+    if not isinstance(groups, list):
+        raise BadInput('groups 必须是组件 id 列表')
+
+    def progress(line):
+        # pip's own output, one line at a time: the job log keeps it, and the
+        # runner treats a non-JSON line as a log entry rather than a result.
+        print(str(line), flush=True)
+
+    result = components.install(groups, progress=progress)
+    if result.get('ok'):
+        result['installed'] = {name: item['installed']
+                               for name, item in components.status().items()}
+    print(json.dumps(result, ensure_ascii=False))
 
 
 def cmd_chunks(p, args):
@@ -2986,6 +3012,10 @@ def main(argv=None):
     # Chunking + embedding is a long job: progress rows, then the result.
     s = sub.add_parser('chunks')
     s.add_argument('--json', default='{}')
+    # Optional Python packages: `status` lists them, `install` runs pip into the
+    # plugin's own virtualenv.
+    s = sub.add_parser('components')
+    s.add_argument('--json', default='{}')
     # Retrieval only; the sentence is written by the host model.
     s = sub.add_parser('ask')
     s.add_argument('--json', default='{}')
@@ -3056,6 +3086,8 @@ def main(argv=None):
             cmd_asr(p, json.loads(args.json))
         elif args.cmd == 'chunks':
             cmd_chunks(p, json.loads(args.json))
+        elif args.cmd == 'components':
+            cmd_components(p, json.loads(args.json))
         elif args.cmd == 'ask':
             cmd_ask(p, json.loads(args.json))
         elif args.cmd == 'recall':

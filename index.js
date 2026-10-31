@@ -32,7 +32,7 @@ import {
 } from './settings.js'
 import { buildRunning, cleanupStorage, migrateWorkDir, removeWorkDirEntries, storageSnapshot } from './storage.js'
 import { applyPreset, readPresets } from './presets.js'
-import { makeAsrRunner, makeChunksRunner, makeOcrRunner } from './runners.js'
+import { makeAsrRunner, makeChunksRunner, makeComponentsRunner, makeOcrRunner } from './runners.js'
 import { BUNDLE_VERSION, panelInfo, pruneAccountIndexes, spawnAutosync, startWebServer } from './web.js'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -1245,6 +1245,7 @@ export function apply(ctx, config) {
         ocr: makeOcrRunner({ settings, queryCli: QUERY_CLI }),
         asr: makeAsrRunner({ settings, queryCli: QUERY_CLI }),
         chunks: makeChunksRunner({ settings, queryCli: QUERY_CLI }),
+        components: makeComponentsRunner({ settings, queryCli: QUERY_CLI }),
       },
     })
     await server.ready
