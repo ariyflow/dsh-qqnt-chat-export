@@ -43,6 +43,7 @@
     "storage.js",
     "exportQueue.js",
     "jobs.js",
+    "runners.js",
     "presets.js",
     "page.html",
     "web",

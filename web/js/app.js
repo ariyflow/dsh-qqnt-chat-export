@@ -73,6 +73,21 @@ function mount() {
   if (!unmountJobs) unmountJobs = mountJobs(document.body, { api })
 }
 
+const ocrBtn = document.getElementById('ocrBtn')
+if (ocrBtn) {
+  ocrBtn.addEventListener('click', async () => {
+    ocrBtn.disabled = true
+    try {
+      await api.post('/api/jobs', { kind: 'ocr', summary: '识别图片文字' })
+      if (statusBox) statusBox.textContent = '已加入识别任务，进度见右下角'
+    } catch (error) {
+      if (statusBox) statusBox.textContent = `无法开始识别：${error.message}`
+    } finally {
+      ocrBtn.disabled = false
+    }
+  })
+}
+
 const toggle = document.getElementById('viewToggle')
 if (toggle) {
   toggle.textContent = view === 'models' ? '回到会话' : '模型与组件'

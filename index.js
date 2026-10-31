@@ -32,6 +32,7 @@ import {
 } from './settings.js'
 import { buildRunning, cleanupStorage, migrateWorkDir, removeWorkDirEntries, storageSnapshot } from './storage.js'
 import { applyPreset, readPresets } from './presets.js'
+import { makeOcrRunner } from './runners.js'
 import { BUNDLE_VERSION, panelInfo, pruneAccountIndexes, spawnAutosync, startWebServer } from './web.js'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -1108,7 +1109,11 @@ export function apply(ctx, config) {
   /** Start a listener on an explicit port (used for bind-testing a new one). */
   const launch = async (port, host) => {
     if (!port) return null
-    const server = startWebServer(settings, port, host, { handlers })
+    const server = startWebServer(settings, port, host, {
+      handlers,
+      // Long jobs run through the task panel; each kind is one runner.
+      runners: { ocr: makeOcrRunner({ settings, queryCli: QUERY_CLI }) },
+    })
     await server.ready
     return server
   }

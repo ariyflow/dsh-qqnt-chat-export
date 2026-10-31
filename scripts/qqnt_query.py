@@ -1216,15 +1216,14 @@ def cmd_ocr(p, args):
     command that fixes it, because silently pulling 15 MB mid-build is not a
     thing a plugin should decide on its own.
     """
+    # The rapidocr wheel bundles its own models: an empty models/ folder is
+    # not an error, it just means the pinned copy was never downloaded.
     report = models.status(p['work'], 'rapidocr-v4')['rapidocr-v4']
-    if not report['installed']:
-        missing = [item['name'] for item in report['files'] if not item['exists']]
-        raise BadInput('OCR 模型未下载（缺 %s）。先运行：python3 scripts/qqnt_models.py --work "%s" ensure rapidocr-v4 --download'
-                       % ('、'.join(missing), p['work']))
     engine_status = ocr.available()
     if not engine_status['ok']:
         raise BadInput(engine_status['error'] + '。在设置页点「安装 OCR 组件」。')
-    engine = ocr.make_engine(models.model_dir(p['work'], 'rapidocr-v4'))
+    engine_dir = models.model_dir(p['work'], 'rapidocr-v4') if report['installed'] else None
+    engine = ocr.make_engine(engine_dir)
 
     def progress(done, total, message):
         print(json.dumps({'progress': round(done / total, 4) if total else 1.0,
@@ -1233,6 +1232,7 @@ def cmd_ocr(p, args):
     stats = ocr.run(p['index'], p['derived'], engine,
                     limit=args.get('limit'), progress=progress)
     stats['ok'] = True
+    stats['models'] = 'work' if engine_dir else 'bundled'
     print(json.dumps(stats, ensure_ascii=False))
 
 
