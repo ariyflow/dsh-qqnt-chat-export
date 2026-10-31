@@ -13,12 +13,18 @@
   <p class="meta" id="app-meta">正在读取索引状态…</p>
   <span class="app-status" id="app-status"></span>
   <nav class="app-nav">
+    <button type="button" class="ghost" id="syncBtn" title="重新复制 QQ 数据库并重建索引">从 QQ 同步</button>
+    <button type="button" class="ghost" id="refreshBtn">刷新</button>
+    <label class="chat-search-label" title="切换账号索引（切换后自动增量更新）">账号
+      <select id="accountSelect" class="account-select"></select>
+    </label>
     <button type="button" class="ghost" id="viewChats">会话</button>
     <button type="button" class="ghost" id="viewExport">导出</button>
     <button type="button" class="ghost" id="viewStats">统计</button>
     <button type="button" class="ghost" id="viewAsk">问答</button>
     <button type="button" class="ghost" id="ocrBtn" title="识别已下载的截图里的文字">识别图片文字</button>
     <button type="button" class="ghost" id="asrBtn" title="转写已下载的语音消息">转写语音</button>
+    <button type="button" class="ghost" id="viewSettings">设置</button>
     <button type="button" class="ghost" id="viewModels">模型与组件</button>
     <span class="meta">迁移中：导出、统计仍在<a href="/">当前界面</a></span>
   </nav>

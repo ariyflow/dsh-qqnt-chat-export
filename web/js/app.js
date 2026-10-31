@@ -9,6 +9,7 @@ import { ApiError, createApi } from './api.js'
 import { createStore } from './state.js'
 import { mountAsk } from './views/ask.js'
 import { mountExport } from './views/export.js'
+import { mountSettings } from './views/settings.js'
 import { mountStats } from './views/stats.js'
 import { mountChats } from './views/chats.js'
 import { mountModels } from './views/models.js'
@@ -24,11 +25,63 @@ const store = createStore({
   builtAt: null,
   hasIndex: null,
   hasKey: null,
+  buildState: 'idle',
+  buildStep: '',
+  buildPercent: 0,
+  accounts: [],
+  indexAccount: '',
+  account: '',
 })
 
 const meta = document.getElementById('app-meta')
 const statusBox = document.getElementById('app-status')
 const main = document.getElementById('app-main')
+const syncBtn = document.getElementById('syncBtn')
+const refreshBtn = document.getElementById('refreshBtn')
+const accountSelect = document.getElementById('accountSelect')
+
+/** Build progress as 0..1; the helper reports processed/total. */
+function buildPercent(build) {
+  const total = Number(build?.total) || 0
+  const done = Number(build?.processed) || 0
+  if (total <= 0) return 0
+  return Math.min(1, Math.max(0, done / total))
+}
+
+/**
+ * Sidebar account picker: the live index plus any parked caches, exactly like
+ * the legacy page (`index.accounts` comes from the status probe).
+ */
+function renderAccounts(value) {
+  if (!accountSelect) return
+  const indexed = value.indexAccount || ''
+  const current = value.account || indexed || ''
+  accountSelect.replaceChildren()
+  if (!current) {
+    const option = document.createElement('option')
+    option.value = ''
+    option.textContent = '未检测到账号'
+    accountSelect.append(option)
+    accountSelect.disabled = true
+    return
+  }
+  const seen = new Set([current])
+  const head = document.createElement('option')
+  head.value = indexed || current
+  head.textContent = `${indexed || current}（当前）`
+  accountSelect.append(head)
+  for (const item of value.accounts || []) {
+    const account = String(item?.account || '')
+    if (account === '' || seen.has(account)) continue
+    seen.add(account)
+    const option = document.createElement('option')
+    option.value = account
+    option.textContent = `${account}${item.current ? '（当前）' : '（缓存）'}`
+    accountSelect.append(option)
+  }
+  accountSelect.value = indexed || current
+  accountSelect.disabled = seen.size < 2 || value.buildState === 'running'
+}
 
 /** `1700000000` → `2026-10-31 20:03`; the page never shows raw epochs. */
 function formatTime(epochSeconds) {
@@ -56,9 +109,15 @@ function render(value) {
     ? `${value.messages} 条消息 · ${value.chats} 个会话`
     : '还没有索引'
   statusBox.classList.remove('is-error')
-  statusBox.textContent = value.hasIndex
-    ? `上次构建 ${formatTime(value.builtAt)} · 密钥${value.hasKey ? '已缓存' : '未提取'}`
-    : '请回到当前界面点「从 QQ 同步」'
+  if (value.buildState === 'running') {
+    const percent = Math.round((Number(value.buildPercent) || 0) * 100)
+    statusBox.textContent = `正在同步：${value.buildStep || '处理中'} ${percent}%`
+  } else {
+    statusBox.textContent = value.hasIndex
+      ? `上次构建 ${formatTime(value.builtAt)} · 密钥${value.hasKey ? '已缓存' : '未提取'}`
+      : '点「从 QQ 同步」建立索引'
+  }
+  renderAccounts(value)
 }
 
 store.subscribe(render)
@@ -67,7 +126,7 @@ let unmount = null
 let unmountJobs = null
 const NAV = {
   chats: 'viewChats', export: 'viewExport', stats: 'viewStats',
-  ask: 'viewAsk', models: 'viewModels',
+  ask: 'viewAsk', settings: 'viewSettings', models: 'viewModels',
 }
 // Deep links: `/app/?view=models` and `/app/?view=ask` open that view directly.
 const requested = new URLSearchParams(location.search).get('view')
@@ -108,6 +167,8 @@ function mount() {
         chat: { kind: hit.chatKind, id: hit.chatId, around: rowId },
       }),
     })
+  } else if (view === 'settings') {
+    unmount = mountSettings(main, { api })
   } else if (view === 'models') {
     unmount = mountModels(main, { api })
   } else if (view === 'export') {
@@ -168,10 +229,88 @@ for (const [name, id] of Object.entries(NAV)) {
 }
 paintNav()
 
+let pollTimer = null
+let building = false
+
+function schedulePoll() {
+  if (pollTimer) clearTimeout(pollTimer)
+  pollTimer = setTimeout(pollBuild, 1500)
+}
+
+/** Poll the build until it stops, then reload the current view once. */
+async function pollBuild() {
+  try {
+    const status = await api.get('/api/status')
+    const build = status?.build || {}
+    if (build.state === 'running') {
+      building = true
+      if (syncBtn) syncBtn.disabled = true
+      if (statusBox) {
+        const percent = Math.round(buildPercent(build) * 100)
+        statusBox.textContent = `正在同步：${build.step || '处理中'} ${percent}%`
+      }
+      schedulePoll()
+      return
+    }
+  } catch {
+    schedulePoll()
+    return
+  }
+  building = false
+  if (syncBtn) syncBtn.disabled = false
+  await refresh()
+}
+
+async function startSync() {
+  if (building) return
+  building = true
+  if (syncBtn) syncBtn.disabled = true
+  if (statusBox) statusBox.textContent = '已开始同步，正在复制数据库并更新索引…'
+  try {
+    await api.post('/api/index/build?refresh=1')
+  } catch (error) {
+    building = false
+    if (syncBtn) syncBtn.disabled = false
+    if (statusBox) statusBox.textContent = `无法开始同步：${error.message}`
+    return
+  }
+  schedulePoll()
+}
+
+if (syncBtn) syncBtn.addEventListener('click', startSync)
+if (refreshBtn) {
+  refreshBtn.addEventListener('click', async () => {
+    refreshBtn.disabled = true
+    try {
+      await refresh()
+    } finally {
+      refreshBtn.disabled = false
+    }
+  })
+}
+if (accountSelect) {
+  accountSelect.addEventListener('change', async () => {
+    const account = String(accountSelect.value || '').trim()
+    if (account === '') return
+    accountSelect.disabled = true
+    if (statusBox) statusBox.textContent = `正在切换到账号 ${account} 的索引…`
+    try {
+      await api.post('/api/index/select', { account })
+      await refresh()
+    } catch (error) {
+      if (statusBox) statusBox.textContent = `切换失败：${error.message}`
+      accountSelect.disabled = false
+    }
+  })
+}
+
 async function refresh() {
   try {
     const status = await api.get('/api/status')
     const index = status?.index || {}
+    const build = status?.build || {}
+    building = build.state === 'running'
+    if (syncBtn) syncBtn.disabled = building
     store.set({
       phase: 'ready',
       error: '',
@@ -180,7 +319,14 @@ async function refresh() {
       builtAt: index.builtAt || 0,
       hasIndex: !index.error && Number(index.messages) > 0,
       hasKey: status?.key === true,
+      buildState: build.state || 'idle',
+      buildStep: build.step || '',
+      buildPercent: buildPercent(build),
+      accounts: Array.isArray(index.accounts) ? index.accounts : [],
+      indexAccount: index.account || '',
+      account: status?.account || '',
     })
+    if (building) schedulePoll()
   } catch (error) {
     store.set({
       phase: 'error',

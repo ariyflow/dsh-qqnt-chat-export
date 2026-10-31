@@ -183,6 +183,11 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
   submit.className = 'primary'
   submit.textContent = '开始导出'
 
+  const savePreset = document.createElement('button')
+  savePreset.type = 'button'
+  savePreset.className = 'ghost'
+  savePreset.textContent = '存为预设'
+
   const derived = document.createElement('p')
   derived.className = 'hint export-derived'
 
@@ -198,7 +203,7 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
   row2.append(format, preset, redact, mediaLabel, splitLabel, embedLabel, password)
   const row3 = document.createElement('div')
   row3.className = 'export-row'
-  row3.append(columns, frontLabel, submit)
+  row3.append(columns, frontLabel, submit, savePreset)
 
   form.append(row1, row2, row3, derived)
 
@@ -218,6 +223,7 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
   const state = {
     chat: initialChat ? { kind: initialChat.kind, id: initialChat.id, label: initialChat.name || '' } : null,
     chats: Array.isArray(initialChats) ? initialChats.slice() : [],
+    presets: [],
     lastJobId: '',
   }
   let closed = false
@@ -395,7 +401,8 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
     try {
       const payload = await api.get('/api/presets')
       if (closed) return
-      for (const item of Array.isArray(payload?.presets) ? payload.presets : []) {
+      state.presets = Array.isArray(payload?.presets) ? payload.presets : []
+      for (const item of state.presets) {
         const option = document.createElement('option')
         option.value = item.name
         option.textContent = item.name
@@ -404,6 +411,36 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
       }
     } catch {
       // No presets file yet.
+    }
+  }
+
+  async function storePreset() {
+    if (typeof window === 'undefined' || typeof window.prompt !== 'function') return
+    const name = window.prompt('预设名字（例如「CSV 只要时间与正文」）', '')
+    if (!name || String(name).trim() === '') return
+    const preset = {
+      name: String(name).trim().slice(0, 40),
+      format: format.value,
+      redact: redact.value,
+      media: media.checked,
+      embed: embed.checked,
+      split: split.checked ? 'day' : '',
+      frontMatter: frontMatter.checked,
+      columns: columnBoxes.filter((item) => item.box.checked).map((item) => item.value),
+    }
+    try {
+      const payload = await api.post('/api/presets', {
+        presets: [...state.presets, preset],
+      })
+      state.presets = Array.isArray(payload?.presets) ? payload.presets : state.presets
+      const option = document.createElement('option')
+      option.value = preset.name
+      option.textContent = preset.name
+      option.dataset.preset = JSON.stringify(preset)
+      preset.append(option)
+      derived.textContent = `已保存预设「${preset.name}」`
+    } catch (error) {
+      derived.textContent = `保存预设失败：${error.message}`
     }
   }
 
@@ -451,6 +488,7 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
   format.addEventListener('change', syncDerived)
   password.addEventListener('input', syncDerived)
   form.addEventListener('submit', run)
+  savePreset.addEventListener('click', storePreset)
 
   syncDerived()
   loadOptions().then(refresh)
