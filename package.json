@@ -44,6 +44,7 @@
     "exportQueue.js",
     "presets.js",
     "page.html",
+    "screenshots.json",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
