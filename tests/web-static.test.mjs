@@ -48,7 +48,10 @@ test('the modular UI shell is served under /app/', async () => {
     assert.ok(response.headers.get('etag'))
     const html = await response.text()
     assert.match(html, /\/app\/css\/base\.css/)
-    assert.doesNotMatch(html, /<script/)
+    // The only script is the external module; nothing inline, which is what
+    // lets this route run under `script-src 'self'`.
+    assert.match(html, /<script type="module" src="\/app\/js\/app\.js">/)
+    assert.doesNotMatch(html, /<script(?![^>]*\bsrc=)/)
   } finally {
     await server.close()
     await rm(dir, { recursive: true, force: true })
