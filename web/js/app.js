@@ -1,13 +1,13 @@
 /**
  * Entry point for the modular UI.
  *
- * At this stage the shell only proves that the pieces fit together: it reads
- * `/api/status`, stores the result, and renders it. Views get mounted here as
- * they are ported, so this file stays a wiring list rather than a second
- * monolith.
+ * Wires the shared state, the API client, and the mounted view. Views are
+ * added here one at a time; anything not ported yet links back to the legacy
+ * page, which keeps working unchanged.
  */
 import { ApiError, createApi } from './api.js'
 import { createStore } from './state.js'
+import { mountChats } from './views/chats.js'
 
 const api = createApi()
 
@@ -23,6 +23,7 @@ const store = createStore({
 
 const meta = document.getElementById('app-meta')
 const statusBox = document.getElementById('app-status')
+const main = document.getElementById('app-main')
 
 /** `1700000000` → `2026-10-31 20:03`; the page never shows raw epochs. */
 function formatTime(epochSeconds) {
@@ -47,16 +48,23 @@ function render(value) {
     return
   }
   meta.textContent = value.hasIndex
-    ? `索引就绪 · ${value.messages} 条消息 · ${value.chats} 个会话`
-    : '还没有索引：请回到当前界面点「从 QQ 同步」'
+    ? `${value.messages} 条消息 · ${value.chats} 个会话`
+    : '还没有索引'
   statusBox.classList.remove('is-error')
-  statusBox.textContent = [
-    `上次构建：${formatTime(value.builtAt)}`,
-    `数据库密钥：${value.hasKey ? '已缓存' : '未提取'}`,
-  ].join('　')
+  statusBox.textContent = value.hasIndex
+    ? `上次构建 ${formatTime(value.builtAt)} · 密钥${value.hasKey ? '已缓存' : '未提取'}`
+    : '请回到当前界面点「从 QQ 同步」'
 }
 
 store.subscribe(render)
+
+let unmount = null
+/** Mount the reader once the first status arrives (or the index is absent). */
+function mount() {
+  if (!main) return
+  if (typeof unmount === 'function') unmount()
+  unmount = mountChats(main, { api })
+}
 
 async function refresh() {
   try {
@@ -76,6 +84,8 @@ async function refresh() {
       phase: 'error',
       error: error instanceof ApiError ? error.message : String(error?.message || error),
     })
+  } finally {
+    mount()
   }
 }
 

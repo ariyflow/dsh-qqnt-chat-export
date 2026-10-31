@@ -11,19 +11,12 @@
 <header class="app-header">
   <h1>QQ 聊天记录</h1>
   <p class="meta" id="app-meta">正在读取索引状态…</p>
+  <span class="app-status" id="app-status"></span>
   <nav class="app-nav">
-    <a href="/">回到当前界面</a>
+    <span class="meta">迁移中：导出、统计仍在<a href="/">当前界面</a></span>
   </nav>
 </header>
-<main class="app-main" id="app-main">
-  <section class="card">
-    <h2>迁移进行中</h2>
-    <p>这是新的模块化界面。会话、搜索、统计、导出等视图正在逐块迁入，
-      在它们完成之前，请使用<a href="/">当前界面</a>。</p>
-    <p class="app-status" id="app-status"></p>
-    <p class="hint">页面只读取本机索引的统计数字，不显示聊天内容，也不发起联网请求。</p>
-  </section>
-</main>
+<main class="app-main" id="app-main"></main>
 <script type="module" src="/app/js/app.js"></script>
 </body>
 </html>
