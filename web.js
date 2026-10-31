@@ -23,6 +23,28 @@ import { readPresets, writePresets } from './presets.js'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const QUERY_CLI = path.join(HERE, 'scripts', 'qqnt_query.py')
 const PAGE = path.join(HERE, 'page.html')
+/**
+ * The modular UI lives in `web/` and is served under `/app/`.
+ *
+ * `page.html` stays the default until the port reaches parity, so this server
+ * is purely additive: nothing that resolved before can resolve differently.
+ */
+const WEB_DIR = path.join(HERE, 'web')
+const STATIC_ROOT = '/app/'
+/** Only the extensions the UI ships; anything else is 404 rather than a guess. */
+const STATIC_TYPES = new Map([
+  ['.html', 'text/html; charset=utf-8'],
+  ['.js', 'text/javascript; charset=utf-8'],
+  ['.css', 'text/css; charset=utf-8'],
+  ['.json', 'application/json; charset=utf-8'],
+  ['.svg', 'image/svg+xml'],
+  ['.png', 'image/png'],
+  ['.webp', 'image/webp'],
+  ['.woff2', 'font/woff2'],
+])
+/** The new UI loads same-origin modules; the legacy page stays inline-only. */
+const STATIC_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; "
+  + "img-src 'self' data: blob:; connect-src 'self'; media-src 'self'; font-src 'self'"
 const DEFAULT_PORT = 46728
 const DEFAULT_HOST = '127.0.0.1'
 const REQUEST_TIMEOUT_MS = 180_000
@@ -303,6 +325,87 @@ function sendJson(res, status, payload) {
     'cache-control': 'no-store',
   })
   res.end(body)
+}
+
+function sendPlain(res, status, text) {
+  res.writeHead(status, {
+    'content-type': 'text/plain; charset=utf-8',
+    'cache-control': 'no-store',
+  })
+  res.end(text)
+}
+
+/**
+ * Map a `/app/...` request onto a file inside `web/`.
+ *
+ * This listener's document root sits next to the helper scripts and the
+ * working directory, so a traversal would be a data leak rather than a
+ * cosmetic bug. The resolved path must stay under `web/`; NUL bytes and
+ * backslashes are refused outright (Windows treats `\` as a separator too), a
+ * literal `..` segment is refused before resolution, and only the extensions
+ * the UI actually ships are served.
+ *
+ * @param {string} pathname - decoded request path starting with `/app/`
+ * @returns {{file: string, type: string}|null} the file to serve, or null
+ */
+function staticTarget(pathname) {
+  let rel = pathname.slice(STATIC_ROOT.length)
+  if (rel === '' || rel.endsWith('/')) rel += 'index.html'
+  let decoded
+  try {
+    decoded = decodeURIComponent(rel)
+  } catch {
+    return null
+  }
+  if (decoded.includes('\0') || decoded.includes('\\')) return null
+  if (decoded.split('/').includes('..')) return null
+  const type = STATIC_TYPES.get(path.extname(decoded).toLowerCase())
+  if (!type) return null
+  const file = path.resolve(WEB_DIR, decoded)
+  if (file !== WEB_DIR && !file.startsWith(WEB_DIR + path.sep)) return null
+  return { file, type }
+}
+
+/**
+ * Serve one file from `web/` with an ETag so the browser revalidates instead
+ * of re-downloading; `no-cache` keeps a rebuild of the UI from being masked by
+ * a stale module graph during development.
+ */
+function serveStatic(req, res, pathname) {
+  const target = staticTarget(pathname)
+  let info = null
+  if (target) {
+    try {
+      info = statSync(target.file)
+    } catch {
+      info = null
+    }
+  }
+  if (!target || !info || !info.isFile()) {
+    sendPlain(res, 404, 'not found')
+    return
+  }
+  const etag = `W/"${info.size.toString(16)}-${Math.floor(info.mtimeMs).toString(16)}"`
+  const headers = {
+    'content-type': target.type,
+    'cache-control': 'no-cache',
+    etag,
+    'content-security-policy': STATIC_CSP,
+    'x-content-type-options': 'nosniff',
+  }
+  if (String(req.headers['if-none-match'] ?? '') === etag) {
+    res.writeHead(304, headers)
+    res.end()
+    return
+  }
+  res.writeHead(200, { ...headers, 'content-length': String(info.size) })
+  if (req.method === 'HEAD') {
+    res.end()
+    return
+  }
+  const stream = createReadStream(target.file)
+  stream.on('error', () => res.destroy())
+  stream.pipe(res)
 }
 
 function readInt(value, fallback) {
@@ -732,6 +835,15 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
     }
     if (pathname === '/favicon.ico') {
       res.writeHead(204).end()
+      return
+    }
+    // New UI, additive: `/app/` serves `web/`, `/` keeps serving page.html.
+    if (req.method === 'GET' && pathname === '/app') {
+      res.writeHead(308, { location: `${STATIC_ROOT}`, 'cache-control': 'no-store' }).end()
+      return
+    }
+    if ((req.method === 'GET' || req.method === 'HEAD') && pathname.startsWith(STATIC_ROOT)) {
+      serveStatic(req, res, pathname)
       return
     }
     if (req.method === 'GET' && pathname === '/api/settings') {
