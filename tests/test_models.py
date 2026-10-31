@@ -5,8 +5,10 @@ The download case uses a `file://` base URL, so it tests the real code path
 """
 from __future__ import annotations
 
+import io
 import json
 import os
+import tarfile
 import subprocess
 import sys
 import tempfile
@@ -98,3 +100,52 @@ class ModelTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class ArchiveModelTests(unittest.TestCase):
+    """Upstream ships some models as one tarball with a top-level folder."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.work = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def build_archive(self, subdir, names, evil=False):
+        path = os.path.join(self.work, 'model.tar.bz2')
+        with tarfile.open(path, 'w:bz2') as handle:
+            for name in names:
+                data = name.encode()
+                info = tarfile.TarInfo('%s/%s' % (subdir, name))
+                info.size = len(data)
+                handle.addfile(info, io.BytesIO(data))
+            if evil:
+                info = tarfile.TarInfo('../../escaped.txt')
+                info.size = 3
+                handle.addfile(info, io.BytesIO(b'nop'))
+        return path
+
+    def test_files_are_extracted_flat_from_their_subdir(self):
+        archive = self.build_archive('pkg-1.0', ['model.int8.onnx', 'tokens.txt'])
+        result = models._fetch_archive(
+            {'url': 'file://' + archive,
+             'files': ['model.int8.onnx', 'tokens.txt'],
+             'archive': {'type': 'tar.bz2', 'subdir': 'pkg-1.0'}},
+            os.path.join(self.work, 'out'), None, None)
+        self.assertEqual(sorted(result), ['model.int8.onnx', 'tokens.txt'])
+        self.assertTrue(os.path.isfile(os.path.join(self.work, 'out', 'tokens.txt')))
+
+    def test_members_outside_the_subdir_are_ignored(self):
+        archive = self.build_archive('pkg-1.0', ['tokens.txt'], evil=True)
+        models._fetch_archive(
+            {'url': 'file://' + archive, 'files': ['tokens.txt'],
+             'archive': {'type': 'tar.bz2', 'subdir': 'pkg-1.0'}},
+            os.path.join(self.work, 'out'), None, None)
+        self.assertFalse(os.path.exists(os.path.join(self.work, 'escaped.txt')))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, '..', 'escaped.txt')))
+
+    def test_the_speech_model_is_the_small_int8_build(self):
+        spec = models.MODELS['paraformer-zh-small']
+        self.assertEqual(spec['archive']['type'], 'tar.bz2')
+        self.assertIn('model.int8.onnx', spec['files'])
+        self.assertLess(spec['size'], 100 * 1024 * 1024)

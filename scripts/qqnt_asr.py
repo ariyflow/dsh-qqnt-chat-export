@@ -60,9 +60,13 @@ def default_recognizer(models_dir):
     """Build a sherpa-onnx offline recognizer from `workDir/models/paraformer-zh`."""
     import sherpa_onnx
 
-    model = os.path.join(models_dir, 'model.onnx')
+    # Upstream ships `model.int8.onnx` for the small build and `model.onnx`
+    # for fp32; accept either so a hand-placed model works.
+    candidates = [os.path.join(models_dir, 'model.int8.onnx'),
+                  os.path.join(models_dir, 'model.onnx')]
+    model = next((path for path in candidates if os.path.isfile(path)), '')
     tokens = os.path.join(models_dir, 'tokens.txt')
-    if not (os.path.isfile(model) and os.path.isfile(tokens)):
+    if not (model and os.path.isfile(tokens)):
         raise FileNotFoundError('语音模型不完整：%s' % models_dir)
     return sherpa_onnx.OfflineRecognizer.from_paraformer(
         paraformer=model, tokens=tokens, num_threads=2, sample_rate=SAMPLE_RATE)

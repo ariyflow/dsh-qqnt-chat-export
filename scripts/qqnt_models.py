@@ -49,12 +49,18 @@ MODELS = {
         'pin': None,
         'feature': 'ask',
     },
-    'paraformer-zh': {
-        'label': '中文语音识别模型',
-        'size': 230 * 1024 * 1024,
+    # 78 MB int8 instead of the 234 MB fp32 build: on real speech the small
+    # model transcribed Mandarin and code-switched zh/en correctly, and a third
+    # of the download matters more than a marginal word-error improvement.
+    'paraformer-zh-small': {
+        'label': '中文语音识别模型（small, int8）',
+        'size': 78 * 1024 * 1024,
         'license': 'Apache-2.0',
-        'files': ['model.onnx', 'tokens.txt'],
-        'url': 'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/',
+        'files': ['model.int8.onnx', 'tokens.txt'],
+        'url': 'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/'
+               'sherpa-onnx-paraformer-zh-small-2024-03-09.tar.bz2',
+        'archive': {'type': 'tar.bz2',
+                    'subdir': 'sherpa-onnx-paraformer-zh-small-2024-03-09'},
         'pin': None,
         'feature': 'asr',
     },
@@ -186,6 +192,50 @@ def _download_one(url, target, progress):
         progress(target)
 
 
+def _fetch_archive(spec, folder, base_url, progress):
+    """Download a tarball and extract only the files the manifest names.
+
+    Upstream ships models as `sherpa-onnx-<model>.tar.bz2` with a top-level
+    directory; the files land flat in the model folder so the engine paths stay
+    simple. Members are filtered by name, which also means a hostile archive
+    cannot write outside the folder through `..` entries.
+    """
+    import tarfile
+    import urllib.request
+
+    url = base_url or spec['url']
+    archive = spec['archive']
+    temp = os.path.join(folder, '.download.tar.bz2')
+    _download_one(url, temp, progress)
+    wanted = set(spec['files'])
+    subdir = str(archive.get('subdir') or '').strip('/')
+    try:
+        with tarfile.open(temp, 'r:bz2') as handle:
+            for member in handle.getmembers():
+                if not member.isfile():
+                    continue
+                name = member.name
+                if subdir and name.startswith(subdir + '/'):
+                    name = name[len(subdir) + 1:]
+                base = os.path.basename(name)
+                if base not in wanted:
+                    continue
+                target = os.path.join(folder, base)
+                source = handle.extractfile(member)
+                if source is None:
+                    continue
+                with open(target, 'wb') as out:
+                    shutil.copyfileobj(source, out)
+                if progress:
+                    progress(target)
+    finally:
+        try:
+            os.remove(temp)
+        except OSError:
+            pass
+    return sorted(name for name in os.listdir(folder) if name in wanted)
+
+
 def ensure(work, model_id, download=False, base_url=None, progress=None):
     """Verify a model, downloading the missing files when allowed.
 
@@ -205,11 +255,14 @@ def ensure(work, model_id, download=False, base_url=None, progress=None):
                if not os.path.isfile(os.path.join(folder, name))]
     downloaded = []
     if missing and download:
-        root = base_url or spec['url']
-        for name in missing:
-            url = root.rstrip('/') + '/' + name
-            _download_one(url, os.path.join(folder, name), progress)
-            downloaded.append(name)
+        if spec.get('archive'):
+            downloaded = _fetch_archive(spec, folder, base_url, progress)
+        else:
+            root = base_url or spec['url']
+            for name in missing:
+                url = root.rstrip('/') + '/' + name
+                _download_one(url, os.path.join(folder, name), progress)
+                downloaded.append(name)
         missing = []
     for name in spec['files']:
         path = os.path.join(folder, name)

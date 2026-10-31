@@ -1190,16 +1190,16 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
 
 def cmd_asr(p, args):
     """Transcribe pending voice messages, one JSON object per line."""
-    report = models.status(p['work'], 'paraformer-zh')['paraformer-zh']
+    report = models.status(p['work'], 'paraformer-zh-small')['paraformer-zh-small']
     engine_status = asr.available()
     if not engine_status['ok']:
         raise BadInput(engine_status['error'] + '。在设置页点「安装语音组件」。')
     if not report['installed']:
         missing = [item['name'] for item in report['files'] if not item['exists']]
         raise BadInput('语音模型未下载（缺 %s）。先运行：python3 scripts/qqnt_models.py'
-                       ' --work "%s" ensure paraformer-zh --download'
+                       ' --work "%s" ensure paraformer-zh-small --download'
                        % ('、'.join(missing), p['work']))
-    engine = asr.make_engine(models.model_dir(p['work'], 'paraformer-zh'))
+    engine = asr.make_engine(models.model_dir(p['work'], 'paraformer-zh-small'))
 
     def progress(done, total, message):
         print(json.dumps({'progress': round(done / total, 4) if total else 1.0,
