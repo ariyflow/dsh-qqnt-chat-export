@@ -19,6 +19,10 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
 - **DSH 侧边栏面板**：左侧栏多一个「QQ 聊天记录」图标，主区直接打开同一个页面，不用切浏览器标签。
 - **模块化界面（预览）**：`/app/` 下是重写中的界面（会话列表、消息阅读、问答、模型与组件、后台任务面板），旧页面仍是默认入口，功能一致前不会切换。
 
+![新界面](docs/screenshot-app.png)
+
+> 同样用虚构数据渲染。
+
 详细功能、面板行为与每个导出选项见 [docs/features.md](docs/features.md)。
 
 ## 安装
