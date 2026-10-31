@@ -42,6 +42,8 @@ import zipfile
 
 import qqnt_derived as derived
 import qqnt_export as q
+import qqnt_models as models
+import qqnt_ocr as ocr
 import qqnt_media as media_mod
 
 GROUP_KIND = 'group'
@@ -1183,6 +1185,33 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
         write_status(p, dict(state, state='error', finishedAt=int(time.time()),
                              error=message))
         raise
+
+
+def cmd_ocr(p, args):
+    """Recognize pending screenshots and print one JSON object per line.
+
+    Nothing is downloaded here: a missing model is reported with the exact
+    command that fixes it, because silently pulling 15 MB mid-build is not a
+    thing a plugin should decide on its own.
+    """
+    report = models.status(p['work'], 'rapidocr-v4')['rapidocr-v4']
+    if not report['installed']:
+        missing = [item['name'] for item in report['files'] if not item['exists']]
+        raise BadInput('OCR 模型未下载（缺 %s）。先运行：python3 scripts/qqnt_models.py --work "%s" ensure rapidocr-v4 --download'
+                       % ('、'.join(missing), p['work']))
+    engine_status = ocr.available()
+    if not engine_status['ok']:
+        raise BadInput(engine_status['error'] + '。在设置页点「安装 OCR 组件」。')
+    engine = ocr.make_engine(models.model_dir(p['work'], 'rapidocr-v4'))
+
+    def progress(done, total, message):
+        print(json.dumps({'progress': round(done / total, 4) if total else 1.0,
+                          'message': message}, ensure_ascii=False), flush=True)
+
+    stats = ocr.run(p['index'], p['derived'], engine,
+                    limit=args.get('limit'), progress=progress)
+    stats['ok'] = True
+    print(json.dumps(stats, ensure_ascii=False))
 
 
 # --------------------------------------------------------------------------
@@ -2635,6 +2664,10 @@ def main(argv=None):
     s.add_argument('--json', default='{}')
     s = sub.add_parser('export')
     s.add_argument('--json', default='{}')
+    # OCR prints one JSON object per line: progress rows first, the result last,
+    # so a caller can show a percentage while the batch runs.
+    s = sub.add_parser('ocr')
+    s.add_argument('--json', default='{}')
     s = sub.add_parser('build')
     s.add_argument('--refresh', action='store_true')
     s.add_argument('--keep', type=int, default=DEFAULT_KEEP_ACCOUNTS,
@@ -2688,6 +2721,8 @@ def main(argv=None):
             cmd_media_list(p, json.loads(args.json))
         elif args.cmd == 'export':
             run_export_command(p, json.loads(args.json))
+        elif args.cmd == 'ocr':
+            cmd_ocr(p, json.loads(args.json))
     except BadInput as exc:
         # 参数错误走 400：只回一行可读原因，不泄漏调用栈
         print(json.dumps({'error': str(exc)}, ensure_ascii=False))
