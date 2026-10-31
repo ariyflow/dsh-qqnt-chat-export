@@ -102,3 +102,74 @@ test('a failing sessions request is surfaced in the sidebar hint', async () => {
     restore()
   }
 })
+
+test('a media match is badged so a keyword hit inside a screenshot reads correctly', async () => {
+  const restore = installDocument()
+  const api = {
+    get: async (path) => {
+      if (path === '/api/sessions') return { sessions }
+      return {
+        rows: [{ ts: 1730000000, sender: '小林', text: '见图', sources: ['ocr'], snippet: '课程安排：402 教室' }],
+        total: 1,
+      }
+    },
+  }
+  const root = makeElement('main')
+  const cleanup = mountChats(root, { api })
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // main = [title, searchBar, messages, more]
+    const row = root.children[0].children[1].children[2].children[0]
+    assert.match(textOf(row), /图片文字/)
+    assert.doesNotMatch(textOf(row), /语音转写/)
+  } finally {
+    cleanup()
+    restore()
+  }
+})
+
+test('searching sends the keyword and shows where a media hit came from', async () => {
+  const restore = installDocument()
+  const calls = []
+  const api = {
+    get: async (path, params) => {
+      calls.push({ path, params })
+      if (path === '/api/sessions') return { sessions }
+      if (params && params.keyword) {
+        return {
+          total: 1,
+          rows: [{
+            ts: 1730000000, sender: '小林', text: '见图', sources: ['ocr'],
+            snippet: '课程安排：402 教室', chatName: '示例课程群',
+          }],
+        }
+      }
+      return { rows, total: 2 }
+    },
+  }
+  const root = makeElement('main')
+  const cleanup = mountChats(root, { api })
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const main = root.children[0].children[1]
+    const form = main.children[1]
+    const input = form.children[0]
+    input.value = '402'
+    form.dispatch('submit')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    const search = calls.find((call) => call.params && call.params.keyword === '402')
+    assert.ok(search, 'a keyword request must be made')
+    assert.equal(search.params.order, 'desc')
+    assert.equal(search.params.sources, undefined, 'media search is on by default')
+
+    const hit = main.children[2].children[0]
+    assert.match(textOf(hit), /图片文字/)
+    assert.match(textOf(hit), /示例课程群/)
+    assert.match(textOf(main.children[0]), /402/)
+  } finally {
+    cleanup()
+    restore()
+  }
+})

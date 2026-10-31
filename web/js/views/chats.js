@@ -62,6 +62,20 @@ function messageRow(row) {
 
   head.append(who, when)
 
+  // A hit that came from a screenshot or a voice message says so here; without
+  // the badge the user would see a keyword match inside text that does not
+  // contain the keyword.
+  const labels = { ocr: '图片文字', asr: '语音转写' }
+  for (const source of Array.isArray(row.sources) ? row.sources : []) {
+    const label = labels[source]
+    if (!label) continue
+    const badge = document.createElement('span')
+    badge.className = 'msg-badge'
+    badge.textContent = label
+    if (row.snippet) badge.setAttribute('title', String(row.snippet))
+    head.append(badge)
+  }
+
   const body = document.createElement('p')
   body.className = 'msg-text'
   body.textContent = String(row.text ?? '')
@@ -100,6 +114,26 @@ export function mountChats(root, { api }) {
   const title = document.createElement('h2')
   title.className = 'chat-title'
   title.textContent = '选择左侧会话'
+
+  // Cross-chat keyword search. `sources` decides whether recognized text
+  // inside images and voice messages participates; both are on by default so
+  // the feature is discoverable, and turning them off answers "only what was
+  // typed".
+  const searchBar = document.createElement('form')
+  searchBar.className = 'chat-search'
+  const searchInput = document.createElement('input')
+  searchInput.type = 'search'
+  searchInput.className = 'chat-search-input'
+  searchInput.placeholder = '搜索全部会话（回车）'
+  searchInput.setAttribute('aria-label', '搜索全部会话')
+  const ocrToggle = document.createElement('input')
+  ocrToggle.type = 'checkbox'
+  ocrToggle.checked = true
+  const ocrLabel = document.createElement('label')
+  ocrLabel.className = 'chat-search-label'
+  ocrLabel.append(ocrToggle, document.createElement('span'))
+  ocrLabel.children[1].textContent = '含图片文字'
+  searchBar.append(searchInput, ocrLabel)
   const more = document.createElement('button')
   more.type = 'button'
   more.className = 'ghost'
@@ -107,7 +141,7 @@ export function mountChats(root, { api }) {
   more.hidden = true
   const messages = document.createElement('ol')
   messages.className = 'msg-list'
-  main.append(title, messages, more)
+  main.append(title, searchBar, messages, more)
 
   shell.append(aside, main)
   root.append(shell)
@@ -167,6 +201,47 @@ export function mountChats(root, { api }) {
       more.hidden = true
     }
   }
+
+  async function search(keyword, includeOcr) {
+    const args = { keyword, limit: 100, order: 'desc' }
+    if (!includeOcr) args.sources = ['text']
+    title.textContent = `搜索：${keyword}`
+    messages.replaceChildren()
+    more.hidden = true
+    try {
+      const payload = await api.get('/api/messages', args)
+      if (closed) return
+      const rows = Array.isArray(payload?.rows) ? payload.rows : []
+      state.rows = rows
+      state.total = Number(payload?.total) || rows.length
+      state.selected = null
+      title.textContent = rows.length === 0
+        ? `没有匹配「${keyword}」的消息`
+        : `搜索「${keyword}」· ${state.total} 条（显示最近 ${rows.length} 条）`
+      for (const row of rows) {
+        const item = messageRow(row)
+        if (row.chatName) {
+          const chat = document.createElement('span')
+          chat.className = 'msg-chat'
+          chat.textContent = row.chatName
+          item.children[0].append(chat)
+        }
+        messages.append(item)
+      }
+    } catch (error) {
+      if (!closed) title.textContent = `搜索失败：${error.message}`
+    }
+  }
+
+  searchBar.addEventListener('submit', (event) => {
+    event.preventDefault()
+    const keyword = String(searchInput.value || '').trim()
+    if (keyword === '') {
+      if (state.selected) select(state.selected)
+      return
+    }
+    search(keyword, ocrToggle.checked)
+  })
 
   function select(session) {
     state.selected = session

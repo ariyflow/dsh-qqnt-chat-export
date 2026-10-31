@@ -425,6 +425,10 @@ function filtersFrom(params) {
     since: params.get('since') || '',
     until: params.get('until') || '',
   }
+  // `sources` narrows the keyword to message text, recognized media or both;
+  // absent means the helper's default (all of them).
+  const sources = params.getAll('sources').filter((value) => value !== '')
+  if (sources.length > 0) args.sources = sources
   for (const key of Object.keys(args)) {
     if (args[key] === '') delete args[key]
   }

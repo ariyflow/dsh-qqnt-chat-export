@@ -270,3 +270,26 @@ a:hover { text-decoration: underline; }
 
 .app-nav { display: flex; align-items: center; gap: 12px; }
 .app-nav .ghost { margin: 0; padding: 3px 8px; font-size: 12px; }
+
+.msg-badge {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.chat-search { display: flex; gap: 8px; align-items: center; margin: 0 0 8px; }
+.chat-search-input {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.chat-search-label { display: flex; gap: 4px; align-items: center; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.msg-chat { margin-left: auto; color: var(--muted); font-size: 10px; }

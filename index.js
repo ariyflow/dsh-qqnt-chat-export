@@ -488,6 +488,11 @@ export function searchTool(settings) {
         limit: { type: 'integer', minimum: 1, maximum: 100, description: 'Rows to return. Defaults to 20.' },
         offset: { type: 'integer', minimum: 0, description: 'Rows to skip, for paging.' },
         order: { type: 'string', enum: ['asc', 'desc'], description: 'Time order. Defaults to newest first.' },
+        sources: {
+          type: 'array',
+          items: { type: 'string', enum: ['text', 'ocr', 'asr'] },
+          description: 'Which text to search: `text` is what was typed, `ocr` is text recognized inside images, `asr` is speech transcripts. Defaults to all of them; pass ["text"] to ignore recognized media.',
+        },
       },
     },
     output: { schema: outputSchema(), render: renderReport },
@@ -501,6 +506,7 @@ export function searchTool(settings) {
         if (typeof value === 'string' && value.trim() !== '') payloadArgs[key] = value.trim()
       }
       if (args.senderRegex === true) payloadArgs.senderRegex = true
+      if (Array.isArray(args.sources) && args.sources.length > 0) payloadArgs.sources = args.sources
       payloadArgs.limit = Math.min(Math.max(Number(args.limit) || 20, 1), 100)
       const offset = Number(args.offset)
       if (Number.isInteger(offset) && offset > 0) payloadArgs.offset = offset

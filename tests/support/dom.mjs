@@ -37,7 +37,9 @@ export function makeElement(tagName) {
     addEventListener(type, handler) { listeners.set(type, handler) },
     dispatch(type) {
       const handler = listeners.get(type)
-      if (handler) return handler({ type })
+      // Views call preventDefault on form submits; the shim offers a no-op so
+      // a real handler can run unchanged.
+      if (handler) return handler({ type, preventDefault() {} })
       return undefined
     },
   }

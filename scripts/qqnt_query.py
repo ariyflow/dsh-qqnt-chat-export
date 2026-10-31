@@ -1256,7 +1256,33 @@ def open_index(p):
               % (version[0], INDEX_VERSION))
     # 发送者正则：只在查询连接上注册，构建连接不需要。
     conn.create_function('regexp', 2, _regexp_match, deterministic=True)
+    attach_derived(conn, p)
     return conn
+
+
+def attach_derived(conn, p):
+    """Expose the derived store as `d` so keyword search can reach OCR text.
+
+    It lives in its own file because a rebuild must not destroy it, so a query
+    that wants to match a screenshot's text has to see two databases. Attaching
+    read-only keeps that honest: nothing here can write to it.
+    """
+    if not os.path.exists(p['derived']):
+        return False
+    try:
+        conn.execute('ATTACH DATABASE ? AS d', (readonly_uri(p['derived']),))
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def has_content_fts(conn):
+    try:
+        return conn.execute(
+            "SELECT 1 FROM d.sqlite_master WHERE type='table' AND name='content_fts'"
+        ).fetchone() is not None
+    except sqlite3.Error:
+        return False
 
 
 def like_escape(text):
@@ -1459,6 +1485,70 @@ def merge_query_args(args):
     return out
 
 
+SOURCES_DEFAULT = ('text', 'ocr', 'asr')
+
+
+def parse_sources(value):
+    """`sources` accepts a list or a comma string; unknown names are refused."""
+    if value in (None, ''):
+        return list(SOURCES_DEFAULT)
+    raw = value if isinstance(value, (list, tuple)) else str(value).split(',')
+    out = []
+    for item in raw:
+        name = str(item).strip().lower()
+        if name == '':
+            continue
+        if name not in SOURCES_DEFAULT:
+            raise BadInput('sources 只能是 %s' % '、'.join(SOURCES_DEFAULT))
+        if name not in out:
+            out.append(name)
+    return out or list(SOURCES_DEFAULT)
+
+
+def keyword_clause(conn, keyword, sources=None):
+    """Match message text plus, when asked, recognized media text.
+
+    A screenshot's words are real matches even though they never appear in the
+    message body, so the two are ORed into one clause. `sources` narrows it:
+    `text` alone searches nothing but QQ's own text, which is what a user wants
+    when they are hunting for what someone typed rather than what they pasted.
+    """
+    wanted = parse_sources(sources)
+    alternatives, values = [], []
+    fts_ready = len(keyword) >= MIN_FTS_CHARS and has_fts(conn)
+    if 'text' in wanted:
+        if fts_ready:
+            alternatives.append('m.rowid IN (SELECT rowid FROM message_fts '
+                                'WHERE message_fts MATCH ?)')
+        else:
+            alternatives.append("m.text LIKE ? ESCAPE '\\'")
+        values.append(fts_phrase(keyword) if fts_ready
+                      else '%' + like_escape(keyword) + '%')
+    media_wanted = [name for name in wanted if name != 'text']
+    if media_wanted and has_content_fts(conn):
+        placeholders = ','.join('?' * len(media_wanted))
+        if fts_ready:
+            alternatives.append(
+                'EXISTS (SELECT 1 FROM d.content c WHERE '
+                'c.chat_kind=m.chat_kind AND c.chat_id=m.chat_id '
+                'AND c.msg_id=m.msg_id AND c.source IN (%s) AND c.id IN '
+                '(SELECT rowid FROM d.content_fts WHERE content_fts MATCH ?))'
+                % placeholders)
+            values.extend(media_wanted)
+            values.append(fts_phrase(keyword))
+        else:
+            alternatives.append(
+                'EXISTS (SELECT 1 FROM d.content c WHERE '
+                'c.chat_kind=m.chat_kind AND c.chat_id=m.chat_id '
+                'AND c.msg_id=m.msg_id AND c.source IN (%s) '
+                "AND c.text LIKE ? ESCAPE '\\')" % placeholders)
+            values.extend(media_wanted)
+            values.append('%' + like_escape(keyword) + '%')
+    if not alternatives:
+        return '', []
+    return '(' + ' OR '.join(alternatives) + ')', values
+
+
 def build_where(conn, args):
     """WHERE clause over the `messages m` alias (callers join `chats` as needed)."""
     clauses, params = [], []
@@ -1477,13 +1567,10 @@ def build_where(conn, args):
             params.append(kind)
     keyword = (args.get('keyword') or '').strip()
     if keyword:
-        if len(keyword) >= MIN_FTS_CHARS and has_fts(conn):
-            clauses.append('m.rowid IN (SELECT rowid FROM message_fts '
-                           'WHERE message_fts MATCH ?)')
-            params.append(fts_phrase(keyword))
-        else:
-            clauses.append("m.text LIKE ? ESCAPE '\\'")
-            params.append('%' + like_escape(keyword) + '%')
+        clause, clause_params = keyword_clause(conn, keyword, args.get('sources'))
+        if clause:
+            clauses.append(clause)
+            params.extend(clause_params)
     sender = (args.get('sender') or '').strip()
     if sender:
         if truthy(args.get('senderRegex')):
@@ -1665,6 +1752,39 @@ def cmd_stats(p, args):
     }, ensure_ascii=False))
 
 
+def content_sources(conn, rows):
+    """Which non-text sources a page of results matched, plus a snippet.
+
+    Only the rows on screen are looked up (an OR of their keys), so the cost is
+    proportional to the page rather than to the size of the derived store.
+    """
+    keys = []
+    for row in rows:
+        try:
+            keys.append((str(row[8]), str(row[9]), int(row[1])))
+        except (IndexError, TypeError, ValueError):
+            continue
+    if not keys:
+        return {}
+    where = ' OR '.join(['(chat_kind=? AND chat_id=? AND msg_id=?)'] * len(keys))
+    params = [value for key in keys for value in key]
+    try:
+        found = conn.execute(
+            'SELECT chat_kind, chat_id, msg_id, source, substr(text, 1, 80)'
+            ' FROM d.content WHERE ' + where, params).fetchall()
+    except sqlite3.Error:
+        return {}
+    out = {}
+    for kind, chat, msg, source, snippet in found:
+        key = (str(kind), str(chat), int(msg))
+        entry = out.setdefault(key, {'sources': [], 'snippet': ''})
+        if source not in entry['sources']:
+            entry['sources'].append(source)
+        if not entry['snippet']:
+            entry['snippet'] = snippet or ''
+    return out
+
+
 def messages_page(conn, args):
     """One page of matches, newest first unless `order=asc`."""
     where, params = build_where(conn, args)
@@ -1680,12 +1800,26 @@ def messages_page(conn, args):
         'SELECT %s%s%s ORDER BY m.ts %s, m.msg_id %s LIMIT ? OFFSET ?'
         % (MSG_COLUMNS, MSG_FROM, where, order, order),
         params + [limit, offset]).fetchall()
+    items = [message_json(r) for r in rows]
+    keyword = str(args.get('keyword') or '').strip().lower()
+    # Sources explain *why* a row matched, so they are only attached when there
+    # was a keyword. A plain listing should not sprout badges.
+    media = content_sources(conn, rows) if keyword else {}
+    for item in items:
+        entry = media.get((item['chatKind'], item['chatId'], int(item['id'])))
+        sources = list(entry['sources']) if entry else []
+        if keyword and keyword in str(item['text']).lower():
+            sources.insert(0, 'text')
+        if sources:
+            item['sources'] = sources
+        if entry and entry['snippet']:
+            item['snippet'] = entry['snippet']
     return {'total': total, 'offset': offset, 'limit': limit,
             'byChat': [{'kind': kind, 'id': str(chat_id),
                         'name': (name or '').strip() or str(chat_id),
                         'count': count}
                        for kind, chat_id, name, count in by_chat],
-            'rows': [message_json(r) for r in rows]}
+            'rows': items}
 
 
 def messages_around(conn, args, around):
