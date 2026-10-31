@@ -58,6 +58,35 @@ python3 -m venv ~/.venvs/qqnt
 不要用 `sudo pip` 或 `--break-system-packages` 把它装进系统 Python；Debian/Ubuntu 如果连
 `python3 -m venv` 都失败，先 `sudo apt install python3-venv`。
 
+## 可选组件（识别 / 转写 / 向量）
+
+截图识别、语音转写与语义检索各需要一组 Python 包，和 `sqlcipher3` 一样**只装进插件虚拟环境**。
+模型权重不在这里，网页「模型与组件」里点下载即可（OCR 15 MB、嵌入 24 MB、语音 78 MB）。
+
+```bash
+# Linux / macOS 上的写法；Windows 把 python 换成 venv 里的 Scripts\python.exe
+PY=~/.venvs/qqnt/bin/python
+
+# 截图识别
+$PY -m pip install rapidocr-onnxruntime
+
+# 语音转写（PyAV 解码 + sherpa-onnx 识别）
+$PY -m pip install av sherpa-onnx
+
+# 语义检索（嵌入）
+$PY -m pip install numpy onnxruntime tokenizers
+```
+
+装完不用重启插件：下一次任务会重新探测。为了省事也可以一开始就把六组一起装上：
+
+```bash
+$PY -m pip install sqlcipher3-wheels pyzipper rapidocr-onnxruntime av sherpa-onnx numpy onnxruntime tokenizers
+```
+
+体积参考：`onnxruntime` 约 15 MB（CPU 版），`rapidocr-onnxruntime` 约 30 MB（含自带权重），
+`sherpa-onnx` 约 20 MB，`av` 约 35 MB，`tokenizers` 约 10 MB。缺哪个组件时，任务会报错并直接给出
+上面那条 `pip install` 命令，不会静默跳过。
+
 ### Linux 取密钥的权限（重要）
 
 Linux 上数据库密钥同样只存在于 `qq` 主进程的内存里。读取 `/proc/<pid>/mem` 受内核
