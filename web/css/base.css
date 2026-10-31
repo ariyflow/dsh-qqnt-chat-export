@@ -237,3 +237,36 @@ a:hover { text-decoration: underline; }
 .job-actions .ghost { margin: 0; padding: 3px 8px; font-size: 12px; }
 .job-row.is-failed .job-meta { color: #d92d20; }
 .job-row.is-done .job-meta { color: var(--muted); }
+
+/* Model files: small table, destructive action on the right. */
+.models-view { padding: 16px 20px; }
+
+.models-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.model-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 4px 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.model-name { font-weight: 500; }
+.model-meta { grid-column: 1; color: var(--muted); font-size: 11px; }
+.model-actions { grid-row: 1 / span 2; grid-column: 3; }
+.model-actions .ghost { margin: 0; padding: 4px 10px; font-size: 12px; }
+.ghost.danger { border-color: #d92d20; color: #d92d20; }
+.ghost[disabled] { opacity: 0.6; cursor: default; }
+
+.app-nav { display: flex; align-items: center; gap: 12px; }
+.app-nav .ghost { margin: 0; padding: 3px 8px; font-size: 12px; }

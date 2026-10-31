@@ -30,6 +30,7 @@ export function makeElement(tagName) {
       },
     },
     setAttribute(name, value) { node.attributes[name] = value },
+    removeAttribute(name) { delete node.attributes[name] },
     append(...children) { node.children.push(...children) },
     replaceChildren(...children) { node.children = [...children] },
     remove() { node.removed = true },

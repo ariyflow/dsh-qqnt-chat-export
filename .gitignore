@@ -1,5 +1,7 @@
 # Local data the plugin produces or reads — never commit any of it.
 node_modules/
+.venv-dev/
+.venv/
 __pycache__/
 *.pyc
 

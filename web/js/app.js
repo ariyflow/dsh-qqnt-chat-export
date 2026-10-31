@@ -8,6 +8,7 @@
 import { ApiError, createApi } from './api.js'
 import { createStore } from './state.js'
 import { mountChats } from './views/chats.js'
+import { mountModels } from './views/models.js'
 import { mountJobs } from './views/jobs.js'
 
 const api = createApi()
@@ -61,13 +62,25 @@ store.subscribe(render)
 
 let unmount = null
 let unmountJobs = null
-/** Mount the reader once the first status arrives (or the index is absent). */
+// Deep link: `/app/?view=models` opens the model panel directly.
+let view = new URLSearchParams(location.search).get('view') === 'models' ? 'models' : 'chats'
+/** Mount the active view once the first status arrives (or the index is absent). */
 function mount() {
   if (!main) return
   if (typeof unmount === 'function') unmount()
-  unmount = mountChats(main, { api })
+  unmount = view === 'models' ? mountModels(main, { api }) : mountChats(main, { api })
   // The task panel floats over the reader so it survives view switches.
   if (!unmountJobs) unmountJobs = mountJobs(document.body, { api })
+}
+
+const toggle = document.getElementById('viewToggle')
+if (toggle) {
+  toggle.textContent = view === 'models' ? '回到会话' : '模型与组件'
+  toggle.addEventListener('click', () => {
+    view = view === 'models' ? 'chats' : 'models'
+    toggle.textContent = view === 'models' ? '回到会话' : '模型与组件'
+    mount()
+  })
 }
 
 async function refresh() {

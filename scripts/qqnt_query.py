@@ -1187,6 +1187,28 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
         raise
 
 
+def cmd_models(p, args):
+    """`status` / `remove` over the model files; never downloads."""
+    action = str(args.get('action') or 'status')
+    model_id = str(args.get('id') or '')
+    if action == 'remove':
+        if not model_id:
+            raise BadInput('缺少模型 id')
+        print(json.dumps(models.remove(p['work'], model_id), ensure_ascii=False))
+        return
+    if action == 'download':
+        if not model_id:
+            raise BadInput('缺少模型 id')
+        # Reached only through a user-initiated job; this is the one place in
+        # the sidecar that opens a socket.
+        print(json.dumps(models.ensure(p['work'], model_id, download=True),
+                         ensure_ascii=False))
+        return
+    print(json.dumps(models.status(p['work'], model_id or None,
+                                   verify=bool(args.get('verify'))),
+                     ensure_ascii=False))
+
+
 def cmd_ocr(p, args):
     """Recognize pending screenshots and print one JSON object per line.
 
@@ -2668,6 +2690,10 @@ def main(argv=None):
     # so a caller can show a percentage while the batch runs.
     s = sub.add_parser('ocr')
     s.add_argument('--json', default='{}')
+    # Model files: `status` lists them, `remove` frees the space. Downloading
+    # is deliberately not reachable from here; the web layer runs it as a job.
+    s = sub.add_parser('models')
+    s.add_argument('--json', default='{}')
     s = sub.add_parser('build')
     s.add_argument('--refresh', action='store_true')
     s.add_argument('--keep', type=int, default=DEFAULT_KEEP_ACCOUNTS,
@@ -2723,6 +2749,8 @@ def main(argv=None):
             run_export_command(p, json.loads(args.json))
         elif args.cmd == 'ocr':
             cmd_ocr(p, json.loads(args.json))
+        elif args.cmd == 'models':
+            cmd_models(p, json.loads(args.json))
     except BadInput as exc:
         # 参数错误走 400：只回一行可读原因，不泄漏调用栈
         print(json.dumps({'error': str(exc)}, ensure_ascii=False))

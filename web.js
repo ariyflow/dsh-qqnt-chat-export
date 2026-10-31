@@ -260,7 +260,7 @@ function runJson(settings, command, args = {}, { signal } = {}) {
     if (settings.account) argv.push('--account', String(settings.account))
     argv.push(command)
     if (command === 'messages' || command === 'export' || command === 'stats'
-      || command === 'media' || command === 'media-list') {
+      || command === 'media' || command === 'media-list' || command === 'models') {
       argv.push('--json', JSON.stringify(args))
     }
     if (command === 'select') {
@@ -807,9 +807,35 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
    * Kinds are registered by the caller: an unknown kind is a 400, not a
    * silently accepted task that never runs.
    */
+  /**
+   * Downloading a model is the only sidecar task that opens a socket, and it
+   * is only ever started from a user click. It runs as a job so a 230 MB
+   * fetch does not sit inside one HTTP request.
+   */
+  const downloadModel = async (job, ctx) => {
+    const argv = ['-X', 'utf8', queryCli(), '--work', settings.workDir, 'models',
+      '--json', JSON.stringify({ action: 'download', id: job.params.id })]
+    const child = spawn(settings.python, argv, { stdio: ['ignore', 'pipe', 'pipe'] })
+    let out = ''
+    child.stdout.on('data', (chunk) => { out += String(chunk) })
+    child.stderr.on('data', (chunk) => ctx.log(String(chunk).trim()))
+    const watch = setInterval(() => {
+      if (ctx.isCanceled()) child.kill()
+    }, 500)
+    try {
+      const code = await new Promise((resolve) => child.on('close', resolve))
+      if (ctx.isCanceled()) return { canceled: true }
+      if (code !== 0) throw new Error('模型下载失败')
+      return JSON.parse(out || '{}')
+    } finally {
+      clearInterval(watch)
+    }
+  }
+  const runners = Object.assign({ 'model-download': downloadModel },
+    options.runners && typeof options.runners === 'object' ? options.runners : {})
   const jobs = createJobQueue({
     settings,
-    runners: options.runners && typeof options.runners === 'object' ? options.runners : {},
+    runners,
     concurrency: Number(options.jobConcurrency) > 0 ? Number(options.jobConcurrency) : undefined,
   })
 
@@ -1493,6 +1519,44 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
           }
         })
         .catch(() => sendJson(res, 400, { error: '请求体无法解析' }))
+      return
+    }
+    if (pathname.startsWith('/api/models/')) {
+      const rest = pathname.slice('/api/models/'.length)
+      const slash = rest.indexOf('/')
+      const modelId = slash === -1 ? rest : rest.slice(0, slash)
+      const action = slash === -1 ? '' : rest.slice(slash + 1)
+      if (req.method === 'POST' && action === 'download') {
+        if (!isTrustedMutation(req)) {
+          sendJson(res, 403, { error: 'cross-origin requests are refused' })
+          return
+        }
+        try {
+          sendJson(res, 202, jobs.submit('model-download', {
+            summary: '下载模型', params: { id: modelId },
+          }))
+        } catch (error) {
+          sendJson(res, 400, { error: error.message })
+        }
+        return
+      }
+      if (req.method === 'DELETE' && action === '') {
+        if (!isTrustedMutation(req)) {
+          sendJson(res, 403, { error: 'cross-origin requests are refused' })
+          return
+        }
+        runJson(settings, 'models', { action: 'remove', id: modelId })
+          .then((payload) => sendJson(res, 200, payload))
+          .catch((error) => sendJson(res, 500, { error: error.message }))
+        return
+      }
+      sendJson(res, 404, { error: 'not found' })
+      return
+    }
+    if (req.method === 'GET' && pathname === '/api/models') {
+      runJson(settings, 'models', { action: 'status' })
+        .then((payload) => sendJson(res, 200, payload))
+        .catch((error) => sendJson(res, 500, { error: error.message }))
       return
     }
     if (pathname.startsWith('/api/jobs/')) {
