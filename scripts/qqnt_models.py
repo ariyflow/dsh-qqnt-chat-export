@@ -37,7 +37,10 @@ MODELS = {
         'pin': None,
         'feature': 'ocr',
     },
-    'bge-small-zh-v1.5-int8': {
+    # fp32: 24M parameters × 4 bytes ≈ 95 MB. An int8 build is about a quarter
+    # of that, but it has to be quantized locally; the id stays honest about
+    # which file the URL actually serves.
+    'bge-small-zh-v1.5': {
         'label': '中文嵌入模型（问答检索）',
         'size': 95 * 1024 * 1024,
         'license': 'MIT',
