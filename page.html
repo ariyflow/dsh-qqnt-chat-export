@@ -196,7 +196,17 @@
   .row:hover { background: var(--panel); }
   .row .time { color: var(--muted); font-size: 12px; white-space: nowrap; }
   .row .who { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .row .who .me { color: var(--out); font-size: 11px; border: 1px solid currentColor; border-radius: 4px; padding: 0 4px; margin-left: 6px; }
+  .row .who .src-badge {
+      margin-left: 6px;
+      padding: 0 6px;
+      border: 1px solid var(--line, #d8dce3);
+      border-radius: 999px;
+      color: var(--muted, #6b7280);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .me { color: var(--out); font-size: 11px; border: 1px solid currentColor; border-radius: 4px; padding: 0 4px; margin-left: 6px; }
   .row .msg { white-space: pre-wrap; word-break: break-word; }
   .row .msg.clamped { display: -webkit-box; -webkit-line-clamp: 10; -webkit-box-orient: vertical; overflow: hidden; }
   .row .msg .ph { color: var(--muted); background: var(--panel); border-radius: 4px; padding: 0 4px; }
@@ -1663,6 +1673,22 @@
       me.className = 'me'
       me.textContent = '我'
       who.appendChild(me)
+    }
+
+    // A hit can come from text recognized inside a screenshot or a voice
+    // message. Without this badge the row looks like a false positive: the
+    // keyword is nowhere in the message body.
+    if (Array.isArray(item.sources) && item.sources.length > 0) {
+      var sourceLabels = { ocr: '图片文字', asr: '语音转写' }
+      item.sources.forEach(function (source) {
+        var label = sourceLabels[source]
+        if (!label) return
+        var badge = document.createElement('span')
+        badge.className = 'src-badge'
+        badge.textContent = label
+        if (item.snippet) badge.title = String(item.snippet)
+        who.appendChild(badge)
+      })
     }
 
     var msg = document.createElement('div')
