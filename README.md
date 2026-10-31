@@ -4,7 +4,7 @@
 
 Read, search, and export NTQQ chat history from a DeepSeek Harness session or from a local web page, on Windows or Linux.
 
-![界面截图](docs/screenshot.png)
+![界面截图](docs/screenshot-app.png)
 
 > 截图使用虚构数据渲染，不含任何真实聊天内容。
 

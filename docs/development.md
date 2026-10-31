@@ -26,8 +26,7 @@ scripts/
 python/              可手工复现的 Python 环境声明（pyproject.toml、.python-version）
 locale/               en / zh 显示元数据
 tests/                Python / Node 回归测试
-docs/screenshot.png        界面截图（虚构数据）
-docs/screenshot-stats.png  统计面板截图（虚构数据）
+docs/screenshot-app.png    界面截图（虚构数据）
 docs/windows-checklist.md  Windows 12 项验收清单（步骤 / 预期 / 失败先看哪里 / 实测）
 docs/verification-windows.md  某一轮 Windows 全量验证的实测记录
 ```
