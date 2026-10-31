@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -49,9 +50,21 @@ derived.ensure(derived_path)
 embed.run(index, derived_path, None)
 `
 
+/** A port the OS just handed out, so a running dev server cannot collide. */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer()
+    probe.once('error', reject)
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address()
+      probe.close(() => resolve(port))
+    })
+  })
+}
+
 async function startServer(settings, options) {
   for (let attempt = 0; attempt < 6; attempt += 1) {
-    const port = 24000 + Math.floor(Math.random() * 4000)
+    const port = await freePort()
     const server = startWebServer(settings, port, '127.0.0.1', options)
     try {
       await server.ready
