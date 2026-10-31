@@ -257,7 +257,7 @@ def _chats_for(index, chats):
 
 
 def run(index_path, derived_path, embedder=None, model=DEFAULT_MODEL,
-        limit=None, progress=None, force=False, chats=None):
+        limit=None, progress=None, force=False, chats=None, ann_path=None):
     """Chunk every chat and embed new chunks into the derived store.
 
     Work is incremental per chat: a chat whose last chunk already covers its
@@ -276,6 +276,7 @@ def run(index_path, derived_path, embedder=None, model=DEFAULT_MODEL,
     @param progress - called with (done_chats, total_chats, message)
     @param force - re-chunk every chat even when it looks up to date
     @param chats - optional [(chat_kind, chat_id)] restriction
+    @param ann_path - optional `vectors.usearch` to refresh when the vectors changed
     @returns stats dict
     """
     if not os.path.exists(derived_path):
@@ -388,6 +389,20 @@ def run(index_path, derived_path, embedder=None, model=DEFAULT_MODEL,
     finally:
         dconn.close()
         index.close()
+    # The ANN file is a cache: refresh it only when vectors changed or it is
+    # missing, and never let its failure fail the job.
+    if ann_path and (stats['vectors'] > 0 or not os.path.exists(ann_path)):
+        try:
+            import qqnt_ann as ann
+            report = ann.rebuild(derived_path, ann_path,
+                                 progress=(lambda text: progress(total, total, text))
+                                 if progress else None)
+            if report.get('ok'):
+                stats['ann'] = report.get('built', 0)
+            else:
+                stats['annError'] = report.get('error', '')
+        except Exception as exc:      # noqa: BLE001 - acceleration is optional
+            stats['annError'] = str(exc)
     stats['seconds'] = int(time.time() - started)
     if progress:
         progress(total, total, '完成：%d 块，%d 个向量' % (stats['chunks'], stats['vectors']))

@@ -1316,7 +1316,8 @@ def cmd_chunks(p, args):
 
     stats = embed.run(p['index'], p['derived'], embedder,
                       model=embed.DEFAULT_MODEL, limit=args.get('limit'),
-                      progress=progress, force=truthy(args.get('force')))
+                      progress=progress, force=truthy(args.get('force')),
+                      ann_path=os.path.join(p['work'], 'vectors.usearch'))
     stats['ok'] = True
     if note:
         stats['note'] = note
@@ -1381,7 +1382,8 @@ def cmd_ask(p, args):
     try:
         embedder, note = load_embedder(p)
         result = retrieve_mod.retrieve(conn, p['derived'], question, embedder=embedder,
-                                       top_k=top, filters=ask_filters(args))
+                                       top_k=top, filters=ask_filters(args),
+                                       ann_path=os.path.join(p['work'], 'vectors.usearch'))
     finally:
         conn.close()
     notes = list(result['notes'])
@@ -1407,7 +1409,8 @@ def cmd_recall(p, args):
     try:
         embedder, note = load_embedder(p)
         result = retrieve_mod.retrieve(conn, p['derived'], query, embedder=embedder,
-                                       top_k=top, filters=ask_filters(args))
+                                       top_k=top, filters=ask_filters(args),
+                                       ann_path=os.path.join(p['work'], 'vectors.usearch'))
     finally:
         conn.close()
     notes = list(result['notes'])

@@ -77,12 +77,15 @@ $PY -m pip install av sherpa-onnx
 
 # 语义检索（嵌入）
 $PY -m pip install numpy onnxruntime tokenizers
+
+# 可选：向量近邻加速（几十万段以上才有明显收益）
+$PY -m pip install usearch
 ```
 
 装完不用重启插件：下一次任务会重新探测。为了省事也可以一开始就把六组一起装上：
 
 ```bash
-$PY -m pip install sqlcipher3-wheels pyzipper rapidocr-onnxruntime av sherpa-onnx numpy onnxruntime tokenizers
+$PY -m pip install sqlcipher3-wheels pyzipper rapidocr-onnxruntime av sherpa-onnx numpy onnxruntime tokenizers usearch
 ```
 
 体积参考：`onnxruntime` 约 15 MB（CPU 版），`rapidocr-onnxruntime` 约 30 MB（含自带权重），

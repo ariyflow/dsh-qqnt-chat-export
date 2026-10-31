@@ -283,8 +283,37 @@ def _stamp(ts):
         return ''
 
 
+def _filtered_chunk_count(dconn, filters):
+    clauses, params = _filters(filters)
+    sql = 'SELECT count(*) FROM chunks c'
+    if clauses:
+        sql += ' WHERE ' + ' AND '.join(clauses)
+    try:
+        return int(dconn.execute(sql, params).fetchone()[0])
+    except Exception:      # noqa: BLE001
+        return 0
+
+
+def _ann_candidates(dconn, ann_path, query_vec, filters, limit):
+    """ANN ids, re-checked against the filters and the chunk table."""
+    import qqnt_ann as ann
+    raw = ann.search(ann_path, query_vec, limit)
+    if not raw:
+        return [], False
+    ids = [chunk_id for chunk_id, _score in raw]
+    clauses, params = _filters(filters)
+    sql = ('SELECT id FROM chunks WHERE id IN (%s)' % ','.join('?' * len(ids)))
+    if clauses:
+        sql += ' AND ' + ' AND '.join(clauses)
+    try:
+        allowed = {int(row[0]) for row in dconn.execute(sql, ids + params)}
+    except Exception:      # noqa: BLE001
+        return [], False
+    return [(chunk_id, 0.0) for chunk_id in ids if chunk_id in allowed], True
+
+
 def retrieve(index_conn, derived_path, query, embedder=None, top_k=8,
-             filters=None, per_side=PER_SIDE):
+             filters=None, per_side=PER_SIDE, ann_path=None):
     """Question → ranked chunks with citations.
 
     @param index_conn - connection to `index.sqlite`
@@ -312,10 +341,25 @@ def retrieve(index_conn, derived_path, query, embedder=None, top_k=8,
                 notes.append('没有唯一匹配的会话「%s」，已按全部会话检索' % filters['chat'])
         keyword = keyword_chunks(dconn, query, per_side, filters)
         vector = []
+        used_ann = False
         if embedder is not None:
             try:
                 query_vec = embedder([query])[0]
-                vector = vector_chunks(dconn, query_vec, per_side, filters)
+                if ann_path:
+                    import qqnt_ann as ann
+                    if ann.usable(derived_path, ann_path, dconn):
+                        vector, used_ann = _ann_candidates(
+                            dconn, ann_path, query_vec, filters, per_side)
+                        # A restrictive filter can starve an ANN top-K; the scan
+                        # is the reference answer, so fall back rather than return
+                        # an artificially short ranking. `expected` is what the
+                        # scan could have returned at most.
+                        expected = _filtered_chunk_count(dconn, filters)
+                        if len(vector) < min(per_side, expected):
+                            vector = vector_chunks(dconn, query_vec, per_side, filters)
+                            used_ann = False
+                if not used_ann:
+                    vector = vector_chunks(dconn, query_vec, per_side, filters)
             except Exception as exc:      # noqa: BLE001 - degrade, never fail the ask
                 notes.append('向量检索不可用：%s' % exc)
         else:
@@ -337,7 +381,7 @@ def retrieve(index_conn, derived_path, query, embedder=None, top_k=8,
             if hit:
                 hits.append(hit)
         return {'hits': hits, 'notes': notes, 'keyword': len(keyword),
-                'vector': len(vector)}
+                'vector': len(vector), 'ann': used_ann}
     finally:
         dconn.close()
 
