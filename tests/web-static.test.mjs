@@ -132,15 +132,18 @@ test('traversal and unlisted extensions are refused', async () => {
   }
 })
 
-test('the legacy page keeps its inline-script CSP', async () => {
+test('the root serves the modular UI with the strict CSP', async () => {
   const dir = await tempDir()
   const { server, base } = await startServer({ python: process.execPath, workDir: dir })
   try {
     const response = await fetch(`${base}/`)
     assert.equal(response.status, 200)
     const csp = response.headers.get('content-security-policy')
-    assert.match(csp, /script-src 'unsafe-inline'/)
-    assert.match(await response.text(), /QQ/)
+    assert.match(csp, /script-src 'self'/)
+    assert.doesNotMatch(csp, /script-src[^;]*unsafe-inline/)
+    assert.match(csp, /default-src 'none'/)
+    const html = await response.text()
+    assert.match(html, /id="app-main"/)
   } finally {
     await server.close()
     await rm(dir, { recursive: true, force: true })

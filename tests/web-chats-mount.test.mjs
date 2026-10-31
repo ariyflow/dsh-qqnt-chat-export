@@ -420,3 +420,44 @@ test('pin, rename and hide go through /api/chats/state', async () => {
     restore()
   }
 })
+
+test('a cross-chat hit opens its conversation at that message', async () => {
+  const restore = installDocument()
+  const calls = []
+  const api = {
+    get: async (path, params) => {
+      calls.push({ path, params })
+      if (path === '/api/sessions') return { sessions }
+      if (params && params.keyword) {
+        return {
+          total: 1,
+          rows: [{
+            ts: 1730000000, sender: '小林', text: '命中', keyword: 'x',
+            chatKind: 'private', chatId: 'u_abc', chatName: '小林', rowId: 77,
+          }],
+        }
+      }
+      return { rows, total: 2 }
+    },
+  }
+  const root = makeElement('main')
+  const cleanup = mountChats(root, { api })
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const shell = root.children[0]
+    const form = findByClass(shell, 'chat-search')
+    findByClass(form, 'chat-search-input').value = '命中'
+    form.dispatch('submit')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    findByClass(shell, 'msg-list').children[0].dispatch('click')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const last = calls.at(-1)
+    assert.equal(last.path, '/api/messages')
+    assert.equal(last.params.chatId, 'u_abc')
+    assert.equal(last.params.around, 77)
+  } finally {
+    cleanup()
+    restore()
+  }
+})

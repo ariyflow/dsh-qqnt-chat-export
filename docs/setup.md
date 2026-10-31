@@ -7,14 +7,14 @@
   - Windows 数据目录：`%USERPROFILE%\Documents\Tencent Files\<QQ号>\nt_qq\`
   - Linux 数据目录：`~/.config/QQ/nt_qq_<hash>\`
     （Flatpak 为 `~/.var/app/com.qq.QQ/config/QQ/`，Snap 为 `~/snap/qq/current/.config/QQ/`）
-- 64 位 Python 3；`sqlcipher3` **装在这个插件自己的虚拟环境里** 即可；密码 ZIP 另外需要同一环境里的 `pyzipper`（一键安装会一起装）。网页启动横幅提供一键配置，不需要也不建议装进系统 Python。
+- 64 位 Python 3；`sqlcipher3` **装在这个插件自己的虚拟环境里** 即可；密码 ZIP 另外需要同一环境里的 `pyzipper`（一键安装会一起装）。网页「设置 → 运行环境」提供一键配置，不需要也不建议装进系统 Python。
 - 可选：[uv](https://docs.astral.sh/uv/)（推荐）。装了就自动优先用它——它自带 Python 下载，能绕开系统 Python 版本不对或缺少 `python3-venv` 的问题；没装则退回 `venv + pip`。插件**不会**替你下载 uv。
 
 > Windows 与 Linux 共用同一套导出/查询脚本：Windows 走 `ctypes` + `ReadProcessMemory`，
 > Linux 走 `/proc/<pid>/mem`；两边的默认数据目录、默认 Python 解释器和进程名分别适配，
 > Windows 原有的行为和配置默认值保持不变。
 
-**推荐**：打开网页，用启动横幅或「设置」里的「默认源安装」/「清华镜像安装」。它会在
+**推荐**：打开网页，进「设置 → 运行环境」，点「默认源安装」或「清华镜像安装」。它会在
 `~/.local/share/dsh-qqnt-chat-export/venv`（Windows 为 `%LOCALAPPDATA%\dsh-qqnt-chat-export\venv`）
 创建独立虚拟环境并安装 `sqlcipher3-wheels`（以及可选但推荐的 `pyzipper`，用于密码 ZIP），然后自动切换插件使用的解释器。
 
@@ -115,9 +115,10 @@ kernel.yama.ptrace_scope = 0
 被拒绝时 `qqnt_extract_key` 也会打印同样的修复命令。
 
 
-## 环境安装与启动横幅
+## 环境安装
 
-插件启动网页服务后，页面打开时会显示一次启动横幅（按网页服务启动时间区分，关闭提示后同一次启动不再打扰）。同一个地址也会写进 DSH 的系统提示和启动日志，Agent 可以直接告诉你；
+插件启动网页服务后，「设置 → 运行环境」显示解释器、`sqlcipher3`、`pyzipper` 的状态与一键安装入口。
+网页地址也会写进 DSH 的系统提示和启动日志，Agent 可以直接告诉你；
 
 - **默认访问地址**：显示当前实际访问 URL，并提供复制按钮；模型侧也会拿到同一个 URL，可直接问 agent。
 - **环境检查**：显示 Python 版本、`sqlcipher3` 是否可用、密码 ZIP 所需的 `pyzipper` 是否可用。缺 `sqlcipher3` 时提供两个按钮：
@@ -128,7 +129,7 @@ kernel.yama.ptrace_scope = 0
   - 只在这个虚拟环境里执行 `uv pip install` / `pip install sqlcipher3-wheels pyzipper`（镜像模式加 `--index-url`），**不修改系统 Python**；
   - 完成后自动把设置里的 Python 解释器切过去并持久化；
   - 页面实时显示安装源、步骤、耗时和日志；已有可用虚拟环境时直接复用；一个源失败可以直接换另一个重试。
-- **密钥检查**：环境就绪且未配置时，启动横幅和设置页「数据库密钥」卡片都会显示「提取密钥」按钮：
+- **密钥检查**：环境就绪且未配置时，设置页「数据库密钥」卡片会显示「提取密钥」按钮：
   - 点击后在后台运行 `qqnt_export.py key`，页面显示步骤、耗时和日志；开始前会提示查找密钥耗时较长（通常 1~3 分钟），请耐心等待；
   - 成功后自动隐藏按钮并标记已配置；已配置时设置页显示「重新提取密钥」；
   - 日志里的密钥会自动隐去；SQLCipher 逐候选项噪声折叠成计数；

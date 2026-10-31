@@ -699,38 +699,25 @@ test('session aliases, pins and hidden chats merge in the web layer', async () =
   }
 })
 
-test('the served page contains the startup checklist and key action', async () => {
+test('the served page is the modular UI, not the removed single file', async () => {
   const dir = await tempDir()
   const { server, base } = await startServer({ python: process.execPath, workDir: dir }, {})
   try {
-    const html = await (await fetch(`${base}/`)).text()
-    assert.match(html, /id="startupKeyBtn"/)
-    assert.match(html, /id="startupSetup"/)
-    assert.match(html, /location\.origin/)
-    // 0.9.0 controls: batch selection, redaction, media and the stats panel.
-    assert.match(html, /id="batchBar"/)
-    assert.match(html, /id="batchExport"/)
-    assert.match(html, /id="redact"/)
-    assert.match(html, /id="media"/)
-    assert.match(html, /id="embed"/)
-    assert.match(html, /id="split"/)
-    assert.match(html, /id="keywordHistory"/)
-    assert.match(html, /id="zipPassword"/)
-    assert.match(html, /id="csvCols"/)
-    assert.match(html, /id="frontMatter"/)
-    assert.match(html, /id="statsCsv"/)
-    assert.match(html, /id="statsBtn"/)
-    assert.match(html, /id="statsPanel"/)
-    assert.match(html, /id="senderRegex"/)
-    assert.match(html, /id="galleryBtn"/)
-    assert.match(html, /id="galleryDialog"/)
-    assert.match(html, /id="mediaDialog"/)
-    // 0.10.1 saved searches, per-chat hit chips and the stats heatmap.
-    assert.match(html, /id="savedBox"/)
-    assert.match(html, /id="saveSearch"/)
-    assert.match(html, /id="chatHits"/)
-    assert.match(html, /class="heat"/)
+    const response = await fetch(`${base}/`)
+    assert.equal(response.status, 200)
+    const html = await response.text()
+    // The root and /app/ are the same page; the old inline page is gone.
+    assert.match(html, /id="app-main"/)
+    assert.match(html, /id="syncBtn"/)
     assert.match(html, /id="accountSelect"/)
+    assert.match(html, /id="viewAsk"/)
+    assert.match(html, /id="ocrBtn"/)
+    assert.match(html, /src="\/app\/js\/app\.js"/)
+    assert.match(html, /href="\/app\/css\/base\.css"/)
+    assert.doesNotMatch(html, /id="startupKeyBtn"/)
+    assert.doesNotMatch(html, /<script>/)
+    const csp = response.headers.get('content-security-policy')
+    assert.match(csp, /script-src 'self'/)
   } finally {
     await server.close()
     await rm(dir, { recursive: true, force: true })

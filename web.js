@@ -17,18 +17,16 @@ import { createServer } from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createExportQueue, MAX_CONCURRENT } from './exportQueue.js'
 import { createJobQueue } from './jobs.js'
 import { readPresets, writePresets } from './presets.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const QUERY_CLI = path.join(HERE, 'scripts', 'qqnt_query.py')
-const PAGE = path.join(HERE, 'page.html')
 /**
- * The modular UI lives in `web/` and is served under `/app/`.
+ * The UI lives in `web/` and is served under `/app/` (and at `/`).
  *
- * `page.html` stays the default until the port reaches parity, so this server
- * is purely additive: nothing that resolved before can resolve differently.
+ * It is the only frontend: the single-file `page.html` was removed once the
+ * modular views reached parity, so there is no second copy to keep in step.
  */
 const WEB_DIR = path.join(HERE, 'web')
 const STATIC_ROOT = '/app/'
@@ -473,16 +471,6 @@ function chatsFromBody(value) {
   })
 }
 
-function safeFileStem(text) {
-  return String(text).replace(/[\\/:*?"<>|\r\n\t]+/g, '_').replace(/^\.+/, '').trim().slice(0, 60) || 'QQ聊天记录'
-}
-
-function stamp() {
-  const now = new Date()
-  const pad = (n) => String(n).padStart(2, '0')
-  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`
-}
-
 /** One file's size/mtime, in the shape the page already reads. */
 function fileInfo(file) {
   try {
@@ -807,9 +795,6 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
   ready.catch(() => {})       // callers that ignore ready must not crash the process
   if (!port) return { close: async () => {}, url: '', error: undefined, ready: Promise.resolve('') }
 
-  // Long exports belong to a queue, not to one request: parsing a 1.2M-row
-  // account takes minutes and used to be cut at the 180-second timeout.
-  const queue = createExportQueue({ settings, queryCli: queryCli() })
   /**
    * Long jobs for the ported features (OCR, speech, embedding, archiving).
    * Kinds are registered by the caller: an unknown kind is a 400, not a
@@ -847,14 +832,6 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
     concurrency: Number(options.jobConcurrency) > 0 ? Number(options.jobConcurrency) : undefined,
   })
 
-  let pageHtml = ''
-  try {
-    pageHtml = readFileSync(PAGE, 'utf8')
-  } catch (error) {
-    state.error = new Error(`page.html is missing: ${error.message}`)
-    rejectReady(state.error)
-    return { close: async () => {}, url: state.url, error: state.error, ready }
-  }
 
   const server = createServer((req, res) => {
     const hostHeader = String(req.headers.host ?? '')
@@ -869,20 +846,17 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
     const pathname = requestUrl.pathname
     const params = requestUrl.searchParams
 
+    // The modular UI is the only UI now: `/` serves `web/index.html` directly,
+    // so bookmarks and the sidebar panel keep working without a redirect.
     if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
-      res.writeHead(200, {
-        'content-type': 'text/html; charset=utf-8',
-        'cache-control': 'no-store',
-        'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; media-src 'self'",
-      })
-      res.end(pageHtml)
+      serveStatic(req, res, `${STATIC_ROOT}index.html`)
       return
     }
     if (pathname === '/favicon.ico') {
       res.writeHead(204).end()
       return
     }
-    // New UI, additive: `/app/` serves `web/`, `/` keeps serving page.html.
+    // Same UI under `/app/` for links and deep links (`?view=…`).
     if (req.method === 'GET' && pathname === '/app') {
       res.writeHead(308, { location: `${STATIC_ROOT}`, 'cache-control': 'no-store' }).end()
       return
@@ -976,11 +950,7 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
           }
           return handlers.cleanupStorage(body.ids)
         })
-        .then((result) => {
-          // The cleanup may have deleted a finished export's file.
-          queue.revalidate()
-          sendJson(res, 200, result)
-        })
+        .then((result) => sendJson(res, 200, result))
         .catch((error) => sendJson(res, error.status ?? 400, { error: error.message }))
       return
     }
@@ -1293,52 +1263,6 @@ function exportRequest(body) {
   return { args, label, format: container, innerFormat, password }
 }
 
-    if (req.method === 'POST' && pathname === '/api/export/queue') {
-      if (!isTrustedMutation(req)) {
-        sendJson(res, 403, { error: 'cross-origin requests are refused' })
-        return
-      }
-      readJsonBody(req)
-        .then((body) => {
-          const request = exportRequest(body)
-          const queued = queue.enqueue(request.args, {
-            label: request.label,
-            format: request.format,
-            innerFormat: request.innerFormat,
-            password: request.password,
-          })
-          if (!queued) {
-            throw Object.assign(new Error(
-              `最多同时 ${MAX_CONCURRENT} 个导出任务，等一个完成再试`), { status: 429 })
-          }
-          sendJson(res, 202, { id: queued.id, task: queued })
-        })
-        .catch((error) => sendJson(res, error.status ?? 500, { error: error.message }))
-      return
-    }
-    if (req.method === 'GET' && pathname === '/api/export/queue') {
-      sendJson(res, 200, queue.list())
-      return
-    }
-    const cancelMatch = /^\/api\/export\/queue\/([0-9a-z]+)\/cancel$/.exec(pathname)
-    if (req.method === 'POST' && cancelMatch) {
-      if (!isTrustedMutation(req)) {
-        sendJson(res, 403, { error: 'cross-origin requests are refused' })
-        return
-      }
-      const id = cancelMatch[1]
-      if (!queue.get(id)) {
-        sendJson(res, 404, { error: '没有这个导出任务' })
-        return
-      }
-      const cancelled = queue.cancel(id)
-      if (!cancelled) {
-        sendJson(res, 409, { error: '这个任务已经结束' })
-        return
-      }
-      sendJson(res, 200, { task: cancelled })
-      return
-    }
     if (pathname === '/api/presets' && req.method === 'GET') {
       sendJson(res, 200, { presets: readPresets(settings.workDir) })
       return
@@ -1360,51 +1284,6 @@ function exportRequest(body) {
       return
     }
 
-    if (req.method === 'GET' && pathname.startsWith('/api/export/queue/')) {
-      const rest = pathname.slice('/api/export/queue/'.length)
-      const match = /^([0-9a-z]+)(\/file)?$/.exec(rest)
-      if (!match) {
-        sendJson(res, 404, { error: 'not found' })
-        return
-      }
-      const task = queue.get(match[1])
-      if (!match[2]) {
-        // Polling one task: return its state even while it is still running.
-        if (!task) {
-          sendJson(res, 404, { error: '没有这个导出任务（可能已被清理）' })
-          return
-        }
-        sendJson(res, 200, { task })
-        return
-      }
-      const found = queue.file(match[1])
-      if (!found) {
-        sendJson(res, task ? 409 : 404, {
-          error: task
-            ? (task.state === 'gone'
-              ? '导出文件已清理（导出目录只保留一小时）'
-              : '导出还没有完成')
-            : '没有这个导出任务（可能已被清理）',
-        })
-        return
-      }
-      const filename = `${safeFileStem(found.task.label)}_${stamp()}.${found.task.format}`
-      res.writeHead(200, {
-        'content-type': found.task.format === 'html'
-          ? 'text/html; charset=utf-8' : 'application/octet-stream',
-        'content-disposition':
-          `attachment; filename="qqnt-export-${Date.now()}.${found.task.format}"; ` +
-          `filename*=UTF-8''${encodeURIComponent(filename)}`,
-        'cache-control': 'no-store',
-      })
-      const stream = createReadStream(found.path)
-      stream.on('error', () => {
-        if (!res.headersSent) sendJson(res, 500, { error: '导出文件不可读' })
-        else res.end()
-      })
-      stream.pipe(res)
-      return
-    }
     // Exports as generic jobs: the file is written under exports/<job id>--<label>
     // and downloaded later through `/api/jobs/<id>/download`.
     if (req.method === 'POST' && pathname === '/api/export') {
@@ -1420,46 +1299,6 @@ function exportRequest(body) {
             params: request,
           })
           sendJson(res, 202, job)
-        })
-        .catch((error) => sendJson(res, error.status ?? 500, { error: error.message }))
-      return
-    }
-    if (req.method === 'GET' && pathname === '/api/export') {
-      const format = (params.get('format') || 'txt').toLowerCase()
-      const allowed = new Set(['txt', 'csv', 'json', 'md', 'html', 'sqlite'])
-      if (!allowed.has(format)) {
-        sendJson(res, 400, { error: `unsupported format: ${format}` })
-        return
-      }
-      const label = params.get('label') || 'QQ聊天记录'
-      const outDir = path.join(settings.workDir, 'exports')
-      const outPath = path.join(outDir, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${format}`)
-      const args = { ...filtersFrom(params), format, out: outPath, label }
-      runJson(settings, 'export', args)
-        .then((result) => {
-          const filename = `${safeFileStem(label)}_${stamp()}.${format}`
-          const headers = {
-            'content-type': format === 'html' ? 'text/html; charset=utf-8' : 'application/octet-stream',
-            'content-disposition':
-              `attachment; filename="qqnt-export-${Date.now()}.${format}"; ` +
-              `filename*=UTF-8''${encodeURIComponent(filename)}`,
-            'cache-control': 'no-store',
-          }
-          if (Number.isFinite(result.bytes)) headers['content-length'] = String(result.bytes)
-          res.writeHead(200, headers)
-          const stream = createReadStream(result.path)
-          stream.on('error', () => {
-            if (!res.headersSent) sendJson(res, 500, { error: 'export file unreadable' })
-            else res.end()
-          })
-          stream.pipe(res)
-          res.on('close', () => {
-            try {
-              unlinkSync(result.path)
-            } catch {
-              // Already removed.
-            }
-          })
         })
         .catch((error) => sendJson(res, error.status ?? 500, { error: error.message }))
       return
@@ -1738,7 +1577,6 @@ function exportRequest(body) {
   server.listen(port, host, () => {
     console.log(`[qqnt-chat-export] web UI listening on ${state.url}`)
     sweepExports(path.join(settings.workDir, 'exports'))
-    queue.revalidate()
     resolveReady(state.url)
   })
   state.server = server
@@ -1750,7 +1588,6 @@ function exportRequest(body) {
     },
     ready,
     close: () => new Promise((resolve) => {
-      queue.close()
       jobs.shutdown()
       if (!server.listening) {
         resolve()

@@ -17,7 +17,7 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
 - **问得清问题**：把会话切成带上下文的片段并做本地嵌入，`qqnt_ask` 返回「最可能回答这个问题的几段对话 + 引用」，答案由宿主模型（或你自己）来写，引用永远能点回原文；不装嵌入模型也能用关键词检索；
 - **分享与保护**：昵称 / QQ 脱敏、媒体打包、按天分文件、AES-256 密码 ZIP；
 - **DSH 侧边栏面板**：左侧栏多一个「QQ 聊天记录」图标，主区直接打开同一个页面，不用切浏览器标签。
-- **模块化界面（预览）**：`/app/` 下是重写中的界面（会话列表、消息阅读、问答、模型与组件、后台任务面板），旧页面仍是默认入口，功能一致前不会切换。
+- **界面**：会话列表与阅读、搜索、问答、导出、统计、模型与组件、设置、任务面板全在同一个单页应用里（`/` 与 `/app/` 是同一页，无构建步骤）。
 
 ![新界面](docs/screenshot-app.png)
 
@@ -54,15 +54,15 @@ dsh plugin --profile web remove dsh-qqnt-chat-export
 
 **第一次**（QQ 保持登录，别关）：
 
-1. 打开网页（默认 `http://127.0.0.1:46728/`）。启动横幅会检查 Python / sqlcipher3 / pyzipper / 密钥；
+1. 打开网页（默认 `http://127.0.0.1:46728/`），进「设置」看运行环境；
 2. 缺依赖时点「默认源安装」或「清华镜像安装」，等独立虚拟环境装好（不碰系统 Python）；
 3. 点「提取密钥」—— **首次约 1~3 分钟，请耐心等待**，期间保持 QQ 登录；也可以在对话里运行 `qqnt_extract_key`；
-4. 点「建立索引」，约 1 分钟；
+4. 回到顶栏点「从 QQ 同步」，约 1 分钟建好索引；
 5. 之后随便查、随便导。
 
 **以后**：默认每 60 分钟自动同步一次（设置页可关或改间隔），也可以随时点「从 QQ 同步」。同步会连 `-wal`/`-shm` 一起复制并回放，所以 QQ 一直开着也能拿到最新几条；没有新消息时不重建索引，源库出现删除、回溯或换账号时按数量校验退回全量重建。
 
-环境安装、启动横幅、设置项与清理的细节见 [docs/setup.md](docs/setup.md)。
+环境安装、设置项与清理的细节见 [docs/setup.md](docs/setup.md)。
 
 ## 工具
 
@@ -111,7 +111,7 @@ dsh plugin --profile web remove dsh-qqnt-chat-export
 ## 文档
 
 - [docs/features.md](docs/features.md) — 网页界面、侧边栏面板、导出选项
-- [docs/setup.md](docs/setup.md) — 安装环境、启动横幅、设置与清理、Linux ptrace
+- [docs/setup.md](docs/setup.md) — 安装环境、设置与清理、Linux ptrace
 - [docs/configuration.md](docs/configuration.md) — `cordis.patch.yml` 字段与设置项
 - [docs/security.md](docs/security.md) — 隐私与安全、诊断包字段
 - [docs/limitations.md](docs/limitations.md) — 已知限制与注意事项

@@ -41,8 +41,17 @@ export function exportBody(state) {
     format: String(state?.format || 'txt'),
     redact: String(state?.redact || ''),
   }
-  if (Array.isArray(state?.chats) && state.chats.length > 0) body.chats = state.chats.slice()
-  else if (state?.chat) body.chats = [state.chat]
+  // One chat is a filter (and a plain file); several are a batch (and a ZIP).
+  const chats = Array.isArray(state?.chats) ? state.chats : []
+  if (chats.length > 1) {
+    body.chats = chats.slice()
+  } else {
+    const single = chats.length === 1 ? chats[0] : state?.chat
+    if (single) {
+      body.chatKind = single.kind
+      body.chatId = single.id
+    }
+  }
   if (String(state?.keyword || '').trim() !== '') body.keyword = String(state.keyword).trim()
   if (String(state?.sender || '').trim() !== '') body.sender = String(state.sender).trim()
   if (String(state?.since || '').trim() !== '') body.since = String(state.since).trim()

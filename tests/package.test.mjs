@@ -15,7 +15,7 @@ const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 /** Modules npm ships as the plugin's Node half. */
 const SHIPPED_MODULES = [
   'index.js', 'client.js', 'web.js', 'settings.js',
-  'storage.js', 'exportQueue.js', 'presets.js',
+  'storage.js', 'jobs.js', 'runners.js', 'presets.js',
 ]
 
 /** `npm pack --dry-run --json` is offline and returns the exact file list. */

@@ -592,6 +592,16 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
           chat.textContent = row.chatName
           item.children[0].append(chat)
         }
+        // A cross-chat hit opens its own conversation at this message; the
+        // row id is the index id `around` expects.
+        if (row.chatKind && row.chatId && row.rowId !== undefined) {
+          item.classList.add('is-clickable')
+          item.addEventListener('click', () => {
+            const session = state.sessions.find((entry) =>
+              entry.kind === row.chatKind && String(entry.id) === String(row.chatId))
+            if (session) select(session, Number(row.rowId))
+          })
+        }
         messages.append(item)
       }
     } catch (error) {

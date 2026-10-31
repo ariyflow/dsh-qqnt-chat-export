@@ -35,7 +35,8 @@ test('exportBody keeps only the values the server needs', () => {
   assert.deepEqual(body, {
     format: 'csv',
     redact: 'names',
-    chats: [{ kind: 'group', id: '123', label: '示例课程群' }],
+    chatKind: 'group',
+    chatId: '123',
     keyword: '开会',
     since: '2026-01-01',
     media: true,
@@ -91,8 +92,9 @@ test('submitting the form posts one export job for the chosen chat', async () =>
     assert.equal(posted.length, 1)
     assert.equal(posted[0].path, '/api/export')
     assert.equal(posted[0].body.format, 'txt')
-    assert.deepEqual(posted[0].body.chats,
-      [{ kind: 'group', id: '123', label: '示例课程群' }])
+    assert.equal(posted[0].body.chatKind, 'group')
+    assert.equal(posted[0].body.chatId, '123')
+    assert.equal(posted[0].body.chats, undefined)
     assert.match(textOf(root), /已加入导出队列/)
   } finally {
     cleanup()

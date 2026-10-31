@@ -21,6 +21,9 @@ export function makeElement(tagName) {
     hidden: false,
     type: '',
     placeholder: '',
+    value: '',
+    checked: false,
+    dataset: {},
     children: [],
     attributes: {},
     classList: {

@@ -26,11 +26,11 @@
 | `http://127.0.0.1:46728/api/diagnostics` | 解释器、`sqlcipher3`/`pyzipper`、路径、表结构指纹与缺失列；设置页「诊断」卡片是它的视图 |
 | 插件进程 stderr | DSH 启动日志里以 `[qqnt-chat-export]` 开头的行（网页监听、构建、密钥提取） |
 
-## 1. 安装、启用与启动横幅
+## 1. 安装、启用与运行环境
 
 | | |
 |---|---|
-| 步骤 | 1. 安装/更新插件，在 DSH 插件列表启用。<br>2. 打开网页地址，首次会看到启动横幅。<br>3. 设置页 →「诊断」卡片，确认系统/Python/`sqlcipher3`/`pyzipper`/数据目录/账号/表结构都读到。<br>4. 点「下载诊断包」，用记事本或 `json.loads` 打开。<br>5. 刷新页面，确认启动横幅不再重复出现。 |
+| 步骤 | 1. 安装/更新插件，在 DSH 插件列表启用。<br>2. 打开网页地址，进「设置」看运行环境。<br>3. 设置页 →「诊断」卡片，确认系统/Python/`sqlcipher3`/`pyzipper`/数据目录/账号/表结构都读到。<br>4. 点「下载诊断包」，用记事本或 `json.loads` 打开。<br>5. 刷新页面，确认设置卡片数值稳定。 |
 | 预期 | 横幅逐项打勾（Python、`sqlcipher3`、密钥、索引），一次后不再弹；诊断卡片没有红色行，表结构显示 12 位指纹与「全部存在」；诊断包是单个 JSON，`version/generatedAt/platform/paths/schema/index/build/sync/deps/storage/errors` 十一段，**没有** QQ 号明文、路径里没有用户名、没有 `key.txt` 内容。 |
 | 失败先看哪里 | `/api/diagnostics` 的 `infoError`（中文一句话）→ 插件 stderr → `%APPDATA%\dsh-qqnt-chat-export\settings.json` 里的 `pythonPath` 是否指错；诊断卡片里 `sqlcipher3` 红字时用卡片上的安装提示，别装进系统 Python。 |
 | 实测 | 2026-10-30 ✅ 横幅一次性显示；诊断卡片 11 行正常、指纹 `7374ab35d26d`；诊断包 2,265 字节，对照 `index.sqlite` 的 40 个会话 id / 25 个会话名 / 真实 QQ 号 / `key.txt` 内容 / 用户名 / 工作目录路径，全部不出现。 |
@@ -48,7 +48,7 @@
 
 | | |
 |---|---|
-| 步骤 | 1. 确认 QQ 已登录（不是停在扫码页）。<br>2. 启动横幅或设置页 →「提取密钥」，首次 1~3 分钟，等它自己结束。<br>3. 成功后再点一次「刷新状态」，确认走缓存秒回。 |
+| 步骤 | 1. 确认 QQ 已登录（不是停在扫码页）。<br>2. 设置页「数据库密钥」→「提取密钥」，首次 1~3 分钟，等它自己结束。<br>3. 成功后再点一次「刷新状态」，确认走缓存秒回。 |
 | 预期 | 进度行递增并显示已扫描进程/候选数；SQLCipher 的逐候选项报错被**折叠成一行计数**（不是刷满屏 `E R R O R`）；成功后 `work\key.txt` 与 `work\key.json` 出现，密钥**只**写文件不回显。再次提取应立刻返回缓存。 |
 | 失败先看哪里 | 设置页密钥日志与 `/api/key/extract`；满屏 `2 0 2 6 … E R R O R` 说明 NUL 折叠未生效（`index.js` 未生效 → 重启 DSH）；一直找不到时先确认 QQ 真的登录了，不要反复重试；Linux 才需要 `ptrace_scope`，Windows 不用。 |
 | 实测 | 2026-10-30 ✅ 缓存命中即时返回；强制重扫 8 个 QQ 进程 / 41,525 个候选 / 扫描 466 秒后找到并原子写入。 |
@@ -57,7 +57,7 @@
 
 | | |
 |---|---|
-| 步骤 | 1. 启动横幅 →「建立索引」，首次约 1 分钟（120 万条约 51 秒）。<br>2. 完成后看状态行的消息数/会话数。<br>3. 让 QQ 收几条新消息，再点「从 QQ 同步」，应走增量。<br>4. 打开 `work\build-status.json` 看 `mode` / `added` / `schemaChanged`。 |
+| 步骤 | 1. 顶栏「从 QQ 同步」，首次约 1 分钟（120 万条约 51 秒）。<br>2. 完成后看状态行的消息数/会话数。<br>3. 让 QQ 收几条新消息，再点「从 QQ 同步」，应走增量。<br>4. 打开 `work\build-status.json` 看 `mode` / `added` / `schemaChanged`。 |
 | 预期 | 进度按 `processed / total` 前进；完成后 `state=done`、`mode=full`；第二次 `mode=incremental`、`added` 等于新消息数、耗时明显更短；`meta` 里 `schema` 有 12 位指纹，且与诊断卡片的指纹一致；QQ 侧删过消息时会自动回退全量（这是安全兜底）。 |
 | 失败先看哪里 | `work\build-status.json` 的 `error`（现在是一句中文，不是 traceback）→ `work\build.lock` 是否残留（>15 分钟可重新开始）→ `/api/diagnostics` 的 `schema.missing`（缺列会直接拒绝构建并给出列号）→ 插件 stderr。 |
 | 实测 | 2026-10-30 ✅ 首轮因源库有删除回退全量 51 秒；随后增量 17 条 / 22 秒、`walPending=false`；0.12 代码上 `build --refresh` 17.4 秒追加 54 条，`meta.schema = 7374ab35d26d` 与 `info --json` 一致。 |
@@ -130,7 +130,7 @@
 | | |
 |---|---|
 | 步骤 | 1. 若工作目录还在临时盘，点横幅「迁移到持久目录」；否则在设置里把工作目录改到另一个空目录并保存。<br>2. 保持 DSH 运行，等一个同步周期（默认 60 分钟，可临时改成 5 分钟）看状态行的「上次同步」。<br>3. **重启 DSH**，重新打开网页，确认密钥、索引、设置、诊断卡片都还在。 |
-| 预期 | 迁移是「先复制、再切设置、最后删旧」，失败时旧目录完好；状态行显示「上次同步 x 分钟前」，`sync-status.json` 的 `skipped` 说明为什么没动（`unchanged`/`busy`/`no-index`）；重启后密钥与索引不需要重新提取/重建，自动同步继续按间隔跑，启动横幅不再出现。 |
+| 预期 | 迁移是「先复制、再切设置、最后删旧」，失败时旧目录完好；状态行显示「上次同步 x 分钟前」，`sync-status.json` 的 `skipped` 说明为什么没动（`unchanged`/`busy`/`no-index`）；重启后密钥与索引不需要重新提取/重建，自动同步继续按间隔跑，顶栏状态行正常。 |
 | 失败先看哪里 | `/api/status` 的 `workDir`/`workDirLegacy`/`sync` → `work\sync-status.json` → `%APPDATA%\dsh-qqnt-chat-export\settings.json` 的 `workDir` → 插件 stderr 里重启后的首行监听地址。 |
 | 实测 | 迁移：本机工作目录已在持久目录，`POST /api/workdir/migrate` 按设计返回 400「工作目录已经在持久位置」；「先复制、再切设置、最后删旧」的语义由 `tests/plugin.test.mjs` 覆盖，真机复制路径未跑（下次换机器或把 `workDir` 指到临时盘时补）。<br>自动同步：✅ 重启后 72 秒首跑（14:28:49 启动 → 14:30:01 写 `sync-status.json`），`mode=incremental`、`added=0`、`step=已是最新`——重启**没有**触发重建；`walPending=false`。<br>重启后状态：✅ 1,245,859 条 / 293 会话 / 索引账号 12345 全在；启动横幅显示「Python 3.12.4 · sqlcipher3 已安装 · 密码 ZIP 可用 · 数据库密钥：已配置」，关闭后刷新不再出现；无 console 报错。 |
 
