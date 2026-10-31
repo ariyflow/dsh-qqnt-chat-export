@@ -185,3 +185,55 @@ a:hover { text-decoration: underline; }
 }
 
 .card h2 { margin: 0 0 8px; font-size: 15px; }
+
+/* Floating task panel: only rendered when a job exists. */
+.jobs-panel {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  width: 320px;
+  max-height: 45vh;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
+}
+
+.jobs-panel[hidden] { display: none; }
+
+.jobs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+
+.jobs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 8px 12px;
+  overflow: auto;
+  list-style: none;
+}
+
+.job-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.job-summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-meta { grid-column: 1; color: var(--muted); font-size: 11px; }
+.job-actions { grid-row: 1 / span 2; grid-column: 2; display: flex; align-items: center; }
+.job-actions .ghost { margin: 0; padding: 3px 8px; font-size: 12px; }
+.job-row.is-failed .job-meta { color: #d92d20; }
+.job-row.is-done .job-meta { color: var(--muted); }

@@ -18,6 +18,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createExportQueue, MAX_CONCURRENT } from './exportQueue.js'
+import { createJobQueue } from './jobs.js'
 import { readPresets, writePresets } from './presets.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -801,6 +802,16 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
   // Long exports belong to a queue, not to one request: parsing a 1.2M-row
   // account takes minutes and used to be cut at the 180-second timeout.
   const queue = createExportQueue({ settings, queryCli: queryCli() })
+  /**
+   * Long jobs for the ported features (OCR, speech, embedding, archiving).
+   * Kinds are registered by the caller: an unknown kind is a 400, not a
+   * silently accepted task that never runs.
+   */
+  const jobs = createJobQueue({
+    settings,
+    runners: options.runners && typeof options.runners === 'object' ? options.runners : {},
+    concurrency: Number(options.jobConcurrency) > 0 ? Number(options.jobConcurrency) : undefined,
+  })
 
   let pageHtml = ''
   try {
@@ -1459,6 +1470,59 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       })
       return
     }
+    // Generic background jobs. Kinds are registered by the bundle; an unknown
+    // kind is refused here rather than queued forever.
+    if (req.method === 'GET' && pathname === '/api/jobs') {
+      sendJson(res, 200, { jobs: jobs.list({ kind: params.get('kind') || '' }) })
+      return
+    }
+    if (req.method === 'POST' && pathname === '/api/jobs') {
+      if (!isTrustedMutation(req)) {
+        sendJson(res, 403, { error: 'cross-origin requests are refused' })
+        return
+      }
+      readJsonBody(req)
+        .then((body) => {
+          const kind = String(body?.kind || '')
+          const summary = String(body?.summary || '')
+          const jobParams = body?.params && typeof body.params === 'object' ? body.params : {}
+          try {
+            sendJson(res, 202, jobs.submit(kind, { summary, params: jobParams }))
+          } catch (error) {
+            sendJson(res, 400, { error: error.message })
+          }
+        })
+        .catch(() => sendJson(res, 400, { error: '请求体无法解析' }))
+      return
+    }
+    if (pathname.startsWith('/api/jobs/')) {
+      const rest = pathname.slice('/api/jobs/'.length)
+      const slash = rest.indexOf('/')
+      const id = slash === -1 ? rest : rest.slice(0, slash)
+      const action = slash === -1 ? '' : rest.slice(slash + 1)
+      if (req.method === 'GET' && action === '') {
+        const row = jobs.get(id)
+        if (row) sendJson(res, 200, row)
+        else sendJson(res, 404, { error: '没有这个任务' })
+        return
+      }
+      if (req.method === 'POST' && (action === 'cancel' || action === 'retry')) {
+        if (!isTrustedMutation(req)) {
+          sendJson(res, 403, { error: 'cross-origin requests are refused' })
+          return
+        }
+        try {
+          const row = action === 'cancel' ? jobs.cancel(id) : jobs.retry(id)
+          if (row) sendJson(res, 200, row)
+          else sendJson(res, 404, { error: '没有这个任务' })
+        } catch (error) {
+          sendJson(res, 409, { error: error.message })
+        }
+        return
+      }
+      sendJson(res, 404, { error: 'not found' })
+      return
+    }
     sendJson(res, 404, { error: 'not found' })
   })
 
@@ -1484,6 +1548,7 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
     ready,
     close: () => new Promise((resolve) => {
       queue.close()
+      jobs.shutdown()
       if (!server.listening) {
         resolve()
         return

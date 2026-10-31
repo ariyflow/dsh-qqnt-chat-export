@@ -42,6 +42,7 @@
     "settings.js",
     "storage.js",
     "exportQueue.js",
+    "jobs.js",
     "presets.js",
     "page.html",
     "web",

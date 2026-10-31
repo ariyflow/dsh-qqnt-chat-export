@@ -10,38 +10,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { mountChats } from '../web/js/views/chats.js'
-
-/** Minimal element: enough for this view, and nothing more. */
-function makeElement(tagName) {
-  const listeners = new Map()
-  const node = {
-    tagName,
-    className: '',
-    textContent: '',
-    hidden: false,
-    type: '',
-    placeholder: '',
-    children: [],
-    attributes: {},
-    classList: {
-      add(name) { node.className = `${node.className} ${name}`.trim() },
-      remove(name) {
-        node.className = node.className.split(/\s+/).filter((part) => part && part !== name).join(' ')
-      },
-    },
-    setAttribute(name, value) { node.attributes[name] = value },
-    append(...children) { node.children.push(...children) },
-    replaceChildren(...children) { node.children = [...children] },
-    remove() { node.removed = true },
-    addEventListener(type, handler) { listeners.set(type, handler) },
-    dispatch(type) {
-      const handler = listeners.get(type)
-      if (handler) return handler({ type })
-      return undefined
-    },
-  }
-  return node
-}
+import { installDocument, makeElement, textOf } from './support/dom.mjs'
 
 const sessions = [
   { kind: 'group', id: '111', name: '课程群', messages: 42, lastTime: '2026-10-30 12:00' },
@@ -53,15 +22,8 @@ const rows = [
   { ts: 1730000100, sender: '老师', qq: '10002', text: '第二条' },
 ]
 
-/** Collect text from a subtree, the way a reader would see it. */
-function textOf(node) {
-  const own = typeof node.textContent === 'string' ? node.textContent : ''
-  return own + node.children.map(textOf).join('')
-}
-
 test('mounting renders the sessions, selects the first and loads its page', async () => {
-  const previous = globalThis.document
-  globalThis.document = { createElement: makeElement }
+  const restore = installDocument()
   const calls = []
   const api = {
     get: async (path, params) => {
@@ -97,13 +59,12 @@ test('mounting renders the sessions, selects the first and loads its page', asyn
     assert.equal(calls.at(-1).params.chatId, 'u_abc')
   } finally {
     cleanup()
-    globalThis.document = previous
+    restore()
   }
 })
 
 test('mounting without an index explains what to do instead of throwing', async () => {
-  const previous = globalThis.document
-  globalThis.document = { createElement: makeElement }
+  const restore = installDocument()
   const api = {
     get: async (path) => {
       if (path === '/api/sessions') return { sessions: [] }
@@ -119,13 +80,12 @@ test('mounting without an index explains what to do instead of throwing', async 
     assert.match(hint.textContent, /还没有会话/)
   } finally {
     cleanup()
-    globalThis.document = previous
+    restore()
   }
 })
 
 test('a failing sessions request is surfaced in the sidebar hint', async () => {
-  const previous = globalThis.document
-  globalThis.document = { createElement: makeElement }
+  const restore = installDocument()
   const api = {
     get: async () => {
       throw new Error('索引正在建立')
@@ -139,6 +99,6 @@ test('a failing sessions request is surfaced in the sidebar hint', async () => {
     assert.match(hint.textContent, /索引正在建立/)
   } finally {
     cleanup()
-    globalThis.document = previous
+    restore()
   }
 })

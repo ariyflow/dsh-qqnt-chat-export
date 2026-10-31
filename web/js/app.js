@@ -8,6 +8,7 @@
 import { ApiError, createApi } from './api.js'
 import { createStore } from './state.js'
 import { mountChats } from './views/chats.js'
+import { mountJobs } from './views/jobs.js'
 
 const api = createApi()
 
@@ -59,11 +60,14 @@ function render(value) {
 store.subscribe(render)
 
 let unmount = null
+let unmountJobs = null
 /** Mount the reader once the first status arrives (or the index is absent). */
 function mount() {
   if (!main) return
   if (typeof unmount === 'function') unmount()
   unmount = mountChats(main, { api })
+  // The task panel floats over the reader so it survives view switches.
+  if (!unmountJobs) unmountJobs = mountJobs(document.body, { api })
 }
 
 async function refresh() {
