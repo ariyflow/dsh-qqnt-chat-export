@@ -441,3 +441,82 @@ a:hover { text-decoration: underline; }
 .export-task-actions .ghost { margin: 0; padding: 3px 8px; font-size: 12px; text-decoration: none; }
 .export-task.is-failed .export-task-meta { color: #d92d20; }
 .export-task.is-done .export-task-meta { color: var(--muted); }
+
+/* Statistics: bars share one scale per block, heat cells one opacity scale. */
+.stats-view { padding: 16px 20px; max-width: 1000px; }
+.stats-body { display: flex; flex-direction: column; gap: 14px; margin-top: 10px; }
+.stat-summary { margin: 0; color: var(--muted); font-size: 12px; }
+.stat-block { display: flex; flex-direction: column; gap: 4px; }
+.stat-bar {
+  display: grid;
+  grid-template-columns: minmax(90px, 160px) minmax(0, 1fr) 56px;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+}
+.stat-bar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.stat-bar-track { height: 8px; border-radius: 999px; background: var(--bg); border: 1px solid var(--border); overflow: hidden; }
+.stat-bar-fill { display: block; height: 100%; background: var(--accent); }
+.stat-bar-value { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.stats-heat {
+  display: grid;
+  grid-template-columns: repeat(24, minmax(0, 1fr));
+  gap: 2px;
+  max-width: 720px;
+}
+.heat-cell {
+  aspect-ratio: 1;
+  border-radius: 2px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Media: a thumbnail in the reader, an album strip, and one lightbox. */
+.msg-thumb {
+  display: block;
+  max-width: 220px;
+  max-height: 160px;
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: zoom-in;
+  object-fit: cover;
+}
+
+.album-panel {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.album-panel[hidden] { display: none; }
+.album-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+.album-thumb {
+  width: 96px;
+  height: 96px;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: zoom-in;
+}
+
+.media-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  background: rgb(0 0 0 / 0.72);
+}
+.media-lightbox[hidden] { display: none; }
+.media-lightbox-image { max-width: 92vw; max-height: 82vh; border-radius: 8px; background: #fff; }
+.media-lightbox-close { background: var(--surface); }
