@@ -44,8 +44,14 @@ export function formatClock(epochSeconds) {
     + `${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
-/** One message row; `text` is set as text, never as HTML. */
-function messageRow(row) {
+/**
+ * One message row; `text` is set as text, never as HTML.
+ *
+ * `row.imageSeq` is the first downloaded image of the message: the thumbnail
+ * is loaded from `/api/media/<rowId>?seq=…&thumb=1`, and clicking it opens the
+ * original. A message whose media was cleaned up simply has no `imageSeq`.
+ */
+function messageRow(row, { onOpenMedia = null } = {}) {
   const item = document.createElement('li')
   item.className = 'msg-row'
 
@@ -81,6 +87,18 @@ function messageRow(row) {
   body.textContent = String(row.text ?? '')
 
   item.append(head, body)
+
+  if (row.imageSeq !== undefined && row.rowId !== undefined) {
+    const thumb = document.createElement('img')
+    thumb.className = 'msg-thumb'
+    thumb.loading = 'lazy'
+    thumb.alt = '图片'
+    thumb.src = `/api/media/${Number(row.rowId)}?seq=${Number(row.imageSeq)}&thumb=1`
+    thumb.addEventListener('click', () => {
+      if (typeof onOpenMedia === 'function') onOpenMedia(Number(row.rowId), Number(row.imageSeq))
+    })
+    item.append(thumb)
+  }
   return item
 }
 
@@ -154,12 +172,58 @@ export function mountChats(root, { api, initial = null, onExport = null }) {
   more.hidden = true
   const messages = document.createElement('ol')
   messages.className = 'msg-list'
-  main.append(title, searchBar, messages, more)
 
-  shell.append(aside, main)
+  // Album: the images of the selected chat, newest first, paged like the reader.
+  const galleryButton = document.createElement('button')
+  galleryButton.type = 'button'
+  galleryButton.className = 'ghost'
+  galleryButton.textContent = '相册'
+  galleryButton.title = '当前会话里本机已有的图片'
+  const album = document.createElement('div')
+  album.className = 'album-panel'
+  album.hidden = true
+  const albumGrid = document.createElement('div')
+  albumGrid.className = 'album-grid'
+  const albumMore = document.createElement('button')
+  albumMore.type = 'button'
+  albumMore.className = 'ghost'
+  albumMore.textContent = '载入更多'
+  albumMore.hidden = true
+  const albumHint = document.createElement('p')
+  albumHint.className = 'hint'
+  album.append(albumHint, albumGrid, albumMore)
+
+  // Lightbox: the original image, closed by clicking the backdrop or ×.
+  const lightbox = document.createElement('div')
+  lightbox.className = 'media-lightbox'
+  lightbox.hidden = true
+  const lightboxImage = document.createElement('img')
+  lightboxImage.className = 'media-lightbox-image'
+  lightboxImage.alt = '图片'
+  const lightboxClose = document.createElement('button')
+  lightboxClose.type = 'button'
+  lightboxClose.className = 'ghost media-lightbox-close'
+  lightboxClose.textContent = '关闭'
+  lightbox.append(lightboxImage, lightboxClose)
+
+  function openMedia(rowId, seq) {
+    lightboxImage.src = `/api/media/${rowId}?seq=${seq}`
+    lightbox.hidden = false
+  }
+  lightboxClose.addEventListener('click', () => { lightbox.hidden = true })
+  lightbox.addEventListener('click', (event) => {
+    if (event && event.target === lightbox) lightbox.hidden = true
+  })
+
+  searchBar.append(galleryButton)
+  main.append(title, searchBar, album, messages, more)
+  shell.append(aside, main, lightbox)
   root.append(shell)
 
-  const state = { sessions: [], query: '', selected: null, rows: [], offset: 0, total: 0 }
+  const state = {
+    sessions: [], query: '', selected: null, rows: [], offset: 0, total: 0,
+    album: { open: false, offset: 0, total: 0 },
+  }
   let closed = false
 
   function renderList() {
@@ -185,10 +249,53 @@ export function mountChats(root, { api, initial = null, onExport = null }) {
     }
   }
 
-  function renderMessages(reset) {
+  function renderMessages(reset, rows = state.rows) {
     if (reset) messages.replaceChildren()
-    for (const row of state.rows) messages.append(messageRow(row))
+    for (const row of rows) messages.append(messageRow(row, { onOpenMedia: openMedia }))
     more.hidden = state.rows.length >= state.total
+  }
+
+  /** Album page: images of the selected chat, appended so paging keeps order. */
+  async function loadAlbum(reset) {
+    if (!state.selected) return
+    const offset = reset ? 0 : state.album.offset + albumGrid.children.length
+    try {
+      const payload = await api.get('/api/media/list', {
+        chatKind: state.selected.kind,
+        chatId: state.selected.id,
+        offset,
+        limit: 60,
+      })
+      if (closed) return
+      const items = Array.isArray(payload?.items) ? payload.items : []
+      if (reset) albumGrid.replaceChildren()
+      for (const item of items) {
+        const image = document.createElement('img')
+        image.className = 'album-thumb'
+        image.loading = 'lazy'
+        image.alt = item.name || '图片'
+        image.src = `/api/media/${Number(item.rowId)}?seq=${Number(item.seq)}&thumb=1`
+        image.addEventListener('click', () => openMedia(Number(item.rowId), Number(item.seq)))
+        albumGrid.append(image)
+      }
+      state.album.total = Number(payload?.total) || items.length
+      albumHint.textContent = items.length === 0
+        ? '这个会话没有本机已有的图片。'
+        : `本机图片 ${state.album.total} 张`
+      albumMore.hidden = albumGrid.children.length >= state.album.total
+    } catch (error) {
+      if (!closed) albumHint.textContent = `读取相册失败：${error.message}`
+    }
+  }
+
+  function toggleAlbum() {
+    state.album.open = !state.album.open
+    album.hidden = !state.album.open
+    galleryButton.classList.remove('is-active')
+    if (state.album.open) {
+      galleryButton.classList.add('is-active')
+      loadAlbum(true)
+    }
   }
 
   async function loadMessages(reset, around = null) {
@@ -239,7 +346,7 @@ export function mountChats(root, { api, initial = null, onExport = null }) {
         ? `没有匹配「${keyword}」的消息`
         : `搜索「${keyword}」· ${state.total} 条（显示最近 ${rows.length} 条）`
       for (const row of rows) {
-        const item = messageRow(row)
+        const item = messageRow(row, { onOpenMedia: openMedia })
         if (row.chatName) {
           const chat = document.createElement('span')
           chat.className = 'msg-chat'
@@ -266,6 +373,10 @@ export function mountChats(root, { api, initial = null, onExport = null }) {
   function select(session, around = null) {
     state.selected = session
     state.rows = []
+    state.album = { open: false, offset: 0, total: 0 }
+    album.hidden = true
+    albumGrid.replaceChildren()
+    galleryButton.classList.remove('is-active')
     title.textContent = `${session.name || session.id} · ${sessionMeta(session)}`
     renderList()
     loadMessages(true, around)
@@ -276,6 +387,8 @@ export function mountChats(root, { api, initial = null, onExport = null }) {
     renderList()
   })
   more.addEventListener('click', () => loadMessages(false))
+  galleryButton.addEventListener('click', toggleAlbum)
+  albumMore.addEventListener('click', () => loadAlbum(false))
 
   api.get('/api/sessions')
     .then((payload) => {
@@ -295,5 +408,6 @@ export function mountChats(root, { api, initial = null, onExport = null }) {
   return () => {
     closed = true
     shell.remove()
+    lightbox.remove()
   }
 }
