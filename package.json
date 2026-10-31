@@ -54,6 +54,7 @@
     "scripts/*.py",
     "docs/screenshot.png",
     "docs/screenshot-stats.png",
+    "docs/screenshot-app.png",
     "docs/*.md",
     "CHANGELOG.md",
     "python"
