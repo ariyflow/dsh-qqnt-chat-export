@@ -5,10 +5,22 @@
  * function that owns one container, builds DOM with `textContent` only (chat
  * text is untrusted input), and returns a cleanup function. Pure helpers are
  * exported so they can be tested without a DOM.
+ *
+ * The list is also where per-chat display state lives: aliases, pinning and
+ * hiding are stored server-side (`chats-state.json`, display only), while saved
+ * searches and the keyword history are browser-side (`localStorage`). Nothing
+ * here changes the QQ data or the index.
  */
 
 /** How many messages one page of the reader asks for. */
 export const PAGE_SIZE = 50
+/** Saved searches kept per browser. */
+export const MAX_SAVED = 30
+/** Keyword history kept per browser. */
+export const MAX_HISTORY = 20
+
+const SAVED_KEY = 'qqnt.savedSearches'
+const HISTORY_KEY = 'qqnt.keywordHistory'
 
 /**
  * Filter the session list the way the legacy sidebar does: case-insensitive
@@ -42,6 +54,71 @@ export function formatClock(epochSeconds) {
   const pad = (value) => String(value).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
     + `${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+/** The query shape a saved search keeps; chat is `{kind, id, name}` or null. */
+export function savedFromState(state) {
+  return {
+    savedAt: Date.now(),
+    query: String(state?.query || ''),
+    keyword: String(state?.keyword || ''),
+    sender: String(state?.sender || ''),
+    since: String(state?.since || ''),
+    until: String(state?.until || ''),
+    chat: state?.chat || null,
+  }
+}
+
+/** One line describing a saved search, used in the list. */
+export function savedLabel(saved) {
+  const parts = []
+  if (saved.chat) parts.push(saved.chat.name || saved.chat.id)
+  if (saved.keyword) parts.push(`关键词「${saved.keyword}」`)
+  if (saved.sender) parts.push(`发送者「${saved.sender}」`)
+  if (saved.since || saved.until) parts.push(`${saved.since || '…'} → ${saved.until || '…'}`)
+  return parts.join(' · ') || '全部会话'
+}
+
+/**
+ * Read a JSON list from storage, tolerating a missing/blocked storage and a
+ * hand-edited value (a broken list must not take the page down).
+ * @param {Storage|null} storage
+ * @param {string} key
+ */
+export function readList(storage, key) {
+  try {
+    const value = JSON.parse(storage.getItem(key) || '[]')
+    return Array.isArray(value) ? value : []
+  } catch {
+    return []
+  }
+}
+
+export function writeList(storage, key, rows) {
+  try {
+    storage.setItem(key, JSON.stringify(rows))
+  } catch {
+    // Private mode or a full quota: the list is a convenience, not state.
+  }
+}
+
+/** Push a keyword onto the front of the history, de-duplicated and capped. */
+export function pushHistory(rows, keyword) {
+  const text = String(keyword || '').trim()
+  if (text === '') return rows
+  return [text, ...rows.filter((item) => item !== text)].slice(0, MAX_HISTORY)
+}
+
+/** Key of one saved search, so the same filter combination is kept once. */
+function savedKey(saved) {
+  return [saved.chat ? `${saved.chat.kind}:${saved.chat.id}` : '',
+    saved.keyword, saved.sender, saved.since, saved.until].join('|')
+}
+
+/** Keep one saved search per identical filter combination, newest first. */
+export function pushSaved(rows, saved) {
+  const key = savedKey(saved)
+  return [saved, ...rows.filter((item) => savedKey(item) !== key)].slice(0, MAX_SAVED)
 }
 
 /**
@@ -102,18 +179,28 @@ function messageRow(row, { onOpenMedia = null } = {}) {
   return item
 }
 
+/** A small text button used for pin/rename/hide on a session row. */
+function actionButton(text, handler) {
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.className = 'ghost chat-action'
+  button.textContent = text
+  button.addEventListener('click', (event) => {
+    if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
+    handler()
+  })
+  return button
+}
+
 /**
  * Mount the view.
  *
  * @param {HTMLElement} root - empty container owned by the caller
- * @param {{api: {get: Function}, initial?: {kind: string, id: string, around?: number},
- *   onExport?: (session: object) => void}} options
- *   `initial` opens one chat directly; `around` centers the reader on a message
- *   (used when a citation card is clicked from the answer view); `onExport`
- *   hands the selected chat to the export view.
+ * @param {{api: {get: Function, post: Function}, initial?: {kind: string, id: string, around?: number},
+ *   onExport?: (session: object) => void, onExportBatch?: (chats: object[]) => void}} options
  * @returns {() => void} cleanup
  */
-export function mountChats(root, { api, initial = null, onExport = null }) {
+export function mountChats(root, { api, initial = null, onExport = null, onExportBatch = null }) {
   const shell = document.createElement('div')
   shell.className = 'app-shell'
 
@@ -124,12 +211,29 @@ export function mountChats(root, { api, initial = null, onExport = null }) {
   filter.className = 'chat-filter'
   filter.placeholder = '筛选群名 / 昵称 / 群号 / QQ'
   filter.setAttribute('aria-label', '筛选会话')
+
+  const savedBox = document.createElement('details')
+  savedBox.className = 'saved'
+  const savedSummary = document.createElement('summary')
+  savedSummary.textContent = '保存的搜索'
+  const savedList = document.createElement('div')
+  savedList.className = 'saved-list'
+  savedBox.append(savedSummary, savedList)
+
+  const hiddenLabel = document.createElement('label')
+  hiddenLabel.className = 'chat-search-label'
+  const hiddenBox = document.createElement('input')
+  hiddenBox.type = 'checkbox'
+  const hiddenText = document.createElement('span')
+  hiddenText.textContent = '显示已隐藏'
+  hiddenLabel.append(hiddenBox, hiddenText)
+
   const list = document.createElement('ul')
   list.className = 'chat-list'
   const hint = document.createElement('p')
   hint.className = 'hint'
   hint.textContent = '正在读取会话…'
-  aside.append(filter, hint, list)
+  aside.append(filter, hiddenLabel, savedBox, hint, list)
 
   const main = document.createElement('section')
   main.className = 'chat-main'
@@ -148,6 +252,9 @@ export function mountChats(root, { api, initial = null, onExport = null }) {
   searchInput.className = 'chat-search-input'
   searchInput.placeholder = '搜索全部会话（回车）'
   searchInput.setAttribute('aria-label', '搜索全部会话')
+  searchInput.setAttribute('list', 'keywordHistory')
+  const historyList = document.createElement('datalist')
+  historyList.id = 'keywordHistory'
   const ocrToggle = document.createElement('input')
   ocrToggle.type = 'checkbox'
   ocrToggle.checked = true
@@ -155,16 +262,40 @@ export function mountChats(root, { api, initial = null, onExport = null }) {
   ocrLabel.className = 'chat-search-label'
   ocrLabel.append(ocrToggle, document.createElement('span'))
   ocrLabel.children[1].textContent = '含图片文字'
+
+  const saveButton = document.createElement('button')
+  saveButton.type = 'button'
+  saveButton.className = 'ghost'
+  saveButton.textContent = '保存搜索'
+  saveButton.title = '把当前筛选条件存到本机浏览器'
+
   const exportButton = document.createElement('button')
   exportButton.type = 'button'
   exportButton.className = 'ghost'
   exportButton.textContent = '导出本会话'
   exportButton.title = '用这个会话打开导出页'
-  exportButton.addEventListener('click', () => {
-    if (state.selected && typeof onExport === 'function') onExport(state.selected)
-    else title.textContent = '先选择一个会话，再导出'
-  })
-  searchBar.append(searchInput, ocrLabel, exportButton)
+
+  const galleryButton = document.createElement('button')
+  galleryButton.type = 'button'
+  galleryButton.className = 'ghost'
+  galleryButton.textContent = '相册'
+  galleryButton.title = '当前会话里本机已有的图片'
+
+  const batchBar = document.createElement('div')
+  batchBar.className = 'batch-bar'
+  batchBar.hidden = true
+  const batchCount = document.createElement('span')
+  batchCount.className = 'meta'
+  const batchExport = document.createElement('button')
+  batchExport.type = 'button'
+  batchExport.className = 'primary'
+  batchExport.textContent = '导出选中（ZIP）'
+  const batchClear = document.createElement('button')
+  batchClear.type = 'button'
+  batchClear.className = 'ghost'
+  batchClear.textContent = '清空'
+  batchBar.append(batchCount, batchExport, batchClear)
+
   const more = document.createElement('button')
   more.type = 'button'
   more.className = 'ghost'
@@ -174,11 +305,6 @@ export function mountChats(root, { api, initial = null, onExport = null }) {
   messages.className = 'msg-list'
 
   // Album: the images of the selected chat, newest first, paged like the reader.
-  const galleryButton = document.createElement('button')
-  galleryButton.type = 'button'
-  galleryButton.className = 'ghost'
-  galleryButton.textContent = '相册'
-  galleryButton.title = '当前会话里本机已有的图片'
   const album = document.createElement('div')
   album.className = 'album-panel'
   album.hidden = true
@@ -215,14 +341,19 @@ export function mountChats(root, { api, initial = null, onExport = null }) {
     if (event && event.target === lightbox) lightbox.hidden = true
   })
 
-  searchBar.append(galleryButton)
-  main.append(title, searchBar, album, messages, more)
+  searchBar.append(searchInput, historyList, ocrLabel, saveButton, exportButton, galleryButton)
+  main.append(title, batchBar, searchBar, album, messages, more)
   shell.append(aside, main, lightbox)
   root.append(shell)
 
+  const storage = typeof localStorage === 'undefined' ? null : localStorage
   const state = {
     sessions: [], query: '', selected: null, rows: [], offset: 0, total: 0,
     album: { open: false, offset: 0, total: 0 },
+    hidden: false,
+    batch: new Set(),
+    saved: readList(storage, SAVED_KEY),
+    history: readList(storage, HISTORY_KEY),
   }
   let closed = false
 
@@ -233,19 +364,124 @@ export function mountChats(root, { api, initial = null, onExport = null }) {
       ? '索引里还没有会话：请回到当前界面点「从 QQ 同步」。'
       : `${visible.length} / ${state.sessions.length} 个会话`
     for (const session of visible) {
+      const key = `${session.kind}:${session.id}`
       const item = document.createElement('li')
       item.className = 'chat-item'
       if (state.selected && state.selected.kind === session.kind
         && state.selected.id === session.id) item.classList.add('is-active')
+
+      const check = document.createElement('input')
+      check.type = 'checkbox'
+      check.className = 'chat-check'
+      check.checked = state.batch.has(key)
+      check.setAttribute('aria-label', `选择 ${session.name || session.id}`)
+      check.addEventListener('click', (event) => {
+        if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
+        if (check.checked) state.batch.add(key)
+        else state.batch.delete(key)
+        renderBatch()
+      })
+
       const name = document.createElement('span')
       name.className = 'chat-name'
       name.textContent = session.name || session.id
+      if (session.pinned) {
+        const pin = document.createElement('span')
+        pin.className = 'chat-pin'
+        pin.textContent = '置顶'
+        name.append(' ', pin)
+      }
       const meta = document.createElement('span')
       meta.className = 'chat-meta'
       meta.textContent = sessionMeta(session)
-      item.append(name, meta)
+
+      const actions = document.createElement('span')
+      actions.className = 'chat-actions'
+      actions.append(
+        actionButton(session.pinned ? '取消置顶' : '置顶', () => {
+          patchChat(session, { pinned: !session.pinned })
+        }),
+        actionButton('改名', () => {
+          if (typeof window === 'undefined' || typeof window.prompt !== 'function') return
+          const next = window.prompt('会话显示名（留空恢复原名）', session.alias || '')
+          if (next === null) return
+          patchChat(session, { alias: next })
+        }),
+        actionButton(session.hidden ? '取消隐藏' : '隐藏', () => {
+          patchChat(session, { hidden: !session.hidden })
+        }),
+      )
+
+      item.append(check, name, meta, actions)
       item.addEventListener('click', () => select(session))
       list.append(item)
+    }
+    renderSaved()
+  }
+
+  function renderBatch() {
+    batchBar.hidden = state.batch.size === 0
+    batchCount.textContent = `已选 ${state.batch.size} 个会话`
+  }
+
+  function renderSaved() {
+    savedList.replaceChildren()
+    savedSummary.textContent = `保存的搜索（${state.saved.length}）`
+    for (const saved of state.saved) {
+      const row = document.createElement('div')
+      row.className = 'saved-row'
+      const play = document.createElement('button')
+      play.type = 'button'
+      play.className = 'saved-play'
+      play.textContent = savedLabel(saved)
+      play.addEventListener('click', () => applySaved(saved))
+      const remove = document.createElement('button')
+      remove.type = 'button'
+      remove.className = 'ghost'
+      remove.textContent = '×'
+      remove.title = '删除这条保存的搜索'
+      remove.addEventListener('click', () => {
+        state.saved = state.saved.filter((item) => item !== saved)
+        writeList(storage, SAVED_KEY, state.saved)
+        renderSaved()
+      })
+      row.append(play, remove)
+      savedList.append(row)
+    }
+  }
+
+  function applySaved(saved) {
+    searchInput.value = saved.keyword || ''
+    if (saved.chat) {
+      const found = state.sessions.find((session) =>
+        session.kind === saved.chat.kind && String(session.id) === String(saved.chat.id))
+      if (found) select(found)
+    }
+    if (saved.keyword) search(saved.keyword, ocrToggle.checked)
+    else if (state.selected) select(state.selected)
+  }
+
+  function saveCurrent() {
+    const saved = savedFromState({
+      query: state.query,
+      keyword: searchInput.value,
+      chat: state.selected ? {
+        kind: state.selected.kind, id: state.selected.id, name: state.selected.name,
+      } : null,
+    })
+    state.saved = pushSaved(state.saved, saved)
+    writeList(storage, SAVED_KEY, state.saved)
+    renderSaved()
+  }
+
+  async function patchChat(session, patch) {
+    try {
+      await api.post('/api/chats/state', { kind: session.kind, id: session.id, patch })
+      if (closed) return
+      // Re-read the list so alias/pin/hide ordering matches the server.
+      await loadSessions()
+    } catch (error) {
+      if (!closed) title.textContent = `保存失败：${error.message}`
     }
   }
 
@@ -335,6 +571,9 @@ export function mountChats(root, { api, initial = null, onExport = null }) {
     title.textContent = `搜索：${keyword}`
     messages.replaceChildren()
     more.hidden = true
+    state.history = pushHistory(state.history, keyword)
+    writeList(storage, HISTORY_KEY, state.history)
+    renderHistory()
     try {
       const payload = await api.get('/api/messages', args)
       if (closed) return
@@ -357,6 +596,15 @@ export function mountChats(root, { api, initial = null, onExport = null }) {
       }
     } catch (error) {
       if (!closed) title.textContent = `搜索失败：${error.message}`
+    }
+  }
+
+  function renderHistory() {
+    historyList.replaceChildren()
+    for (const keyword of state.history) {
+      const option = document.createElement('option')
+      option.value = keyword
+      historyList.append(option)
     }
   }
 
@@ -389,21 +637,49 @@ export function mountChats(root, { api, initial = null, onExport = null }) {
   more.addEventListener('click', () => loadMessages(false))
   galleryButton.addEventListener('click', toggleAlbum)
   albumMore.addEventListener('click', () => loadAlbum(false))
+  saveButton.addEventListener('click', saveCurrent)
+  hiddenBox.addEventListener('change', () => {
+    state.hidden = hiddenBox.checked
+    loadSessions()
+  })
+  exportButton.addEventListener('click', () => {
+    if (state.selected && typeof onExport === 'function') onExport(state.selected)
+    else title.textContent = '先选择一个会话，再导出'
+  })
+  batchClear.addEventListener('click', () => {
+    state.batch.clear()
+    renderBatch()
+    renderList()
+  })
+  batchExport.addEventListener('click', () => {
+    const chats = state.sessions
+      .filter((session) => state.batch.has(`${session.kind}:${session.id}`))
+      .map((session) => ({ kind: session.kind, id: session.id, label: session.name || session.id }))
+    if (chats.length === 0) return
+    if (typeof onExportBatch === 'function') onExportBatch(chats)
+    else title.textContent = '导出页还没接上批量导出。'
+  })
 
-  api.get('/api/sessions')
-    .then((payload) => {
+  async function loadSessions() {
+    try {
+      const payload = await api.get('/api/sessions', state.hidden ? { hidden: 1 } : {})
       if (closed) return
       state.sessions = Array.isArray(payload?.sessions) ? payload.sessions : []
-      renderList()
       const jump = initial && state.sessions.find((session) =>
         session.kind === initial.kind && String(session.id) === String(initial.id))
-      if (jump) select(jump, initial.around || null)
-      else if (state.sessions.length > 0) select(state.sessions[0])
-    })
-    .catch((error) => {
-      if (closed) return
-      hint.textContent = `读取会话失败：${error.message}`
-    })
+      const again = state.selected && state.sessions.find((session) =>
+        session.kind === state.selected.kind && String(session.id) === String(state.selected.id))
+      state.selected = again || null
+      renderList()
+      if (jump && !state.selected) select(jump, initial.around || null)
+      else if (!state.selected && state.sessions.length > 0) select(state.sessions[0])
+    } catch (error) {
+      if (!closed) hint.textContent = `读取会话失败：${error.message}`
+    }
+  }
+
+  renderHistory()
+  loadSessions()
 
   return () => {
     closed = true

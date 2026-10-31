@@ -74,6 +74,7 @@ const requested = new URLSearchParams(location.search).get('view')
 let view = Object.prototype.hasOwnProperty.call(NAV, requested || '') ? requested : 'chats'
 /** A chat (and message) the reader should open; consumed on the next mount. */
 let initialChat = null
+let initialChats = null
 
 /** Highlight the active view button; the shim has no classList.toggle. */
 function paintNav() {
@@ -86,10 +87,11 @@ function paintNav() {
 }
 
 /** Switch views, optionally asking the reader to open one chat. */
-function setView(next, { chat = null } = {}) {
+function setView(next, { chat = null, chats = null } = {}) {
   if (!Object.prototype.hasOwnProperty.call(NAV, next)) return
   view = next
   initialChat = chat
+  initialChats = chats
   paintNav()
   mount()
 }
@@ -109,8 +111,9 @@ function mount() {
   } else if (view === 'models') {
     unmount = mountModels(main, { api })
   } else if (view === 'export') {
-    unmount = mountExport(main, { api, initialChat })
+    unmount = mountExport(main, { api, initialChat, initialChats })
     initialChat = null
+    initialChats = null
   } else if (view === 'stats') {
     unmount = mountStats(main, { api, initialChat })
     initialChat = null
@@ -121,6 +124,7 @@ function mount() {
       onExport: (session) => setView('export', {
         chat: { kind: session.kind, id: session.id, name: session.name || session.id },
       }),
+      onExportBatch: (chats) => setView('export', { chats }),
     })
     initialChat = null
   }

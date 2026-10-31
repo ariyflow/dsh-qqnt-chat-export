@@ -41,7 +41,8 @@ export function exportBody(state) {
     format: String(state?.format || 'txt'),
     redact: String(state?.redact || ''),
   }
-  if (state?.chat) body.chats = [state.chat]
+  if (Array.isArray(state?.chats) && state.chats.length > 0) body.chats = state.chats.slice()
+  else if (state?.chat) body.chats = [state.chat]
   if (String(state?.keyword || '').trim() !== '') body.keyword = String(state.keyword).trim()
   if (String(state?.sender || '').trim() !== '') body.sender = String(state.sender).trim()
   if (String(state?.since || '').trim() !== '') body.since = String(state.since).trim()
@@ -89,7 +90,7 @@ export function downloadHref(job) {
  * @param {{api: object, initialChat?: object}} options
  * @returns {() => void} cleanup
  */
-export function mountExport(root, { api, initialChat = null }) {
+export function mountExport(root, { api, initialChat = null, initialChats = null }) {
   const section = document.createElement('section')
   section.className = 'export-view'
 
@@ -216,6 +217,7 @@ export function mountExport(root, { api, initialChat = null }) {
   const sessions = []
   const state = {
     chat: initialChat ? { kind: initialChat.kind, id: initialChat.id, label: initialChat.name || '' } : null,
+    chats: Array.isArray(initialChats) ? initialChats.slice() : [],
     lastJobId: '',
   }
   let closed = false
@@ -233,7 +235,7 @@ export function mountExport(root, { api, initialChat = null }) {
   function syncDerived() {
     // Derivation is explained rather than silently applied: a user who picks
     // CSV + media should see why the download is a ZIP.
-    const chats = state.chat ? 1 : 0
+    const chats = state.chats.length > 0 ? state.chats.length : (state.chat ? 1 : 0)
     const container = containerFor({
       format: format.value,
       chatCount: chats,
@@ -255,12 +257,14 @@ export function mountExport(root, { api, initialChat = null }) {
   }
 
   function currentBody() {
-    const chat = state.chat
+    const chat = state.chats.length > 0 ? null : state.chat
+    const chats = state.chats.length > 0 ? state.chats : null
     return exportBody({
       format: format.value,
       redact: redact.value,
       chat,
-      chatCount: chat ? 1 : 0,
+      chats,
+      chatCount: state.chats.length > 0 ? state.chats.length : (chat ? 1 : 0),
       keyword: keyword.value,
       sender: sender.value,
       since: since.value,
@@ -271,7 +275,9 @@ export function mountExport(root, { api, initialChat = null }) {
       frontMatter: frontMatter.checked,
       password: password.value,
       columns: columnBoxes.filter((item) => item.box.checked).map((item) => item.value),
-      label: chat ? chat.label : '',
+      label: state.chats.length > 0
+        ? `批量导出 ${state.chats.length} 个会话`
+        : (chat ? chat.label : ''),
     })
   }
 
@@ -374,7 +380,15 @@ export function mountExport(root, { api, initialChat = null }) {
         option.textContent = session.name || session.id
         chatSelect.append(option)
       }
-      if (state.chat) chatSelect.value = `${state.chat.kind}:${state.chat.id}`
+      if (state.chats.length > 0) {
+        const batch = document.createElement('option')
+        batch.value = '__batch__'
+        batch.textContent = `已选 ${state.chats.length} 个会话（批量导出）`
+        chatSelect.append(batch)
+        chatSelect.value = '__batch__'
+      } else if (state.chat) {
+        chatSelect.value = `${state.chat.kind}:${state.chat.id}`
+      }
     } catch {
       // The picker stays with "all chats"; filtering still works.
     }
@@ -397,7 +411,11 @@ export function mountExport(root, { api, initialChat = null }) {
     const value = String(chatSelect.value || '')
     if (value === '') {
       state.chat = null
+      state.chats = []
+    } else if (value === '__batch__') {
+      state.chat = null
     } else {
+      state.chats = []
       const index = value.indexOf(':')
       const kind = value.slice(0, index)
       const id = value.slice(index + 1)

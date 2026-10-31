@@ -9,7 +9,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { mountChats } from '../web/js/views/chats.js'
+import {
+  mountChats, pushSaved, readList, savedLabel,
+} from '../web/js/views/chats.js'
 import { findByClass, installDocument, makeElement, textOf } from './support/dom.mjs'
 
 const sessions = [
@@ -47,7 +49,9 @@ test('mounting renders the sessions, selects the first and loads its page', asyn
     const shell = root.children[0]
     const aside = findByClass(shell, 'app-sidebar')
     const main = findByClass(shell, 'chat-main')
-    const [filter, hint, list] = aside.children
+    const filter = findByClass(aside, 'chat-filter')
+    const hint = findByClass(aside, 'hint')
+    const list = findByClass(aside, 'chat-list')
     assert.equal(filter.tagName, 'input')
     assert.match(hint.textContent, /2 \/ 2 个会话/)
     assert.equal(list.children.length, 2)
@@ -76,8 +80,8 @@ test('mounting without an index explains what to do instead of throwing', async 
   const cleanup = mountChats(root, { api })
   try {
     await new Promise((resolve) => setTimeout(resolve, 0))
-    const aside = root.children[0].children[0]
-    const hint = aside.children[1]
+    const aside = findByClass(root, 'app-sidebar')
+    const hint = findByClass(aside, 'hint')
     assert.match(hint.textContent, /还没有会话/)
   } finally {
     cleanup()
@@ -96,7 +100,7 @@ test('a failing sessions request is surfaced in the sidebar hint', async () => {
   const cleanup = mountChats(root, { api })
   try {
     await new Promise((resolve) => setTimeout(resolve, 0))
-    const hint = root.children[0].children[0].children[1]
+    const hint = findByClass(findByClass(root, 'app-sidebar'), 'hint')
     assert.match(hint.textContent, /索引正在建立/)
   } finally {
     cleanup()
@@ -269,6 +273,150 @@ test('the album button lists the chat images and pages through them', async () =
     assert.equal(findByClass(shell, 'media-lightbox').hidden, false)
   } finally {
     cleanup()
+    restore()
+  }
+})
+
+function fakeStorage() {
+  const map = new Map()
+  return {
+    getItem: (key) => (map.has(key) ? map.get(key) : null),
+    setItem: (key, value) => { map.set(key, String(value)) },
+    removeItem: (key) => { map.delete(key) },
+  }
+}
+
+test('saved searches are de-duplicated by filter combination', () => {
+  const one = { chat: { kind: 'group', id: '1', name: '群' }, keyword: 'a', sender: '', since: '', until: '' }
+  const two = { ...one, keyword: 'b' }
+  let rows = pushSaved([], one)
+  rows = pushSaved(rows, one)
+  assert.equal(rows.length, 1)
+  rows = pushSaved(rows, two)
+  assert.deepEqual(rows.map((row) => row.keyword), ['b', 'a'])
+  assert.match(savedLabel(two), /群 · 关键词「b」/)
+  assert.equal(readList(null, 'x').length, 0)
+  assert.deepEqual(readList({ getItem: () => '{bad' }, 'x'), [])
+})
+
+test('a search is remembered and can be saved, replayed and deleted', async () => {
+  const restore = installDocument()
+  globalThis.localStorage = fakeStorage()
+  try {
+    const calls = []
+    const api = {
+      get: async (path, params) => {
+        calls.push({ path, params })
+        if (path === '/api/sessions') return { sessions }
+        return { rows, total: 2 }
+      },
+      post: async () => ({}),
+    }
+    const root = makeElement('main')
+    const cleanup = mountChats(root, { api })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const shell = root.children[0]
+    const form = findByClass(shell, 'chat-search')
+    findByClass(form, 'chat-search-input').value = '402'
+    form.dispatch('submit')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    const history = findByClass(shell, 'chat-search').children
+      .find((item) => item.tagName === 'datalist')
+    assert.equal(history.children[0].value, '402')
+
+    const save = findByClass(shell, 'chat-search').children
+      .find((item) => textOf(item) === '保存搜索')
+    save.dispatch('click')
+    const savedRow = findByClass(shell, 'saved-list').children[0]
+    assert.match(textOf(savedRow), /402/)
+
+    const before = calls.filter((call) => call.params?.keyword === '402').length
+    savedRow.children[0].dispatch('click')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.ok(calls.filter((call) => call.params?.keyword === '402').length > before)
+
+    savedRow.children[1].dispatch('click')
+    assert.equal(findByClass(shell, 'saved-list').children.length, 0)
+    assert.equal(globalThis.localStorage.getItem('qqnt.savedSearches'), '[]')
+  } finally {
+    delete globalThis.localStorage
+    restore()
+  }
+})
+
+test('batch selection exports the checked sessions as one bundle', async () => {
+  const restore = installDocument()
+  try {
+    let exported = null
+    const api = {
+      get: async (path) => (path === '/api/sessions'
+        ? { sessions }
+        : { rows, total: 2 }),
+      post: async () => ({}),
+    }
+    const root = makeElement('main')
+    const cleanup = mountChats(root, { api, onExportBatch: (chats) => { exported = chats } })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const shell = root.children[0]
+    const items = findByClass(shell, 'chat-list').children
+    const check = items[1].children[0]
+    check.checked = true
+    check.dispatch('click')
+    const bar = findByClass(shell, 'batch-bar')
+    assert.equal(bar.hidden, false)
+    assert.match(textOf(bar), /已选 1 个会话/)
+
+    const exportButton = bar.children.find((item) => textOf(item) === '导出选中（ZIP）')
+    exportButton.dispatch('click')
+    assert.deepEqual(exported, [{ kind: 'private', id: 'u_abc', label: '小林' }])
+
+    const clear = bar.children.find((item) => textOf(item) === '清空')
+    clear.dispatch('click')
+    assert.equal(findByClass(shell, 'batch-bar').hidden, true)
+  } finally {
+    restore()
+  }
+})
+
+test('pin, rename and hide go through /api/chats/state', async () => {
+  const restore = installDocument()
+  try {
+    const posts = []
+    const api = {
+      get: async (path) => (path === '/api/sessions'
+        ? { sessions }
+        : { rows, total: 2 }),
+      post: async (path, body) => {
+        posts.push({ path, body })
+        return { key: 'group:111', state: { pinned: true } }
+      },
+    }
+    globalThis.window = { prompt: () => '新名字' }
+    const root = makeElement('main')
+    const cleanup = mountChats(root, { api })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const shell = root.children[0]
+    const actions = findByClass(shell, 'chat-actions')
+    assert.ok(actions)
+    const buttons = actions.children
+    buttons.find((item) => textOf(item) === '置顶').dispatch('click')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.deepEqual(posts[0], {
+      path: '/api/chats/state',
+      body: { kind: 'group', id: '111', patch: { pinned: true } },
+    })
+    buttons.find((item) => textOf(item) === '改名').dispatch('click')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.deepEqual(posts[1].body.patch, { alias: '新名字' })
+    buttons.find((item) => textOf(item) === '隐藏').dispatch('click')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.deepEqual(posts[2].body.patch, { hidden: true })
+  } finally {
+    delete globalThis.window
     restore()
   }
 })

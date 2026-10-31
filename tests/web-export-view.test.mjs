@@ -136,3 +136,48 @@ test('a finished task offers a download and a failed one a retry', async () => {
     restore()
   }
 })
+
+test('a batch selection goes out as chats and derives a zip', async () => {
+  const restore = installDocument()
+  const posted = []
+  const api = {
+    get: async (path) => {
+      if (path === '/api/sessions') {
+        return {
+          sessions: [
+            { kind: 'group', id: '123', name: '示例课程群', messages: 3 },
+            { kind: 'private', id: 'u9', name: '小林', messages: 2 },
+          ],
+        }
+      }
+      if (path === '/api/presets') return { presets: [] }
+      return { jobs: [] }
+    },
+    post: async (path, body) => {
+      posted.push({ path, body })
+      return { id: 'job2', kind: 'export', summary: '导出 ZIP', state: 'queued' }
+    },
+  }
+  const root = makeElement('main')
+  const cleanup = mountExport(root, {
+    api,
+    initialChats: [
+      { kind: 'group', id: '123', label: '示例课程群' },
+      { kind: 'private', id: 'u9', label: '小林' },
+    ],
+  })
+  try {
+    await tick()
+    assert.match(textOf(findByClass(root, 'export-derived')), /下载：ZIP/)
+    findByClass(root, 'export-form').dispatch('submit')
+    await tick()
+    assert.deepEqual(posted[0].body.chats, [
+      { kind: 'group', id: '123', label: '示例课程群' },
+      { kind: 'private', id: 'u9', label: '小林' },
+    ])
+    assert.equal(posted[0].body.label, '批量导出 2 个会话')
+  } finally {
+    cleanup()
+    restore()
+  }
+})
