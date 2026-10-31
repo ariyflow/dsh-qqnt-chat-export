@@ -42,10 +42,12 @@ import zipfile
 
 import qqnt_asr as asr
 import qqnt_derived as derived
+import qqnt_embed as embed
 import qqnt_export as q
 import qqnt_models as models
 import qqnt_ocr as ocr
 import qqnt_media as media_mod
+import qqnt_retrieve as retrieve_mod
 
 GROUP_KIND = 'group'
 PRIVATE_KIND = 'private'
@@ -1193,7 +1195,8 @@ def cmd_asr(p, args):
     report = models.status(p['work'], 'paraformer-zh-small')['paraformer-zh-small']
     engine_status = asr.available()
     if not engine_status['ok']:
-        raise BadInput(engine_status['error'] + '。在设置页点「安装语音组件」。')
+        raise BadInput(engine_status['error'] + '。在插件虚拟环境里安装：%s -m pip install av sherpa-onnx'
+                       % sys.executable)
     if not report['installed']:
         missing = [item['name'] for item in report['files'] if not item['exists']]
         raise BadInput('语音模型未下载（缺 %s）。先运行：python3 scripts/qqnt_models.py'
@@ -1245,7 +1248,8 @@ def cmd_ocr(p, args):
     report = models.status(p['work'], 'rapidocr-v4')['rapidocr-v4']
     engine_status = ocr.available()
     if not engine_status['ok']:
-        raise BadInput(engine_status['error'] + '。在设置页点「安装 OCR 组件」。')
+        raise BadInput(engine_status['error'] + '。在插件虚拟环境里安装：%s -m pip install rapidocr-onnxruntime'
+                       % sys.executable)
     engine_dir = models.model_dir(p['work'], 'rapidocr-v4') if report['installed'] else None
     engine = ocr.make_engine(engine_dir)
 
@@ -1258,6 +1262,135 @@ def cmd_ocr(p, args):
     stats['ok'] = True
     stats['models'] = 'work' if engine_dir else 'bundled'
     print(json.dumps(stats, ensure_ascii=False))
+
+
+def cmd_chunks(p, args):
+    """Group messages into conversation chunks and embed them.
+
+    The model is optional here: chunks alone already make keyword retrieval
+    better (one hit answers "who agreed" instead of five separate messages), so
+    a missing model is a reported note, not a failed job.
+    """
+    if not os.path.exists(p['index']):
+        raise BadInput('还没有索引：先在网页点「从 QQ 同步」建立索引，再分块')
+    report = models.status(p['work'], embed.DEFAULT_MODEL)[embed.DEFAULT_MODEL]
+    embedder = None
+    note = ''
+    engine_status = embed.available()
+    if report['installed'] and engine_status['ok']:
+        embedder = embed.make_embedder(models.model_dir(p['work'], embed.DEFAULT_MODEL))
+    elif not report['installed']:
+        note = '嵌入模型未下载，本次只写分块（关键词检索可用）'
+    else:
+        note = engine_status['error'] + '，本次只写分块'
+
+    def progress(done, total, message):
+        print(json.dumps({'progress': round(done / total, 4) if total else 1.0,
+                          'message': message}, ensure_ascii=False), flush=True)
+
+    stats = embed.run(p['index'], p['derived'], embedder,
+                      model=embed.DEFAULT_MODEL, limit=args.get('limit'),
+                      progress=progress, force=truthy(args.get('force')))
+    stats['ok'] = True
+    if note:
+        stats['note'] = note
+    print(json.dumps(stats, ensure_ascii=False))
+
+
+def load_embedder(p):
+    """The question encoder, or `(None, why)` so the answer can still be lexical."""
+    if not os.path.exists(p['derived']):
+        return None, '派生库还不存在：先建立索引并运行一次「分块与嵌入」'
+    try:
+        conn = derived.connect(p['derived'])
+        try:
+            count = conn.execute('SELECT count(*) FROM vectors').fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        count = 0
+    if not count:
+        return None, '派生库还没有向量：先运行一次「分块与嵌入」'
+    report = models.status(p['work'], embed.DEFAULT_MODEL)[embed.DEFAULT_MODEL]
+    if not report['installed']:
+        return None, '嵌入模型未下载，本次只用关键词检索'
+    status = embed.available()
+    if not status['ok']:
+        return None, status['error'] + '，本次只用关键词检索'
+    return embed.make_embedder(models.model_dir(p['work'], embed.DEFAULT_MODEL)), ''
+
+
+def ask_filters(args):
+    """Shared enquiry filters: one chat, one date range, or everything."""
+    filters = {}
+    kind = args.get('chatKind')
+    if kind in (GROUP_KIND, PRIVATE_KIND):
+        filters['chatKind'] = kind
+    chat_id = str(args.get('chatId') or '').strip()
+    if chat_id:
+        filters['chatId'] = chat_id
+    since = parse_day(args.get('since'), end=False)
+    if since is not None:
+        filters['since'] = since
+    until = parse_day(args.get('until'), end=True)
+    if until is not None:
+        filters['until'] = until
+    return filters
+
+
+def cmd_ask(p, args):
+    """Retrieve the conversation spans that answer a question, with citations.
+
+    No text is generated here: the plugin owns retrieval and citation, the host
+    model owns the sentence (ADR-008). That keeps the plugin at 0 MB of LLM and
+    means the answer can never cite something the retrieval did not return.
+    """
+    question = str(args.get('question') or args.get('query') or '').strip()
+    if not question:
+        raise BadInput('问题不能为空')
+    if not os.path.exists(p['index']):
+        raise BadInput('还没有索引：先在网页点「从 QQ 同步」建立索引')
+    top = max(1, min(int(args.get('topK') or 8), 20))
+    conn = open_index(p)
+    try:
+        embedder, note = load_embedder(p)
+        result = retrieve_mod.retrieve(conn, p['derived'], question, embedder=embedder,
+                                       top_k=top, filters=ask_filters(args))
+    finally:
+        conn.close()
+    notes = list(result['notes'])
+    if note:
+        notes.insert(0, note)
+    if not result['hits']:
+        notes.append('没有找到相关片段：把问题说得更具体，或先运行「分块与嵌入」')
+    print(json.dumps({'ok': True, 'question': question, 'topK': top,
+                      'hits': result['hits'], 'notes': notes,
+                      'keyword': result['keyword'], 'vector': result['vector']},
+                     ensure_ascii=False))
+
+
+def cmd_recall(p, args):
+    """A topic over time: the same retrieval, grouped by day, oldest first."""
+    query = str(args.get('query') or args.get('question') or '').strip()
+    if not query:
+        raise BadInput('检索主题不能为空')
+    if not os.path.exists(p['index']):
+        raise BadInput('还没有索引：先在网页点「从 QQ 同步」建立索引')
+    top = max(1, min(int(args.get('topK') or 20), 50))
+    conn = open_index(p)
+    try:
+        embedder, note = load_embedder(p)
+        result = retrieve_mod.retrieve(conn, p['derived'], query, embedder=embedder,
+                                       top_k=top, filters=ask_filters(args))
+    finally:
+        conn.close()
+    notes = list(result['notes'])
+    if note:
+        notes.insert(0, note)
+    print(json.dumps({'ok': True, 'query': query, 'topK': top,
+                      'days': retrieve_mod.timeline(result['hits']),
+                      'hits': result['hits'], 'notes': notes},
+                     ensure_ascii=False))
 
 
 # --------------------------------------------------------------------------
@@ -2850,6 +2983,14 @@ def main(argv=None):
     s.add_argument('--json', default='{}')
     s = sub.add_parser('asr')
     s.add_argument('--json', default='{}')
+    # Chunking + embedding is a long job: progress rows, then the result.
+    s = sub.add_parser('chunks')
+    s.add_argument('--json', default='{}')
+    # Retrieval only; the sentence is written by the host model.
+    s = sub.add_parser('ask')
+    s.add_argument('--json', default='{}')
+    s = sub.add_parser('recall')
+    s.add_argument('--json', default='{}')
     # Model files: `status` lists them, `remove` frees the space. Downloading
     # is deliberately not reachable from here; the web layer runs it as a job.
     s = sub.add_parser('models')
@@ -2913,6 +3054,12 @@ def main(argv=None):
             cmd_models(p, json.loads(args.json))
         elif args.cmd == 'asr':
             cmd_asr(p, json.loads(args.json))
+        elif args.cmd == 'chunks':
+            cmd_chunks(p, json.loads(args.json))
+        elif args.cmd == 'ask':
+            cmd_ask(p, json.loads(args.json))
+        elif args.cmd == 'recall':
+            cmd_recall(p, json.loads(args.json))
     except BadInput as exc:
         # 参数错误走 400：只回一行可读原因，不泄漏调用栈
         print(json.dumps({'error': str(exc)}, ensure_ascii=False))
