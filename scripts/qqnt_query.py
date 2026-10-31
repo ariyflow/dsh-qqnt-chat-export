@@ -40,13 +40,14 @@ import traceback
 import urllib.parse
 import zipfile
 
+import qqnt_derived as derived
 import qqnt_export as q
 import qqnt_media as media_mod
 
 GROUP_KIND = 'group'
 PRIVATE_KIND = 'private'
 PAGE_LIMIT_MAX = 500
-INDEX_VERSION = '6'            # bump when the sidecar schema changes
+INDEX_VERSION = '7'            # bump when the sidecar schema changes
 STATUS_INTERVAL = 1.5          # seconds between progress writes
 # Why a sync could not append and had to rebuild. The page prints these next
 # to the build state, so "重建" is not the only clue when it takes a minute.
@@ -90,6 +91,21 @@ CREATE TABLE chats(
     PRIMARY KEY(chat_kind, chat_id)
 );
 CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT);
+-- People, not accounts: the same person appears in a group and in a private
+-- chat under one uid, and the graph work needs one node per person. Filled by
+-- the views that resolve senders; empty until then.
+CREATE TABLE persons(
+    id          INTEGER PRIMARY KEY,
+    name        TEXT,
+    note        TEXT,
+    merged_into INTEGER
+);
+CREATE TABLE person_ids(
+    person_id INTEGER NOT NULL,
+    uid       TEXT NOT NULL,
+    qq        TEXT,
+    PRIMARY KEY(uid)
+);
 -- Media metadata for previews. `path` is resolved at build time so the web UI
 -- can serve a thumbnail without rescanning nt_data per request; requests still
 -- re-check it and fall back to a hash lookup when the cache was cleaned.
@@ -140,6 +156,8 @@ def paths(work):
         'group': p('group_info.db'),
         'profile': p('profile_info.db'),
         'index': p('index.sqlite'),
+        # Expensive, not rebuildable: OCR/ASR text, chunks, vectors.
+        'derived': p('derived.sqlite'),
         'status': p('build-status.json'),
         'sync': p('sync-status.json'),
         'key': p('key.txt'),
@@ -486,6 +504,20 @@ def restore_cached(p, uin, keep):
         return {'switched': False, 'account': account, 'cached': True, 'current': False,
                 'error': '切换索引失败（%s）：可能被其它程序占用，先关闭查询窗口再试。' % exc}
     return {'switched': True, 'account': account, 'cached': True, 'current': False}
+
+
+def ensure_derived(p):
+    """Create the derived store once a build has produced a usable index.
+
+    Rows in it are expensive (OCR, speech, embeddings) and cannot be rebuilt
+    from QQ, so the file is created here — after the index is in place — and
+    never dropped by a rebuild. A failure must not fail the build: the index is
+    still valid and the features that need the store report their own error.
+    """
+    try:
+        return derived.ensure(p['derived'])
+    except (sqlite3.Error, OSError):
+        return None
 
 
 def prune_cached(p, keep):
@@ -930,6 +962,7 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
                 pass
             src.close()
             prune_cached(p, keep)
+            ensure_derived(p)
             write_status(p, {
                 'state': 'done', 'mode': 'incremental', 'processed': 0,
                 'total': plan['new_total'],
@@ -1119,6 +1152,7 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
                 pass
         replace_with_retry(tmp, p['index'])
         prune_cached(p, keep)
+        ensure_derived(p)
 
         write_status(p, {
             'state': 'done', 'mode': mode, 'processed': processed,
@@ -2447,6 +2481,7 @@ def cmd_status(p, root=None, account=None):
         'index': dict(file_info(p['index']), accounts=index_accounts(p), **counts),
         'build': build,
         'sync': read_sync_status(p),
+        'derived': derived.stats(p['derived']),
         'key': os.path.exists(p['key']),
     }, ensure_ascii=False))
 
