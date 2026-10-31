@@ -11,7 +11,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { helperArgv, makeOcrRunner, runNdjson } from '../runners.js'
+import { helperArgv, makeChunksRunner, makeOcrRunner, runNdjson } from '../runners.js'
 
 const PYTHON = process.env.PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3')
 
@@ -136,6 +136,26 @@ test('the OCR runner passes the limit through and returns the helper result', as
     const result = await runner({ params: { limit: 3 } }, ctx)
     assert.deepEqual(result, { ok: true, limit: 3 })
     assert.deepEqual(calls, [[1.0, '完成']])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the chunks runner forwards force and returns the final stats', async () => {
+  const dir = await tempDir()
+  try {
+    const helper = await fakeHelper(dir, [
+      'import json',
+      "print(json.dumps({'progress': 0.5, 'message': '已处理 1/2 个会话'}), flush=True)",
+      "print(json.dumps({'ok': True, 'chunks': 3, 'vectors': 3}), flush=True)",
+    ].join('\n'))
+    const { ctx, calls } = ctxRecorder()
+    const run = makeChunksRunner({
+      settings: { python: PYTHON, workDir: dir }, queryCli: helper,
+    })
+    const result = await run({ params: { force: true } }, ctx)
+    assert.deepEqual(calls, [[0.5, '已处理 1/2 个会话']])
+    assert.deepEqual(result, { ok: true, chunks: 3, vectors: 3 })
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

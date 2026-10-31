@@ -173,3 +173,32 @@ test('searching sends the keyword and shows where a media hit came from', async 
     restore()
   }
 })
+
+test('an initial chat with a message id opens that window, not the newest page', async () => {
+  const restore = installDocument()
+  const calls = []
+  const api = {
+    get: async (path, params) => {
+      calls.push({ path, params })
+      if (path === '/api/sessions') return { sessions }
+      return { rows, total: 42, offset: 0, limit: 50, anchor: params.around }
+    },
+  }
+  const root = makeElement('main')
+  mountChats(root, { api, initial: { kind: 'private', id: 'u_abc', around: 9001 } })
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const last = calls.at(-1)
+    assert.equal(last.params.chatKind, 'private')
+    assert.equal(last.params.chatId, 'u_abc')
+    assert.equal(last.params.around, 9001)
+    // `around` already centres the window; a stale offset would be ignored
+    // server-side but makes the request harder to read.
+    assert.equal(last.params.offset, undefined)
+    const shell = root.children[0]
+    assert.match(textOf(shell.children[1].children[0]), /小林/)
+  } finally {
+    restore()
+  }
+})

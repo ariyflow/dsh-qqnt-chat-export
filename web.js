@@ -260,7 +260,8 @@ function runJson(settings, command, args = {}, { signal } = {}) {
     if (settings.account) argv.push('--account', String(settings.account))
     argv.push(command)
     if (command === 'messages' || command === 'export' || command === 'stats'
-      || command === 'media' || command === 'media-list' || command === 'models') {
+      || command === 'media' || command === 'media-list' || command === 'models'
+      || command === 'ask' || command === 'recall' || command === 'chunks') {
       argv.push('--json', JSON.stringify(args))
     }
     if (command === 'select') {
@@ -1521,6 +1522,34 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
           } catch (error) {
             sendJson(res, 400, { error: error.message })
           }
+        })
+        .catch(() => sendJson(res, 400, { error: '请求体无法解析' }))
+      return
+    }
+    // Question answering over the derived store. Retrieval only: the spans and
+    // their citations go back to the page, and the sentence is written there or
+    // by the host model — the plugin never pretends to have one.
+    if (req.method === 'POST' && pathname === '/api/ask') {
+      if (!isTrustedMutation(req)) {
+        sendJson(res, 403, { error: 'cross-origin requests are refused' })
+        return
+      }
+      readJsonBody(req)
+        .then((body) => {
+          const question = String(body?.question || '').trim()
+          if (question === '') {
+            sendJson(res, 400, { error: '问题不能为空' })
+            return
+          }
+          const args = { question, topK: Math.min(Math.max(Number(body?.topK) || 8, 1), 20) }
+          for (const key of ['chatKind', 'chatId', 'since', 'until']) {
+            const value = body?.[key]
+            if (typeof value === 'string' && value.trim() !== '') args[key] = value.trim()
+          }
+          runJson(settings, 'ask', args)
+            .then((payload) => sendJson(res, 200, payload))
+            // The helper tags bad input as 400; anything else is a real failure.
+            .catch((error) => sendJson(res, error.status || 500, { error: error.message }))
         })
         .catch(() => sendJson(res, 400, { error: '请求体无法解析' }))
       return

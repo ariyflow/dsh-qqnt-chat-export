@@ -7,7 +7,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { exportBatchTool, exportChatTool, listChatsTool, searchTool, statusTool } from '../index.js'
+import { askTool, exportBatchTool, exportChatTool, listChatsTool, recallTool, searchTool, statusTool } from '../index.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const SCRIPTS = path.join(path.dirname(HERE), 'scripts')
@@ -51,6 +51,12 @@ async function makeIndex(work) {
     "    ('group', 'g1', '测试群', ''), ('private', 'p1', '丙', '2')])",
     'conn.commit()',
     'conn.close()',
+    'import os',
+    `sys.path.insert(0, ${JSON.stringify(SCRIPTS)})`,
+    'import qqnt_derived, qqnt_embed',
+    "derived = os.path.join(os.path.dirname(sys.argv[1]), 'derived.sqlite')",
+    'qqnt_derived.ensure(derived)',
+    'qqnt_embed.run(sys.argv[1], derived, None)',
     '',
   ].join('\n'))
   execFileSync(PYTHON, [script, path.join(work, 'index.sqlite')], { stdio: 'pipe' })
@@ -362,6 +368,45 @@ test('the batch tool refuses a bad chat entry with a sentence', { skip: !hasPyth
     }, { signal: signal() })
     assert.equal(tooMany.ok, false)
     assert.match(tooMany.output, /最多导出 200 个会话/)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('ask returns spans, citations and a citation instruction', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const result = await askTool(settings).execute(
+      { question: '群里第一条消息' }, { signal: signal() })
+    assert.equal(result.ok, true, result.output)
+    assert.match(result.output, /\[1\] 测试群/)
+    assert.match(result.output, /引用（msg 11[,\d]*）/)
+    assert.match(result.output, /用 \[1\]、\[2\] 标注来源/)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('ask refuses an empty question without running the helper', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const result = await askTool(settings).execute({ question: '  ' }, { signal: signal() })
+    assert.equal(result.ok, false)
+    assert.equal(result.exitCode, 1)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('recall renders the spans as a dated timeline', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const result = await recallTool(settings).execute(
+      { query: '群里第一条消息' }, { signal: signal() })
+    assert.equal(result.ok, true, result.output)
+    assert.match(result.output, /主题：群里第一条消息/)
+    assert.match(result.output, /\d{4}-\d{2}-\d{2}/)
+    assert.match(result.output, /测试群/)
   } finally {
     await rm(work, { recursive: true, force: true })
   }

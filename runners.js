@@ -125,6 +125,24 @@ export function makeOcrRunner({ settings, queryCli }) {
 }
 
 /**
+ * The chunking + embedding job: conversation windows into `chunks`, vectors
+ * into `vectors`. Runs after OCR/ASR so the chunk text already contains the
+ * transcripts — re-running it later picks them up incrementally.
+ *
+ * @param {{settings: object, queryCli: string}} options
+ * @returns {(job: object, ctx: object) => Promise<object>}
+ */
+export function makeChunksRunner({ settings, queryCli }) {
+  return async function chunksRunner(job, ctx) {
+    const args = ['chunks', '--json', JSON.stringify({
+      limit: job.params.limit ?? null,
+      force: job.params.force === true,
+    })]
+    return runNdjson({ settings, queryCli, args, ctx })
+  }
+}
+
+/**
  * The ASR job: transcribe pending voice messages into `derived.sqlite`.
  * Same protocol as OCR, only the subcommand differs.
  *

@@ -7,6 +7,7 @@
  */
 import { ApiError, createApi } from './api.js'
 import { createStore } from './state.js'
+import { mountAsk } from './views/ask.js'
 import { mountChats } from './views/chats.js'
 import { mountModels } from './views/models.js'
 import { mountJobs } from './views/jobs.js'
@@ -62,13 +63,50 @@ store.subscribe(render)
 
 let unmount = null
 let unmountJobs = null
-// Deep link: `/app/?view=models` opens the model panel directly.
-let view = new URLSearchParams(location.search).get('view') === 'models' ? 'models' : 'chats'
+const NAV = { chats: 'viewChats', ask: 'viewAsk', models: 'viewModels' }
+// Deep links: `/app/?view=models` and `/app/?view=ask` open that view directly.
+const requested = new URLSearchParams(location.search).get('view')
+let view = Object.prototype.hasOwnProperty.call(NAV, requested || '') ? requested : 'chats'
+/** A chat (and message) the reader should open; consumed on the next mount. */
+let initialChat = null
+
+/** Highlight the active view button; the shim has no classList.toggle. */
+function paintNav() {
+  for (const [name, id] of Object.entries(NAV)) {
+    const button = document.getElementById(id)
+    if (!button) continue
+    button.classList.remove('is-active')
+    if (name === view) button.classList.add('is-active')
+  }
+}
+
+/** Switch views, optionally asking the reader to open one chat. */
+function setView(next, { chat = null } = {}) {
+  if (!Object.prototype.hasOwnProperty.call(NAV, next)) return
+  view = next
+  initialChat = chat
+  paintNav()
+  mount()
+}
+
 /** Mount the active view once the first status arrives (or the index is absent). */
 function mount() {
   if (!main) return
   if (typeof unmount === 'function') unmount()
-  unmount = view === 'models' ? mountModels(main, { api }) : mountChats(main, { api })
+  if (view === 'ask') {
+    // A citation card opens the reader on that message: same page, no reload.
+    unmount = mountAsk(main, {
+      api,
+      onOpenChat: (hit, rowId) => setView('chats', {
+        chat: { kind: hit.chatKind, id: hit.chatId, around: rowId },
+      }),
+    })
+  } else if (view === 'models') {
+    unmount = mountModels(main, { api })
+  } else {
+    unmount = mountChats(main, { api, initial: initialChat })
+    initialChat = null
+  }
   // The task panel floats over the reader so it survives view switches.
   if (!unmountJobs) unmountJobs = mountJobs(document.body, { api })
 }
@@ -103,15 +141,11 @@ if (asrBtn) {
   })
 }
 
-const toggle = document.getElementById('viewToggle')
-if (toggle) {
-  toggle.textContent = view === 'models' ? '回到会话' : '模型与组件'
-  toggle.addEventListener('click', () => {
-    view = view === 'models' ? 'chats' : 'models'
-    toggle.textContent = view === 'models' ? '回到会话' : '模型与组件'
-    mount()
-  })
+for (const [name, id] of Object.entries(NAV)) {
+  const button = document.getElementById(id)
+  if (button) button.addEventListener('click', () => setView(name))
 }
+paintNav()
 
 async function refresh() {
   try {

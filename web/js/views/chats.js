@@ -88,10 +88,12 @@ function messageRow(row) {
  * Mount the view.
  *
  * @param {HTMLElement} root - empty container owned by the caller
- * @param {{api: {get: Function}}} options
+ * @param {{api: {get: Function}, initial?: {kind: string, id: string, around?: number}}} options
+ *   `initial` opens one chat directly; `around` centers the reader on a message
+ *   (used when a citation card is clicked from the answer view).
  * @returns {() => void} cleanup
  */
-export function mountChats(root, { api }) {
+export function mountChats(root, { api, initial = null }) {
   const shell = document.createElement('div')
   shell.className = 'app-shell'
 
@@ -178,17 +180,24 @@ export function mountChats(root, { api }) {
     more.hidden = state.rows.length >= state.total
   }
 
-  async function loadMessages(reset) {
+  async function loadMessages(reset, around = null) {
     if (!state.selected) return
     const offset = reset ? 0 : state.offset + state.rows.length
+    const args = {
+      chatKind: state.selected.kind,
+      chatId: state.selected.id,
+      offset,
+      limit: PAGE_SIZE,
+      order: 'desc',
+    }
+    if (around) {
+      // The helper centres a window on the message; offset and order do not
+      // apply to that window, so they are left out rather than sent as noise.
+      delete args.offset
+      args.around = around
+    }
     try {
-      const payload = await api.get('/api/messages', {
-        chatKind: state.selected.kind,
-        chatId: state.selected.id,
-        offset,
-        limit: PAGE_SIZE,
-        order: 'desc',
-      })
+      const payload = await api.get('/api/messages', args)
       if (closed) return
       const rows = Array.isArray(payload?.rows) ? payload.rows : []
       state.rows = reset ? rows : state.rows.concat(rows)
@@ -243,12 +252,12 @@ export function mountChats(root, { api }) {
     search(keyword, ocrToggle.checked)
   })
 
-  function select(session) {
+  function select(session, around = null) {
     state.selected = session
     state.rows = []
     title.textContent = `${session.name || session.id} · ${sessionMeta(session)}`
     renderList()
-    loadMessages(true)
+    loadMessages(true, around)
   }
 
   filter.addEventListener('input', () => {
@@ -262,7 +271,10 @@ export function mountChats(root, { api }) {
       if (closed) return
       state.sessions = Array.isArray(payload?.sessions) ? payload.sessions : []
       renderList()
-      if (state.sessions.length > 0) select(state.sessions[0])
+      const jump = initial && state.sessions.find((session) =>
+        session.kind === initial.kind && String(session.id) === String(initial.id))
+      if (jump) select(jump, initial.around || null)
+      else if (state.sessions.length > 0) select(state.sessions[0])
     })
     .catch((error) => {
       if (closed) return

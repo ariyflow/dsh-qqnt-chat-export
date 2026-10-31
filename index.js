@@ -32,7 +32,7 @@ import {
 } from './settings.js'
 import { buildRunning, cleanupStorage, migrateWorkDir, removeWorkDirEntries, storageSnapshot } from './storage.js'
 import { applyPreset, readPresets } from './presets.js'
-import { makeAsrRunner, makeOcrRunner } from './runners.js'
+import { makeAsrRunner, makeChunksRunner, makeOcrRunner } from './runners.js'
 import { BUNDLE_VERSION, panelInfo, pruneAccountIndexes, spawnAutosync, startWebServer } from './web.js'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -520,6 +520,125 @@ export function searchTool(settings) {
         const qq = row.qq ? ` (${row.qq})` : ''
         lines.push(`[${row.time}] ${row.chatKind || '?'}/${row.chatId || '?'} ${row.sender}${qq}: ${text}`)
       }
+      return { ok: true, exitCode: 0, output: lines.join('\n') }
+    },
+  }
+}
+
+/** Shared by `qqnt_ask` / `qqnt_recall`: one line per message, no newlines. */
+function flat(text, max = 400) {
+  const single = String(text ?? '').replace(/\s+/g, ' ').trim()
+  return single.length > max ? `${single.slice(0, max)}…` : single
+}
+
+/** The filters both retrieval tools accept. */
+function retrievalArgs(question, args, fallbackTop) {
+  const payload = { question }
+  for (const key of ['chatKind', 'chatId', 'since', 'until']) {
+    const value = args[key]
+    if (typeof value === 'string' && value.trim() !== '') payload[key] = value.trim()
+  }
+  payload.topK = Math.min(Math.max(Number(args.topK) || fallbackTop, 1), 20)
+  return payload
+}
+
+/**
+ * Retrieval for a question: the spans that answer it, with citations.
+ *
+ * The plugin returns evidence, not prose (ADR-008): retrieval and citation are
+ * local and checkable, the sentence is written by the host model. Keeping them
+ * apart is also what makes "the answer cannot cite what retrieval never found"
+ * true by construction.
+ */
+export function askTool(settings) {
+  return {
+    name: 'qqnt_ask',
+    description: 'Retrieval for a question over local QQ conversations: returns the conversation spans most likely to answer it, each with the chat, time range, the messages it covers and a number to cite. Read the spans and write the answer yourself, citing [1], [2]; do not invent details that are not in the spans. Combines keyword terms with local embeddings when the embedding model is installed, so paraphrases are found too. Requires the sidecar index, and one run of 分块与嵌入 for the semantic half.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['question'],
+      properties: {
+        question: { type: 'string', minLength: 1, description: 'The question, in the user\'s own words (Chinese or English).' },
+        chatKind: { type: 'string', enum: ['group', 'private'], description: 'Restrict to one kind of chat.' },
+        chatId: { type: 'string', description: 'Restrict to one chat: group number, or the other party\'s uid.' },
+        since: { type: 'string', description: 'Start date (`YYYY-MM-DD`) or Unix seconds.' },
+        until: { type: 'string', description: 'End date (`YYYY-MM-DD`) or Unix seconds.' },
+        topK: { type: 'integer', minimum: 1, maximum: 20, description: 'Spans to return. Defaults to 8.' },
+      },
+    },
+    output: { schema: outputSchema(), render: renderReport },
+    async execute(args, exec) {
+      if (!existsSync(indexPath(settings))) return missingIndex(settings)
+      const question = String(args.question ?? '').trim()
+      if (question === '') return { ok: false, exitCode: 1, output: 'question 不能为空' }
+      const payloadArgs = retrievalArgs(question, args, 8)
+      const { code, payload } = await runQueryJson(
+        settings, ['ask', '--json', JSON.stringify(payloadArgs)], exec)
+      if (code !== 0) return { ok: false, exitCode: code, output: payload.error || '检索失败' }
+      const hits = Array.isArray(payload.hits) ? payload.hits : []
+      const lines = [`问题：${question}`, '']
+      if (hits.length === 0) {
+        lines.push('没有找到相关片段。')
+      }
+      hits.forEach((hit, index) => {
+        const sources = (hit.sources || []).map((name) => ({
+          text: '文字', ocr: '图片文字', asr: '语音转写', file_text: '文件文字',
+        }[name] || name)).join('／')
+        lines.push(`[${index + 1}] ${hit.chat} · ${hit.start}–${hit.end.slice(-5)} · ${sources}`)
+        lines.push(flat(hit.text, 800))
+        const quotes = (hit.citations || [])
+          .map((row) => `${row.sender} ${String(row.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 120)}`)
+          .join(' | ')
+        if (quotes) lines.push(`引用（msg ${hit.msg_ids.join(',')}）：${quotes}`)
+        lines.push('')
+      })
+      for (const note of payload.notes || []) lines.push(`提示：${note}`)
+      lines.push('回答时请只依据上面的片段，用 [1]、[2] 标注来源；片段里没有的信息就说没有找到。')
+      return { ok: true, exitCode: 0, output: lines.join('\n') }
+    },
+  }
+}
+
+/** `qqnt_ask` as a timeline: same retrieval, grouped by day, oldest first. */
+export function recallTool(settings) {
+  return {
+    name: 'qqnt_recall',
+    description: 'A topic over time: retrieves the same conversation spans as qqnt_ask but returns them grouped by day, oldest first, so you can trace how a plan, decision or price changed. Each item has the chat, time, quoted messages and the message ids behind them. Requires the sidecar index.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['query'],
+      properties: {
+        query: { type: 'string', minLength: 1, description: 'Topic or question to trace.' },
+        chatKind: { type: 'string', enum: ['group', 'private'] },
+        chatId: { type: 'string', description: 'Restrict to one chat.' },
+        since: { type: 'string', description: 'Start date (`YYYY-MM-DD`) or Unix seconds.' },
+        until: { type: 'string', description: 'End date (`YYYY-MM-DD`) or Unix seconds.' },
+        topK: { type: 'integer', minimum: 1, maximum: 20, description: 'Spans to return. Defaults to 20.' },
+      },
+    },
+    output: { schema: outputSchema(), render: renderReport },
+    async execute(args, exec) {
+      if (!existsSync(indexPath(settings))) return missingIndex(settings)
+      const question = String(args.query ?? '').trim()
+      if (question === '') return { ok: false, exitCode: 1, output: 'query 不能为空' }
+      const payloadArgs = retrievalArgs(question, args, 20)
+      payloadArgs.topK = Math.min(payloadArgs.topK, 20)
+      const { code, payload } = await runQueryJson(
+        settings, ['recall', '--json', JSON.stringify(payloadArgs)], exec)
+      if (code !== 0) return { ok: false, exitCode: code, output: payload.error || '检索失败' }
+      const days = Array.isArray(payload.days) ? payload.days : []
+      const lines = [`主题：${question}`, '']
+      if (days.length === 0) lines.push('没有找到相关片段。')
+      for (const day of days) {
+        lines.push(day.date)
+        for (const item of day.items) {
+          lines.push(`  ${item.time.slice(-5)} ${item.chat}：${flat(item.quote, 300)}`)
+        }
+        lines.push('')
+      }
+      for (const note of payload.notes || []) lines.push(`提示：${note}`)
       return { ok: true, exitCode: 0, output: lines.join('\n') }
     },
   }
@@ -1072,6 +1191,10 @@ export function apply(ctx, config) {
   ctx.tools.register(exportChatTool(settings))
   // Batch export: one ZIP, one manifest, instead of N tool calls.
   ctx.tools.register(exportBatchTool(settings))
+  // Question answering in two steps: this side retrieves and cites, the host
+  // model writes the sentence (ADR-008).
+  ctx.tools.register(askTool(settings))
+  ctx.tools.register(recallTool(settings))
 
   let webUrl = ''
   let webServer = null
@@ -1121,6 +1244,7 @@ export function apply(ctx, config) {
       runners: {
         ocr: makeOcrRunner({ settings, queryCli: QUERY_CLI }),
         asr: makeAsrRunner({ settings, queryCli: QUERY_CLI }),
+        chunks: makeChunksRunner({ settings, queryCli: QUERY_CLI }),
       },
     })
     await server.ready
