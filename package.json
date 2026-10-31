@@ -51,10 +51,7 @@
     "scripts/*.py",
     "docs/screenshot.png",
     "docs/screenshot-stats.png",
-    "docs/wal-notes.md",
-    "docs/media-notes.md",
-    "docs/windows-checklist.md",
-    "docs/verification-windows.md",
+    "docs/*.md",
     "CHANGELOG.md",
     "python"
   ],

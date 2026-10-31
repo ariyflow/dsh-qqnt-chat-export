@@ -6,7 +6,7 @@
  */
 import assert from 'node:assert/strict'
 import { execSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -47,12 +47,50 @@ test('every local module import is inside the published tarball', () => {
   assert.ok(packed.has('client.js'), 'the sidebar half must ship with the bundle')
 })
 
-test('every screenshot the README embeds is inside the tarball', () => {
-  const packed = packedFiles()
-  const readme = readFileSync(path.join(ROOT, 'README.md'), 'utf8')
-  const images = [...readme.matchAll(/!\[[^\]]*\]\((docs\/[^)\s]+)\)/g)].map((match) => match[1])
-  assert.ok(images.length >= 2, 'the README should keep its screenshots')
-  for (const image of images) {
-    assert.ok(packed.has(image), `README embeds ${image} but files[] does not ship it`)
+/** Every image the repo's own documentation embeds, as a path from ROOT. */
+function documentedImages() {
+  const pages = [['README.md', '']]
+  for (const file of readdirSync(path.join(ROOT, 'docs'))) {
+    if (file.endsWith('.md')) pages.push([`docs/${file}`, 'docs/'])
   }
+  const images = []
+  for (const [page, prefix] of pages) {
+    const source = readFileSync(path.join(ROOT, page), 'utf8')
+    for (const match of source.matchAll(/!\[[^\]]*\]\(([^)\s]+)\)/g)) {
+      if (/^[a-z]+:/i.test(match[1])) continue
+      images.push({ page, file: path.posix.normalize(prefix + match[1]) })
+    }
+  }
+  return images
+}
+
+test('every screenshot the docs embed is inside the tarball', () => {
+  const packed = packedFiles()
+  const images = documentedImages()
+  assert.ok(images.some((image) => image.page === 'README.md'), 'the README should keep its screenshot')
+  for (const image of images) {
+    assert.ok(packed.has(image.file), `${image.page} embeds ${image.file} but files[] does not ship it`)
+  }
+})
+
+test('every relative link in the docs points at a file that exists', () => {
+  const pages = ['README.md']
+  for (const file of readdirSync(path.join(ROOT, 'docs'))) {
+    if (file.endsWith('.md')) pages.push(`docs/${file}`)
+  }
+  const broken = []
+  for (const page of pages) {
+    const source = readFileSync(path.join(ROOT, page), 'utf8')
+    for (const match of source.matchAll(/\[[^\]]*\]\(([^)\s]+)\)/g)) {
+      const target = match[1]
+      if (/^[a-z]+:/i.test(target) || target.startsWith('#')) continue
+      const clean = target.split('#')[0]
+      if (!clean) continue
+      const resolved = path.resolve(path.dirname(path.join(ROOT, page)), clean)
+      let ok = false
+      try { ok = statSync(resolved).isFile() } catch { ok = false }
+      if (!ok) broken.push(`${page} -> ${target}`)
+    }
+  }
+  assert.deepEqual(broken, [], `broken links:\n${broken.join('\n')}`)
 })
