@@ -15,6 +15,7 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
 - **索引与搜索**：首次同步建旁路明文索引 `index.sqlite`，之后查询与导出只读它；关键词走 FTS5 trigram，中文子串也是索引查找；支持多账号索引缓存；
 - **分享与保护**：昵称 / QQ 脱敏、媒体打包、按天分文件、AES-256 密码 ZIP；
 - **DSH 侧边栏面板**：左侧栏多一个「QQ 聊天记录」图标，主区直接打开同一个页面，不用切浏览器标签。
+- **模块化界面（预览）**：`/app/` 下是重写中的界面（会话列表 + 消息阅读 + 后台任务面板），旧页面仍是默认入口，功能一致前不会切换。
 
 详细功能、面板行为与每个导出选项见 [docs/features.md](docs/features.md)。
 
