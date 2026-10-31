@@ -20,22 +20,28 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
 
 ## 安装
 
-在 DSH 会话里让 agent 安装，等价于：
+`dsh plugin` 只是把参数转给 profile 目录里的 pnpm，所以直接把 GitHub 仓库当依赖装：
 
-```text
-plugin_manager install_bundle → github:ariyflow/dsh-qqnt-chat-export
+```bash
+dsh plugin --profile web add github:ariyflow/dsh-qqnt-chat-export
 ```
 
-装好后插件行 `qqnt-chat-export` 自动启用，八个工具立刻可见，网页在 `http://127.0.0.1:46728/`。
+`web` 换成你要装进去的 profile 名。装好后插件行 `qqnt-chat-export` 自动启用，八个工具立刻可见，网页在 `http://127.0.0.1:46728/`。
 
-也可以克隆到本地后用绝对路径安装（`install_bundle` 接受目录）：
+也可以先克隆到本地，再按目录装（改源码调试时更顺手）：
 
 ```bash
 git clone https://github.com/ariyflow/dsh-qqnt-chat-export.git
-# 然后用目录路径安装：plugin_manager install_bundle → <克隆下来的目录>
+dsh plugin --profile web add /path/to/dsh-qqnt-chat-export
 ```
 
-> 插件行的 id 固定为 `qqnt-chat-export`。已经装了旧的 `@local/qqnt-chat-export` 时先 `remove_bundle` 卸掉，否则两个包抢同一个行 id。
+卸载：
+
+```bash
+dsh plugin --profile web remove dsh-qqnt-chat-export
+```
+
+> 插件行的 id 固定为 `qqnt-chat-export`。如果之前装过旧的 `@local/qqnt-chat-export` 本地包，先把它 remove 掉，否则两个包会抢同一个行 id。装完重启 DSH，`GET /api/qqnt/panel` 返回 200 就说明宿主半边已加载。
 
 ## 快速开始
 
