@@ -88,6 +88,21 @@ if (ocrBtn) {
   })
 }
 
+const asrBtn = document.getElementById('asrBtn')
+if (asrBtn) {
+  asrBtn.addEventListener('click', async () => {
+    asrBtn.disabled = true
+    try {
+      await api.post('/api/jobs', { kind: 'asr', summary: '转写语音' })
+      if (statusBox) statusBox.textContent = '已加入转写任务，进度见右下角'
+    } catch (error) {
+      if (statusBox) statusBox.textContent = `无法开始转写：${error.message}`
+    } finally {
+      asrBtn.disabled = false
+    }
+  })
+}
+
 const toggle = document.getElementById('viewToggle')
 if (toggle) {
   toggle.textContent = view === 'models' ? '回到会话' : '模型与组件'

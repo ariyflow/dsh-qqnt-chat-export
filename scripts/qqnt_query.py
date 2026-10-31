@@ -40,6 +40,7 @@ import traceback
 import urllib.parse
 import zipfile
 
+import qqnt_asr as asr
 import qqnt_derived as derived
 import qqnt_export as q
 import qqnt_models as models
@@ -1185,6 +1186,29 @@ def run_build(p, root, account, refresh, lock=None, keep=DEFAULT_KEEP_ACCOUNTS, 
         write_status(p, dict(state, state='error', finishedAt=int(time.time()),
                              error=message))
         raise
+
+
+def cmd_asr(p, args):
+    """Transcribe pending voice messages, one JSON object per line."""
+    report = models.status(p['work'], 'paraformer-zh')['paraformer-zh']
+    engine_status = asr.available()
+    if not engine_status['ok']:
+        raise BadInput(engine_status['error'] + '。在设置页点「安装语音组件」。')
+    if not report['installed']:
+        missing = [item['name'] for item in report['files'] if not item['exists']]
+        raise BadInput('语音模型未下载（缺 %s）。先运行：python3 scripts/qqnt_models.py'
+                       ' --work "%s" ensure paraformer-zh --download'
+                       % ('、'.join(missing), p['work']))
+    engine = asr.make_engine(models.model_dir(p['work'], 'paraformer-zh'))
+
+    def progress(done, total, message):
+        print(json.dumps({'progress': round(done / total, 4) if total else 1.0,
+                          'message': message}, ensure_ascii=False), flush=True)
+
+    stats = asr.run(p['index'], p['derived'], engine,
+                    limit=args.get('limit'), progress=progress)
+    stats['ok'] = True
+    print(json.dumps(stats, ensure_ascii=False))
 
 
 def cmd_models(p, args):
@@ -2824,6 +2848,8 @@ def main(argv=None):
     # so a caller can show a percentage while the batch runs.
     s = sub.add_parser('ocr')
     s.add_argument('--json', default='{}')
+    s = sub.add_parser('asr')
+    s.add_argument('--json', default='{}')
     # Model files: `status` lists them, `remove` frees the space. Downloading
     # is deliberately not reachable from here; the web layer runs it as a job.
     s = sub.add_parser('models')
@@ -2885,6 +2911,8 @@ def main(argv=None):
             cmd_ocr(p, json.loads(args.json))
         elif args.cmd == 'models':
             cmd_models(p, json.loads(args.json))
+        elif args.cmd == 'asr':
+            cmd_asr(p, json.loads(args.json))
     except BadInput as exc:
         # 参数错误走 400：只回一行可读原因，不泄漏调用栈
         print(json.dumps({'error': str(exc)}, ensure_ascii=False))

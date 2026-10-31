@@ -120,8 +120,20 @@ export function runNdjson({ settings, queryCli, args, ctx }) {
 export function makeOcrRunner({ settings, queryCli }) {
   return async function ocrRunner(job, ctx) {
     const args = ['ocr', '--json', JSON.stringify({ limit: job.params.limit ?? null })]
-    const result = await runNdjson({ settings, queryCli, args, ctx })
-    if (result && result.canceled) return result
-    return result
+    return runNdjson({ settings, queryCli, args, ctx })
+  }
+}
+
+/**
+ * The ASR job: transcribe pending voice messages into `derived.sqlite`.
+ * Same protocol as OCR, only the subcommand differs.
+ *
+ * @param {{settings: object, queryCli: string}} options
+ * @returns {(job: object, ctx: object) => Promise<object>}
+ */
+export function makeAsrRunner({ settings, queryCli }) {
+  return async function asrRunner(job, ctx) {
+    const args = ['asr', '--json', JSON.stringify({ limit: job.params.limit ?? null })]
+    return runNdjson({ settings, queryCli, args, ctx })
   }
 }
