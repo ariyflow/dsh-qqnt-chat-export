@@ -2762,6 +2762,43 @@ def export_bundle(conn, args, out, label, chats, src=None, datadir='', password=
 MAX_BATCH_CHATS = 200
 
 
+def missing_chats(conn, args, chats):
+    """The chats a call names that the index does not contain.
+
+    Exporting a chat that is not in the index used to write a header-only file
+    and report success, so a stale selection (the chat was pruned, or another
+    account was selected) looked like a finished export. The tool layer already
+    refuses that; this is the same check for every caller of `export`.
+    """
+    pairs = []
+    for item in chats or []:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get('kind') or '')
+        chat_id = str(item.get('id') or '')
+        if kind and chat_id:
+            pairs.append((kind, chat_id))
+    kind = str(args.get('chatKind') or '')
+    chat_id = str(args.get('chatId') or '')
+    # A bare `chatKind` is a filter over every chat of that kind, not a chat.
+    if not pairs and kind and chat_id:
+        pairs.append((kind, chat_id))
+    missing = []
+    seen = set()
+    for kind, chat_id in pairs:
+        if (kind, chat_id) in seen:
+            continue
+        seen.add((kind, chat_id))
+        if kind not in (GROUP_KIND, PRIVATE_KIND):
+            raise BadInput('会话类型只能是 group 或 private：%s' % kind)
+        row = conn.execute(
+            'SELECT 1 FROM messages WHERE chat_kind=? AND chat_id=? LIMIT 1',
+            (kind, chat_id)).fetchone()
+        if row is None:
+            missing.append('%s/%s' % (kind, chat_id))
+    return missing
+
+
 def cmd_export(p, args):
     fmt = str(args.get('format') or 'txt').lower()
     if fmt not in ('txt', 'csv', 'json', 'md', 'html', 'sqlite'):
@@ -2819,6 +2856,10 @@ def cmd_export(p, args):
     conn = open_index(p)
     src = None
     try:
+        missing = missing_chats(conn, args, chats)
+        if missing:
+            raise BadInput('索引里没有这些会话：%s（先在网页里同步索引，或检查会话参数）'
+                           % '、'.join(missing[:5]))
         if zip_mode:
             datadir = ''
             if media_enabled:

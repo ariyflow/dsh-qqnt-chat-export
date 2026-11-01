@@ -60,6 +60,8 @@ test('jobStateLabel reads the result, not just the state', () => {
     result: { rows: 12, bytes: 2048, encrypted: true, media: { files: 3 } },
   }), /12 条 · 2\.0 KB · 媒体 3 个 · 加密/)
   assert.equal(jobStateLabel({ state: 'failed' }), '失败')
+  assert.equal(jobStateLabel({ state: 'failed', error: '密码长度需要 4~128 个字符' }),
+    '失败：密码长度需要 4~128 个字符')
   assert.equal(jobStateLabel({ state: 'canceled' }), '已取消')
   assert.equal(downloadHref({ id: 'abc', state: 'done' }), '/api/jobs/abc/download')
   assert.equal(downloadHref({ id: 'abc', state: 'running' }), '')

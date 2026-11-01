@@ -410,6 +410,31 @@ class ExportTests(unittest.TestCase):
         self.assertIn('丙&lt;script&gt;', body)
         self.assertNotIn('<script>', body)
 
+    def test_unknown_chat_is_refused_and_leaves_no_file(self):
+        out = os.path.join(self.paths['exports'], 'missing.txt')
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), self.assertRaises(self.qq.BadInput):
+            self.qq.cmd_export(self.paths, {
+                'format': 'txt', 'out': out,
+                'chatKind': self.qq.GROUP_KIND, 'chatId': 'nope'})
+        self.assertFalse(os.path.exists(out))
+        batch = os.path.join(self.paths['exports'], 'missing.zip')
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(self.qq.BadInput):
+            self.qq.cmd_export(self.paths, {
+                'format': 'txt', 'out': batch,
+                'chats': [{'kind': self.qq.GROUP_KIND, 'id': 'g1'},
+                          {'kind': self.qq.GROUP_KIND, 'id': 'nope'}]})
+        self.assertFalse(os.path.exists(batch))
+
+    def test_named_chat_exports_only_that_chat(self):
+        out = os.path.join(self.paths['exports'], 'g1.txt')
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.qq.cmd_export(self.paths, {
+                'format': 'txt', 'out': out,
+                'chatKind': self.qq.GROUP_KIND, 'chatId': 'g1'})
+        self.assertEqual(json.loads(buf.getvalue())['rows'], 1)
+
     def test_sqlite_export_keeps_every_row(self):
         out, _ = self.export('sqlite')
         conn = sqlite3.connect(out)

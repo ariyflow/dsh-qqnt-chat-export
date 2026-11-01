@@ -83,7 +83,9 @@ export function jobStateLabel(job) {
     const media = job?.result?.media?.files ? ` · 媒体 ${job.result.media.files} 个` : ''
     return `${rows} 条 · ${formatBytes(bytes)}${media}${encrypted}`
   }
-  if (state === 'failed') return '失败'
+  // A failed job used to show just "失败", so the reason (a missing chat, a
+  // bad password, a missing interpreter) only existed in the JSON.
+  if (state === 'failed') return job.error ? `失败：${job.error}` : '失败'
   if (state === 'canceling') return '正在停止…'
   if (state === 'canceled') return '已取消'
   if (state === 'interrupted') return '上次运行被中断'
@@ -377,6 +379,8 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
     const info = document.createElement('span')
     info.className = 'export-task-meta'
     info.textContent = jobStateLabel(job)
+    // The line is clamped to one line; the full error stays on hover.
+    if (job.error) info.title = String(job.error)
 
     const actions = document.createElement('span')
     actions.className = 'export-task-actions'

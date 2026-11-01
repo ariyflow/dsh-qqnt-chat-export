@@ -18,6 +18,11 @@ test('jobMeta reads state, percent and message', () => {
     '进行中 · 32% · 已识别 312/987 张')
   assert.equal(jobMeta({ state: 'done', progress: 1 }), '完成')
   assert.equal(jobMeta({ state: 'interrupted' }), '被中断')
+  // The reason lives in `error`; a failed row that prints only "失败" is a dead
+  // end for the user.
+  assert.equal(jobMeta({ state: 'failed', error: '索引里没有这些会话：group/nope' }),
+    '失败 · 索引里没有这些会话：group/nope')
+  assert.equal(jobMeta({ state: 'failed', error: '' , message: '导出失败' }), '失败 · 导出失败')
 })
 
 test('visibleJobs ignores rows without an id', () => {

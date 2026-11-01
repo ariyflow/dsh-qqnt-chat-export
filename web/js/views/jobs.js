@@ -20,13 +20,20 @@ const STATE_LABELS = {
   interrupted: '被中断',
 }
 
-/** `running · 识别 312/1987 张` — the line under the summary. */
+/**
+ * `running · 识别 312/1987 张` — the line under the summary.
+ *
+ * A failed job carries its reason in `error`; showing only "失败" left the user
+ * with nothing to act on.
+ */
 export function jobMeta(job) {
   const label = STATE_LABELS[job.state] || job.state
   const progress = Number(job.progress) > 0 && job.state !== 'done'
     ? `${Math.round(Number(job.progress) * 100)}%`
     : ''
-  return [label, progress, job.message].filter((part) => part !== '' && part !== undefined).join(' · ')
+  const failed = job.state === 'failed' || job.state === 'interrupted'
+  const detail = failed ? (job.error || job.message) : job.message
+  return [label, progress, detail].filter((part) => part !== '' && part !== undefined).join(' · ')
 }
 
 /** Only show the panel when there is something to show. */
@@ -83,6 +90,7 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
     const meta = document.createElement('span')
     meta.className = 'job-meta'
     meta.textContent = jobMeta(job)
+    if (job.error) meta.title = String(job.error)
 
     const actions = document.createElement('span')
     actions.className = 'job-actions'
