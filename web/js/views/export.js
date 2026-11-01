@@ -84,6 +84,7 @@ export function jobStateLabel(job) {
     return `${rows} 条 · ${formatBytes(bytes)}${media}${encrypted}`
   }
   if (state === 'failed') return '失败'
+  if (state === 'canceling') return '正在停止…'
   if (state === 'canceled') return '已取消'
   if (state === 'interrupted') return '上次运行被中断'
   return '—'
@@ -446,9 +447,9 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
       columns: columnBoxes.filter((item) => item.box.checked).map((item) => item.value),
     }
     try {
-      const payload = await api.post('/api/presets', {
-        presets: [...state.presets, preset],
-      })
+      // One preset at a time: the server merges against the list on disk, so
+      // a preset saved in another tab is not dropped.
+      const payload = await api.post('/api/presets', { add: preset })
       state.presets = Array.isArray(payload?.presets) ? payload.presets : state.presets
       const option = document.createElement('option')
       option.value = preset.name

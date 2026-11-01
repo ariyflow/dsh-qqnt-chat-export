@@ -31,6 +31,7 @@ import mimetypes
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import sys
 import tempfile
@@ -2559,6 +2560,61 @@ def write_zip(directory, target, password=''):
                 pass
 
 
+BUNDLE_PREFIX = '.bundle-'
+BUNDLE_MAX_AGE = 60 * 60
+
+
+def _sweep_bundles(directory):
+    """Delete staging directories a killed export left behind.
+
+    A cancel sends SIGTERM; Python's default handler exits without running
+    `finally`, so the bundle directory used to survive forever, holding a full
+    copy of the media. The next export in the same directory reclaims it.
+    """
+    try:
+        cutoff = time.time() - BUNDLE_MAX_AGE
+        for name in os.listdir(directory):
+            if not name.startswith(BUNDLE_PREFIX):
+                continue
+            path = os.path.join(directory, name)
+            try:
+                if os.path.isdir(path) and os.path.getmtime(path) < cutoff:
+                    shutil.rmtree(path, ignore_errors=True)
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+
+class _BundleGuard:
+    """Remove the staging directory even when the job is stopped by a signal."""
+
+    def __init__(self, path):
+        self.path = path
+        self._previous = {}
+
+    def __enter__(self):
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                self._previous[sig] = signal.getsignal(sig)
+                signal.signal(sig, self._handle)
+            except (ValueError, OSError):
+                continue      # not the main thread, or the platform refuses
+        return self
+
+    def _handle(self, signum, _frame):
+        shutil.rmtree(self.path, ignore_errors=True)
+        os._exit(128 + signum)
+
+    def __exit__(self, *exc):
+        for sig, previous in self._previous.items():
+            try:
+                signal.signal(sig, previous)
+            except (ValueError, OSError):
+                continue
+        return False
+
+
 def export_bundle(conn, args, out, label, chats, src=None, datadir='', password=''):
     """Many chats (or one chat plus media) in one zip with a manifest."""
     fmt = args['format']
@@ -2569,9 +2625,12 @@ def export_bundle(conn, args, out, label, chats, src=None, datadir='', password=
                    'skipped': [], 'skippedCount': 0}
     budget = {'left': media_mod.MAX_TOTAL_BYTES}
     cache = {}
-    workdir = tempfile.mkdtemp(prefix='.bundle-', dir=os.path.dirname(out) or '.')
+    bundle_dir = os.path.dirname(out) or '.'
+    _sweep_bundles(bundle_dir)
+    workdir = tempfile.mkdtemp(prefix=BUNDLE_PREFIX, dir=bundle_dir)
     entries, skipped = [], []
     total = 0
+    guard = _BundleGuard(workdir).__enter__()
     try:
         for index, scope in enumerate(chats or [None], 1):
             scope_args = dict(args)
@@ -2688,6 +2747,7 @@ def export_bundle(conn, args, out, label, chats, src=None, datadir='', password=
             f.write('\n')
         write_zip(workdir, out, password)
     finally:
+        guard.__exit__()
         shutil.rmtree(workdir, ignore_errors=True)
     q.private_file(out)
     size = os.path.getsize(out) if os.path.exists(out) else 0

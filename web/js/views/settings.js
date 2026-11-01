@@ -484,9 +484,8 @@ export function mountSettings(root, { api }) {
         remove.className = 'ghost danger'
         remove.textContent = '删除'
         remove.addEventListener('click', async () => {
-          const remaining = presets.filter((entry) => entry !== item)
           try {
-            await api.post('/api/presets', { presets: remaining })
+            await api.post('/api/presets', { remove: item.name })
             await loadPresets()
           } catch (error) {
             presetLine.textContent = `删除失败：${error.message}`

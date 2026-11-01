@@ -167,7 +167,11 @@ test('a running job stops cooperatively through isCanceled()', async () => {
   try {
     const row = queue.submit('loop')
     await tick()
-    queue.cancel(row.id)
+    const asked = queue.cancel(row.id)
+    // The runner is still attached, so the row is `canceling`, not terminal.
+    assert.equal(asked.state, 'canceling')
+    assert.equal(asked.canRetry, false)
+    assert.equal(asked.canCancel, false)
     await new Promise((resolve) => setTimeout(resolve, 60))
     assert.equal(observed, true)
     assert.equal(queue.get(row.id).state, 'canceled')
@@ -325,7 +329,7 @@ test('a cancelled job cannot be retried while its runner is still alive', async 
     const job = queue.submit('slow', { summary: '慢' })
     await tick()
     const canceled = queue.cancel(job.id)
-    assert.equal(canceled.state, 'canceled')
+    assert.equal(canceled.state, 'canceling')
     // The runner has not returned yet: retrying now would start a second copy.
     assert.equal(canceled.canRetry, false)
     assert.equal(queue.retry(job.id), null)

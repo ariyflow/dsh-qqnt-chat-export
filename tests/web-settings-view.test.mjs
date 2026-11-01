@@ -163,7 +163,7 @@ test('a preset can be deleted from settings', async () => {
     row.children[2].dispatch('click')
     await tick()
     const post = calls.find((call) => call.method === 'POST' && call.path === '/api/presets')
-    assert.deepEqual(post.body, { presets: [] })
+    assert.deepEqual(post.body, { remove: 'CSV 只要正文' })
   } finally {
     cleanup()
     restore()

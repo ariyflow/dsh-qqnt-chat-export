@@ -29,7 +29,7 @@ export const MAX_KEPT = 40
 /** A job older than this is failed rather than pinning a slot forever. */
 export const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
 
-/** @typedef {'queued'|'running'|'done'|'failed'|'canceled'|'interrupted'} JobState */
+/** @typedef {'queued'|'running'|'canceling'|'done'|'failed'|'canceled'|'interrupted'} JobState */
 
 /**
  * @param {object} options
@@ -56,7 +56,8 @@ export function createJobQueue({
   const file = () => path.join(path.resolve(settings.workDir), 'jobs.json')
   const logDir = () => path.join(path.resolve(settings.workDir), 'jobs')
 
-  const active = () => jobs.filter((job) => job.state === 'running').length
+  // `canceling` still has a runner attached, so it occupies a slot.
+  const active = () => jobs.filter((job) => job.state === 'running' || job.state === 'canceling').length
   const queued = () => jobs.filter((job) => job.state === 'queued')
 
   let counter = 0
@@ -117,8 +118,10 @@ export function createJobQueue({
     if (!Array.isArray(rows)) return
     for (const row of rows.slice(0, maxKept)) {
       if (!row || typeof row !== 'object' || typeof row.id !== 'string' || row.id === '') continue
+      // A row left mid-cancel is as interrupted as a running one: its runner
+      // is gone and its params were never persisted.
       const state = ['done', 'failed', 'canceled'].includes(row.state) ? row.state
-        : (row.state === 'running' ? 'interrupted' : 'canceled')
+        : (['running', 'canceling'].includes(row.state) ? 'interrupted' : 'canceled')
       jobs.push({
         id: row.id,
         kind: String(row.kind || ''),
@@ -218,7 +221,7 @@ export function createJobQueue({
     const runner = runners[job.kind]
     const ctx = {
       canceled: false,
-      isCanceled: () => ctx.canceled || job.state === 'canceled',
+      isCanceled: () => ctx.canceled || job.state === 'canceling' || job.state === 'canceled',
       log: (line) => appendLog(job, line),
       onProgress(progress, message = '') {
         const value = Number(progress)
@@ -262,8 +265,9 @@ export function createJobQueue({
       if (ctx.timedOut) {
         job.state = 'failed'
         job.error = job.error || '任务超时'
-      } else if (ctx.canceled || job.state === 'canceled') {
+      } else if (ctx.canceled || job.state === 'canceling' || job.state === 'canceled') {
         job.state = 'canceled'
+        job.message = ''
       } else {
         job.state = 'done'
         job.progress = 1
@@ -304,7 +308,9 @@ export function createJobQueue({
     if (job.state !== 'running') return publicRow(job)
     const ctx = contexts.get(job.id)
     if (ctx) ctx.canceled = true
-    job.state = 'canceled'
+    // Not `canceled` yet: the runner is still attached and its result has not
+    // landed. `start()`'s finally is what makes the row terminal.
+    job.state = 'canceling'
     job.message = '正在停止…'
     persist()
     return publicRow(job)
@@ -356,7 +362,7 @@ export function createJobQueue({
     let removed = 0
     for (let index = jobs.length - 1; index >= 0; index -= 1) {
       const job = jobs[index]
-      if (job.state === 'running' || job.state === 'queued') continue
+      if (['running', 'canceling', 'queued'].includes(job.state)) continue
       if ((job.finishedAt || 0) * 1000 > cutoff) continue
       jobs.splice(index, 1)
       removed += 1

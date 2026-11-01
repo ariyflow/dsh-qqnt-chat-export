@@ -95,3 +95,63 @@ test('a missing interpreter fails the job instead of killing the host', async ()
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('sweepExports drops old files and staging directories, keeps fresh ones', async () => {
+  const { sweepExports } = await import('../web.js')
+  const { mkdir, stat, utimes, writeFile } = await import('node:fs/promises')
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'qqnt-sweep-'))
+  const oldDir = path.join(dir, '.bundle-old')
+  const oldFile = path.join(dir, 'old.txt')
+  const freshFile = path.join(dir, 'fresh.txt')
+  await mkdir(oldDir)
+  await writeFile(oldFile, 'x')
+  await writeFile(freshFile, 'y')
+  const stale = new Date(Date.now() - 2 * 60 * 60 * 1000)
+  await utimes(oldDir, stale, stale)
+  await utimes(oldFile, stale, stale)
+  try {
+    sweepExports(dir)
+    await assert.rejects(stat(oldDir), 'a stale bundle directory must be removed')
+    await assert.rejects(stat(oldFile), 'a stale export must be removed')
+    assert.ok((await stat(freshFile)).isFile(), 'a fresh export must survive')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('presets accept add and remove without clobbering the other tab', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'qqnt-presets-'))
+  const { server, port } = await startServer({ python: 'python3', workDir: dir }, { handlers: {} })
+  const base = `http://127.0.0.1:${port}`
+  const post = (body) => fetch(`${base}/api/presets`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-qqnt-action': '1' },
+    body: JSON.stringify(body),
+  })
+  try {
+    let response = await post({ add: { name: 'A', format: 'txt' } })
+    assert.equal(response.status, 200)
+    assert.equal((await response.json()).presets.length, 1)
+
+    // A second tab adds B against the list on disk, not against its own copy.
+    response = await post({ add: { name: 'B', format: 'csv' } })
+    let payload = await response.json()
+    assert.deepEqual(payload.presets.map((item) => item.name), ['A', 'B'])
+
+    // Same name replaces in place.
+    response = await post({ add: { name: 'A', format: 'json' } })
+    payload = await response.json()
+    assert.equal(payload.presets.length, 2)
+    assert.equal(payload.presets.find((item) => item.name === 'A').format, 'json')
+
+    response = await post({ remove: 'A' })
+    payload = await response.json()
+    assert.deepEqual(payload.presets.map((item) => item.name), ['B'])
+
+    response = await post({})
+    assert.equal(response.status, 400)
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})

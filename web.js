@@ -12,7 +12,7 @@
  */
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, createReadStream, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, createReadStream, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
@@ -544,14 +544,19 @@ export function readSyncState(workDir) {
   }
 }
 
-/** Drop export files a previous session left behind. */
-function sweepExports(dir) {
+/** Drop export files (and staging directories) a previous session left behind. */
+export function sweepExports(dir) {
   try {
     const cutoff = Date.now() - EXPORT_DIR_MAX_AGE_MS
     for (const name of readdirSync(dir)) {
       const file = path.join(dir, name)
       try {
-        if (statSync(file).mtimeMs < cutoff) unlinkSync(file)
+        const info = lstatSync(file)
+        if (info.mtimeMs >= cutoff) continue
+        // A cancelled bundle export stages media in `.bundle-*`; the Python
+        // side removes it on SIGTERM, this catches a SIGKILL.
+        if (info.isDirectory()) rmSync(file, { recursive: true, force: true })
+        else unlinkSync(file)
       } catch {
         // Ignore files another request is still streaming.
       }
@@ -1292,9 +1297,22 @@ function exportRequest(body) {
       }
       readJsonBody(req)
         .then((body) => {
-          // The page owns the whole list, so a POST replaces it. Naming a
-          // preset twice is a mistake, not a merge.
-          const rows = Array.isArray(body?.presets) ? body.presets : []
+          const current = readPresets(settings.workDir)
+          let rows
+          if (Array.isArray(body?.presets)) {
+            // Whole-list replace stays supported for older pages.
+            rows = body.presets
+          } else if (body?.add && typeof body.add === 'object') {
+            // `add` merges against the list on disk, so two open tabs cannot
+            // clobber each other's presets. Same name replaces in place.
+            const name = String(body.add.name || '').trim()
+            rows = current.filter((item) => item.name !== name).concat([body.add])
+          } else if (typeof body?.remove === 'string') {
+            rows = current.filter((item) => item.name !== body.remove)
+          } else {
+            throw Object.assign(new Error('presets 需要是数组，或用 add / remove 描述一次改动'),
+              { status: 400 })
+          }
           const saved = writePresets(settings.workDir, rows)
           sendJson(res, 200, { presets: saved })
         })

@@ -13,6 +13,7 @@
 const STATE_LABELS = {
   queued: '排队中',
   running: '进行中',
+  canceling: '正在停止…',
   done: '完成',
   failed: '失败',
   canceled: '已取消',
