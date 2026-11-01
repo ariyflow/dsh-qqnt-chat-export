@@ -20,6 +20,25 @@ import path from 'node:path'
  * @param {string} queryCli - absolute path to `qqnt_query.py`
  * @param {string[]} rest - subcommand and its flags
  */
+/**
+ * Keep paths and chat labels out of `job.error`, which `jobs.json` persists.
+ *
+ * A Python traceback quotes the output path (`exports/<id>--<label>.txt`), so a
+ * failed export used to write the group name into the job list — the one file
+ * the queue promises holds no chat content. The full text still goes to the
+ * job log.
+ */
+export function sanitizeError(text, { workDir = '', label = '' } = {}) {
+  let out = String(text || '')
+  if (workDir) {
+    out = out.split(path.join(workDir, 'exports')).join('<导出目录>')
+    out = out.split(workDir).join('<工作目录>')
+  }
+  const name = String(label || '').trim()
+  if (name.length >= 2) out = out.split(name).join('<会话>')
+  return out
+}
+
 export function helperArgv(settings, queryCli, rest) {
   const argv = ['-X', 'utf8', queryCli, '--work', settings.workDir]
   if (settings.tencentRoot) argv.push('--root', settings.tencentRoot)
@@ -37,7 +56,7 @@ export function helperArgv(settings, queryCli, rest) {
  * @param {object} options.ctx - job context from the queue
  * @returns {Promise<object>} the last JSON object the helper printed
  */
-export function runNdjson({ settings, queryCli, args, ctx }) {
+export function runNdjson({ settings, queryCli, args, ctx, label = '任务' }) {
   return new Promise((resolve, reject) => {
     const child = spawn(settings.python, helperArgv(settings, queryCli, args), {
       windowsHide: true,
@@ -47,6 +66,9 @@ export function runNdjson({ settings, queryCli, args, ctx }) {
     let buffer = ''
     const stderr = []
     let last = null
+    // The sidecar answers a bad input with `{"error": ...}` on stdout and exit
+    // code 2; without keeping it the job only ever said "exit code 2".
+    let failure = null
     let settled = false
 
     // Declared before `finish` uses it: a spawn failure calls finish from the
@@ -79,6 +101,7 @@ export function runNdjson({ settings, queryCli, args, ctx }) {
         if (payload && typeof payload.progress === 'number') {
           ctx.onProgress(payload.progress, payload.message || '')
         } else if (payload && typeof payload.error === 'string') {
+          failure = payload
           ctx.log(payload.error)
         } else if (payload) {
           last = payload
@@ -105,7 +128,8 @@ export function runNdjson({ settings, queryCli, args, ctx }) {
       }
       if (code !== 0) {
         const tail = stderr.join('').trim().split('\n').slice(-3).join(' ')
-        finish(reject, new Error(tail || `OCR 进程退出码 ${code}`))
+        const message = failure?.error || last?.error || tail || `${label}进程退出码 ${code}`
+        finish(reject, new Error(sanitizeError(message, { workDir: settings.workDir })))
         return
       }
       finish(resolve, last || {})
@@ -122,7 +146,7 @@ export function runNdjson({ settings, queryCli, args, ctx }) {
 export function makeOcrRunner({ settings, queryCli }) {
   return async function ocrRunner(job, ctx) {
     const args = ['ocr', '--json', JSON.stringify({ limit: job.params.limit ?? null })]
-    return runNdjson({ settings, queryCli, args, ctx })
+    return runNdjson({ settings, queryCli, args, ctx, label: '识别' })
   }
 }
 
@@ -140,7 +164,7 @@ export function makeChunksRunner({ settings, queryCli }) {
       limit: job.params.limit ?? null,
       force: job.params.force === true,
     })]
-    return runNdjson({ settings, queryCli, args, ctx })
+    return runNdjson({ settings, queryCli, args, ctx, label: '分块' })
   }
 }
 
@@ -156,7 +180,7 @@ export function makeComponentsRunner({ settings, queryCli }) {
   return async function componentsRunner(job, ctx) {
     const groups = Array.isArray(job.params.groups) ? job.params.groups : []
     const args = ['components', '--json', JSON.stringify({ action: 'install', groups })]
-    return runNdjson({ settings, queryCli, args, ctx })
+    return runNdjson({ settings, queryCli, args, ctx, label: '组件安装' })
   }
 }
 
@@ -170,7 +194,7 @@ export function makeComponentsRunner({ settings, queryCli }) {
 export function makeAsrRunner({ settings, queryCli }) {
   return async function asrRunner(job, ctx) {
     const args = ['asr', '--json', JSON.stringify({ limit: job.params.limit ?? null })]
-    return runNdjson({ settings, queryCli, args, ctx })
+    return runNdjson({ settings, queryCli, args, ctx, label: '转写' })
   }
 }
 
@@ -258,8 +282,9 @@ export function makeExportRunner({ settings, queryCli }) {
           const message = (parsed && typeof parsed.error === 'string' && parsed.error)
             || stderr.join('').trim().split('\n').slice(-3).join(' ')
             || `导出进程退出码 ${code}`
-          const error = new Error(message)
-          error.detail = parsed && typeof parsed.detail === 'string' ? parsed.detail : ''
+          const error = new Error(sanitizeError(message, { workDir: settings.workDir, label }))
+          error.detail = parsed && typeof parsed.detail === 'string'
+            ? sanitizeError(parsed.detail, { workDir: settings.workDir, label }) : ''
           finish(reject, error)
           return
         }

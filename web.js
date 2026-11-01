@@ -18,6 +18,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createJobQueue } from './jobs.js'
+import { buildRunning } from './storage.js'
 import { readPresets, writePresets } from './presets.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -741,18 +742,10 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
    */
   const buildInProgress = () => {
     if (Date.now() - lastBuildSpawnAt < 10_000) return true
-    try {
-      const status = JSON.parse(readFileSync(path.join(settings.workDir, 'build-status.json'), 'utf8'))
-      if (status.state === 'running') return true
-    } catch {
-      // No status file yet.
-    }
-    try {
-      if (Date.now() - statSync(path.join(settings.workDir, 'build.lock')).mtimeMs < 15 * 60 * 1000) return true
-    } catch {
-      // No lock file.
-    }
-    return false
+    // A build killed by a reboot leaves `running` in build-status.json; the
+    // shared helper ages that out against the lock file so the page cannot
+    // wait on a build that will never finish.
+    return buildRunning(settings.workDir)
   }
 
   /** Status from the helper, reused while a build runs or the index is unchanged. */
@@ -760,7 +753,8 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
     const index = fileInfo(indexFile())
     const build = readBuildState(settings.workDir)
     const cached = statusCache
-    const usable = cached && (build.state === 'running'
+    const building = buildRunning(settings.workDir)
+    const usable = cached && (building
       || (Date.now() - cached.at < 5000 && cached.path === index.path
         && cached.indexMtime === index.mtime))
     if (!usable) {
@@ -816,7 +810,15 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       if (ctx.isCanceled()) child.kill()
     }, 500)
     try {
-      const code = await new Promise((resolve) => child.on('close', resolve))
+      // Without this listener a deleted interpreter emits 'error' with nobody
+      // listening, which throws out of the event loop and kills the host.
+      const spawned = new Promise((resolve, reject) => {
+        child.on('close', resolve)
+        child.on('error', (error) => reject(error.code === 'ENOENT'
+          ? new Error(`无法运行 Python 解释器「${settings.python}」：找不到可执行文件`)
+          : error))
+      })
+      const code = await spawned
       if (ctx.isCanceled()) return { canceled: true }
       if (code !== 0) throw new Error('模型下载失败')
       return JSON.parse(out || '{}')
@@ -842,7 +844,23 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       sendJson(res, 403, { error: 'loopback only' })
       return
     }
-    const requestUrl = new URL(req.url ?? '/', state.url)
+    // The request target is client-controlled: `//` parses as a
+    // protocol-relative URL and `http://[` as an invalid host, and an
+    // exception here would escape the listener and take the host process down
+    // (there is no uncaughtException handler anywhere in the plugin).
+    const rawUrl = req.url ?? '/'
+    let requestUrl
+    try {
+      requestUrl = rawUrl.startsWith('/') && !rawUrl.startsWith('//')
+        ? new URL(rawUrl, state.url)
+        : null
+    } catch {
+      requestUrl = null
+    }
+    if (!requestUrl) {
+      sendJson(res, 400, { error: 'bad request target' })
+      return
+    }
     const pathname = requestUrl.pathname
     const params = requestUrl.searchParams
 

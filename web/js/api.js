@@ -67,11 +67,12 @@ export function createApi({ base = '', fetchImpl = globalThis.fetch } = {}) {
     const url = `${base}${path}${buildQuery(params || {})}`
     /** @type {RequestInit} */
     const init = { method, headers: {} }
+    // Every mutation carries the action header, not only the ones with a body:
+    // the server's CSRF guard checks the header alone, so `post('/api/...')`
+    // without a payload used to be refused as a cross-origin request.
+    if (String(method).toUpperCase() !== 'GET') init.headers['x-qqnt-action'] = '1'
     if (body !== undefined) {
       init.headers['content-type'] = 'application/json'
-      // The server refuses a mutation without this: it is the CSRF guard that
-      // keeps a hostile page from posting to the loopback listener.
-      init.headers['x-qqnt-action'] = '1'
       init.body = JSON.stringify(body)
     }
     let response

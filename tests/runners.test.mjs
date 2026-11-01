@@ -236,3 +236,58 @@ test('a cancelled export kills the helper and removes its partial file', async (
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('the sidecar JSON error wins over an empty stderr tail', async () => {
+  const dir = await tempDir()
+  const helper = await fakeHelper(dir, [
+    'import json, sys',
+    "print(json.dumps({'error': '语音模型未下载（缺 model.int8.onnx、tokens.txt）'}, ensure_ascii=False))",
+    'sys.exit(2)',
+  ].join('\n'))
+  try {
+    const { ctx, logs } = ctxRecorder()
+    await assert.rejects(
+      runNdjson({
+        settings: { python: PYTHON, workDir: dir }, queryCli: helper,
+        args: ['asr', '--json', '{}'], ctx, label: '转写',
+      }),
+      (error) => {
+        assert.match(error.message, /语音模型未下载/)
+        return true
+      },
+    )
+    assert.deepEqual(logs, ['语音模型未下载（缺 model.int8.onnx、tokens.txt）'])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a helper that prints nothing still names its kind in the fallback', async () => {
+  const dir = await tempDir()
+  const helper = await fakeHelper(dir, 'import sys\nsys.exit(3)\n')
+  try {
+    const { ctx } = ctxRecorder()
+    await assert.rejects(
+      runNdjson({
+        settings: { python: PYTHON, workDir: dir }, queryCli: helper,
+        args: ['ocr', '--json', '{}'], ctx, label: '识别',
+      }),
+      (error) => {
+        assert.match(error.message, /识别.*3|退出码 3/)
+        return true
+      },
+    )
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('sanitizeError keeps the workDir and the chat label out of job.error', async () => {
+  const { sanitizeError } = await import('../runners.js')
+  const workDir = '/home/user/.local/share/dsh/work'
+  const message = `导出失败：IsADirectoryError: '${workDir}/exports/abc--超级秘密群.txt.part.7' -> '${workDir}/exports/abc--超级秘密群.txt'`
+  const clean = sanitizeError(message, { workDir, label: '超级秘密群' })
+  assert.ok(!clean.includes(workDir), clean)
+  assert.ok(!clean.includes('超级秘密群'), clean)
+  assert.match(clean, /<工作目录>|<导出目录>|<会话>/)
+})

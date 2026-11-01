@@ -108,7 +108,7 @@ export function mountStats(root, { api, initialChat = null }) {
     track.className = 'stat-bar-track'
     const fill = document.createElement('i')
     fill.className = 'stat-bar-fill'
-    fill.style = { width: `${barWidth(count, max)}%` }
+    fill.style.width = `${barWidth(count, max)}%`
     track.append(fill)
     const value = document.createElement('span')
     value.className = 'stat-bar-value'
@@ -172,7 +172,7 @@ export function mountStats(root, { api, initialChat = null }) {
         const count = Number(data.heat?.[day]?.[hour]) || 0
         cell.textContent = count === 0 ? '' : String(count)
         cell.title = `周${week[day]} ${String(hour).padStart(2, '0')}:00 · ${count} 条`
-        cell.style = { opacity: String(0.12 + 0.88 * (heatMax ? count / heatMax : 0)) }
+        cell.style.opacity = String(0.12 + 0.88 * (heatMax ? count / heatMax : 0))
         grid.append(cell)
       }
     }

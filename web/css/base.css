@@ -1,10 +1,7 @@
 /*
- * Base layer for the modular UI served from /app/.
+ * Base layer for the modular UI served from `/app/` (and `/`).
  *
- * The legacy `page.html` keeps its own inline styles; this file only styles
- * the new views, so the two can coexist while the port is in progress. Tokens
- * mirror the legacy palette closely enough that switching between them does
- * not feel like a different product.
+ * The single-file `page.html` is gone, so this file is the whole stylesheet.
  */
 :root {
   color-scheme: light dark;
@@ -32,6 +29,10 @@
 }
 
 * { box-sizing: border-box; }
+
+/* `hidden` must beat the author `display` rules below: the CSV column strip
+ * and the MD option are toggled with it. */
+[hidden] { display: none !important; }
 
 html, body {
   margin: 0;

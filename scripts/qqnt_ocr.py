@@ -136,6 +136,10 @@ def run(index_path, derived_path, engine, limit=None, progress=None,
                 (row['chat_kind'], row['chat_id'], row['msg_id'], 'ocr', 0,
                  str(text).strip(), 'rapidocr', float(conf or 0), row.get('size') or 0))
             stats['recognized'] += 1
+            # Commit as we go: one batch-wide transaction holds the write
+            # lock for the whole run and starves the other derived-store job.
+            if stats['recognized'] % 20 == 0:
+                conn.commit()
             if progress and stats['recognized'] % 25 == 0:
                 progress(stats['recognized'], total, '已识别 %d/%d 张' % (stats['recognized'], total))
         conn.commit()

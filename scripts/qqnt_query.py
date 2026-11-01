@@ -3102,6 +3102,18 @@ def main(argv=None):
     except ValueError as exc:
         print(json.dumps({'error': '请求参数无法解析: %s' % exc}, ensure_ascii=False))
         sys.exit(2)
+    except models.ModelError as exc:
+        # A bad model id is a caller mistake (400), not an internal failure:
+        # without this branch the Node side received a traceback on stderr.
+        print(json.dumps({'error': str(exc)}, ensure_ascii=False))
+        sys.exit(2)
+    except Exception as exc:      # noqa: BLE001 - the JSON line is the interface
+        # Anything unexpected still has to answer in the one-JSON-object
+        # contract; the traceback stays on stderr for the job log.
+        traceback.print_exc()
+        print(json.dumps({'error': '%s: %s' % (type(exc).__name__, exc)},
+                         ensure_ascii=False))
+        sys.exit(1)
 
 
 if __name__ == '__main__':

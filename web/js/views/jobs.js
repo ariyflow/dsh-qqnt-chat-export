@@ -104,13 +104,21 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
     await refresh()
   }
 
+  let collapsed = false
+  let seen = new Set()
+
   async function refresh() {
     if (closed) return
     try {
       const payload = await api.get('/api/jobs')
       if (closed) return
       const jobs = visibleJobs(payload?.jobs)
-      panel.hidden = jobs.length === 0
+      // A new job reopens the panel; an explicit 收起 keeps it shut while the
+      // same rows are still on screen.
+      const ids = new Set(jobs.map((job) => job.id))
+      if ([...ids].some((id) => !seen.has(id))) collapsed = false
+      seen = ids
+      panel.hidden = jobs.length === 0 || collapsed
       list.replaceChildren()
       for (const job of jobs) list.append(renderRow(job))
     } catch {
@@ -119,6 +127,7 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
   }
 
   close.addEventListener('click', () => {
+    collapsed = true
     panel.hidden = true
   })
 

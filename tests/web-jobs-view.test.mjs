@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { jobMeta, mountJobs, visibleJobs } from '../web/js/views/jobs.js'
-import { installDocument, makeElement, textOf } from './support/dom.mjs'
+import { findByClass, installDocument, makeElement, textOf } from './support/dom.mjs'
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 15))
 
@@ -58,6 +58,35 @@ test('the panel lists jobs, hides when empty and cancels through the API', async
     jobs = []
     await new Promise((resolve) => setTimeout(resolve, 80))
     assert.equal(panel.hidden, true)
+  } finally {
+    cleanup()
+    restore()
+  }
+})
+
+test('收起 keeps the panel hidden while the same jobs are still listed', async () => {
+  const restore = installDocument()
+  const jobs = [
+    { id: 'j1', kind: 'ocr', summary: '识别图片', state: 'running', progress: 0.4, message: '', canCancel: true, canRetry: false },
+  ]
+  const api = { get: async () => ({ jobs }), post: async () => ({}) }
+  const root = makeElement('aside')
+  const cleanup = mountJobs(root, { api, intervalMs: 20 })
+  try {
+    await tick()
+    const panel = findByClass(root, 'jobs-panel')
+    assert.equal(panel.hidden, false)
+    findByClass(root, 'jobs-head').children
+      .find((child) => child.tagName === 'button').dispatch('click')
+    assert.equal(panel.hidden, true)
+    await tick()
+    await tick()
+    assert.equal(panel.hidden, true, 'the next poll must not reopen a collapsed panel')
+    // A new job is news: the panel comes back.
+    jobs.push({ id: 'j2', kind: 'asr', summary: '转写语音', state: 'running', progress: 0, message: '', canCancel: true, canRetry: false })
+    await tick()
+    await tick()
+    assert.equal(panel.hidden, false)
   } finally {
     cleanup()
     restore()

@@ -572,7 +572,9 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
       state.rows = reset ? rows : state.rows.concat(rows)
       state.offset = offset
       state.total = Number(payload?.total) || state.rows.length
-      renderMessages(reset)
+      // Only the new page is appended; `renderMessages(false, state.rows)`
+      // would draw every page a second time.
+      renderMessages(reset, rows)
     } catch (error) {
       if (closed) return
       title.textContent = `读取消息失败：${error.message}`

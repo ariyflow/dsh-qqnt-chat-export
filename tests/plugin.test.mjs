@@ -775,12 +775,26 @@ test('index select validates input and rejects a missing cache', async () => {
     })
     assert.equal(response.status, 400)
 
-    // A running build must not be raced by a switch.
-    await writeFile(path.join(work, 'build-status.json'), JSON.stringify({ state: 'running' }))
+    // A running build must not be raced by a switch. `startedAt` is part of
+    // the status the helper writes; without it the row is treated as stale
+    // (a build killed by a reboot leaves exactly that shape behind).
+    await writeFile(path.join(work, 'build-status.json'), JSON.stringify({
+      state: 'running', startedAt: Math.floor(Date.now() / 1000),
+    }))
     response = await fetch(`${base}/api/index/select`, {
       method: 'POST', headers: actionHeaders, body: JSON.stringify({ account: '12345' }),
     })
     assert.equal(response.status, 409)
+
+    // The same row hours later, with no lock, is a build that died: a switch
+    // must not be refused forever because of it.
+    await writeFile(path.join(work, 'build-status.json'), JSON.stringify({
+      state: 'running', startedAt: Math.floor(Date.now() / 1000) - 3 * 3600,
+    }))
+    response = await fetch(`${base}/api/index/select`, {
+      method: 'POST', headers: actionHeaders, body: JSON.stringify({ account: '12345' }),
+    })
+    assert.equal(response.status, 400)
     await rm(path.join(work, 'build-status.json'))
 
     response = await fetch(`${base}/api/index/select`, {

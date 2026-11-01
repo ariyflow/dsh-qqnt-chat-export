@@ -263,6 +263,14 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
     media.disabled = embedOn
     split.disabled = embedOn
     password.disabled = embedOn
+    // Disabling a control does not clear it, and `currentBody()` reads the
+    // value anyway: without this, picking 内嵌图片 with 按天 or a password
+    // already set submits the combination the server rejects.
+    if (embedOn) {
+      media.checked = false
+      split.checked = false
+      password.value = ''
+    }
     chatSelect.disabled = false
     derived.textContent = container === 'zip'
       ? `下载：ZIP（内部 ${String(format.value).toUpperCase()}）`

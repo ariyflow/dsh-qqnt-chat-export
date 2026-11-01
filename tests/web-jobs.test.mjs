@@ -192,7 +192,8 @@ test('a finished export job downloads through its id prefix', async () => {
     assert.equal(detail.state, 'done')
     assert.equal(detail.result.rows, 3)
 
-    const download = await fetch(`${base}/api/jobs/${created.id}/download`)
+    // The documented contract is an id prefix, not only the full id.
+    const download = await fetch(`${base}/api/jobs/${created.id.slice(0, 6)}/download`)
     assert.equal(download.status, 200)
     assert.match(download.headers.get('content-disposition'), /attachment/)
     assert.equal(await download.text(), 'hello')

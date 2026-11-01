@@ -24,6 +24,9 @@ export function makeElement(tagName) {
     value: '',
     checked: false,
     dataset: {},
+    // Browsers expose `style` as an object of declarations; a view that
+    // assigns `style.width` must not hit `undefined` here.
+    style: {},
     children: [],
     attributes: {},
     classList: {

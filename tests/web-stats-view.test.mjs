@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { barWidth, mountStats, peak, statsCsv, statsRows } from '../web/js/views/stats.js'
-import { findByClass, installDocument, makeElement, textOf } from './support/dom.mjs'
+import { findAllByClass, findByClass, installDocument, makeElement, textOf } from './support/dom.mjs'
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 20))
 
@@ -94,6 +94,31 @@ test('choosing a chat scopes the request', async () => {
     const last = asked.filter((call) => call.path === '/api/stats').at(-1)
     assert.equal(last.params.chatKind, 'group')
     assert.equal(last.params.chatId, '123')
+  } finally {
+    cleanup()
+    restore()
+  }
+})
+
+test('bars and heat cells write the size to the style property', async () => {
+  const restore = installDocument()
+  const api = {
+    get: async (asked, params) => (asked === '/api/sessions'
+      ? { sessions: [{ kind: 'group', id: '123', name: '示例课程群' }] } : data),
+  }
+  const root = makeElement('main')
+  const cleanup = mountStats(root, { api })
+  try {
+    await tick()
+    // Assigning an object to `style` stringifies to "[object Object]" and the
+    // browser drops the declaration, so the width/opacity have to be set on
+    // the property itself.
+    const fills = findAllByClass(root, 'stat-bar-fill')
+    assert.ok(fills.length > 0, 'no bar fill rendered')
+    for (const fill of fills) assert.match(String(fill.style.width), /^\d+(\.\d+)?%$/)
+    const cells = findAllByClass(root, 'heat-cell')
+    assert.ok(cells.length > 0)
+    for (const cell of cells) assert.match(String(cell.style.opacity), /^0\.\d+$|^1$/)
   } finally {
     cleanup()
     restore()

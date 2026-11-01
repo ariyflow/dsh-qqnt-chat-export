@@ -111,3 +111,20 @@ test('set() accepts an updater function', () => {
   store.set((value) => ({ count: value.count + 1 }))
   assert.equal(store.get().count, 2)
 })
+
+test('a body-less mutation still carries the action header', async () => {
+  const { impl, calls } = stubFetch({ body: '{"started":true}' })
+  const api = createApi({ fetchImpl: impl })
+  await api.post('/api/index/build?refresh=1')
+  assert.equal(calls[0].init.headers['x-qqnt-action'], '1')
+  assert.equal(calls[0].init.body, undefined)
+  assert.equal(calls[0].init.headers['content-type'], undefined)
+})
+
+test('a body-less DELETE carries the action header too', async () => {
+  const { impl, calls } = stubFetch({ body: '{}' })
+  const api = createApi({ fetchImpl: impl })
+  await api.remove('/api/models/bge-small-zh')
+  assert.equal(calls[0].init.method, 'DELETE')
+  assert.equal(calls[0].init.headers['x-qqnt-action'], '1')
+})

@@ -12,7 +12,7 @@ import test from 'node:test'
 import {
   containerFor, downloadHref, exportBody, jobStateLabel, mountExport,
 } from '../web/js/views/export.js'
-import { findByClass, installDocument, makeElement, textOf } from './support/dom.mjs'
+import { findAllByClass, findByClass, installDocument, makeElement, textOf } from './support/dom.mjs'
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 20))
 
@@ -178,6 +178,49 @@ test('a batch selection goes out as chats and derives a zip', async () => {
       { kind: 'private', id: 'u9', label: '小林' },
     ])
     assert.equal(posted[0].body.label, '批量导出 2 个会话')
+  } finally {
+    cleanup()
+    restore()
+  }
+})
+
+test('picking 内嵌图片 clears the options it disables before submitting', async () => {
+  const restore = installDocument()
+  const posted = []
+  const api = {
+    get: async (path) => {
+      if (path === '/api/sessions') return { sessions: [] }
+      if (path === '/api/presets') return { presets: [] }
+      return { jobs: [] }
+    },
+    post: async (path, body) => {
+      posted.push({ path, body })
+      return { id: 'job1', kind: 'export', summary: '导出 HTML', state: 'queued' }
+    },
+  }
+  const root = makeElement('main')
+  const cleanup = mountExport(root, {
+    api, initialChat: { kind: 'group', id: '123', name: '示例课程群' },
+  })
+  const box = (label) => {
+    const wrap = findAllByClass(root, 'check').find((node) => textOf(node).includes(label))
+    return wrap && wrap.children.find((child) => child.tagName === 'input')
+  }
+  try {
+    await tick()
+    box('按天分文件').checked = true
+    const password = findAllByClass(root, 'export-password')[0]
+    password.value = 'abcd'
+    box('内嵌图片').checked = true
+    box('内嵌图片').dispatch('change')
+    findByClass(root, 'export-form').dispatch('submit')
+    await tick()
+    assert.equal(posted.length, 1)
+    assert.equal(posted[0].body.embed, true)
+    assert.equal(posted[0].body.split, undefined, 'split must not ride along with embed')
+    assert.equal(posted[0].body.password, undefined, 'password must not ride along with embed')
+    assert.equal(box('按天分文件').checked, false)
+    assert.equal(password.value, '')
   } finally {
     cleanup()
     restore()

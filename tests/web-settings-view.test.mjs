@@ -213,3 +213,38 @@ test('a legacy temp work directory can be migrated from settings', async () => {
     restore()
   }
 })
+
+test('an empty numeric field is left out instead of becoming zero', () => {
+  const patch = settingsPatch({
+    webPort: '', workDir: '/data', installer: 'auto', pythonPath: '', tencentRoot: '',
+    account: '', keepAccountIndexes: '  ', searchIndex: 'fts', autoSync: true,
+    syncIntervalMinutes: '',
+  })
+  assert.equal(patch.webPort, undefined, 'an empty port must not close the listener')
+  assert.equal(patch.keepAccountIndexes, undefined)
+  assert.equal(patch.syncIntervalMinutes, undefined)
+  assert.equal(patch.workDir, '/data')
+})
+
+test('a port change tells the user the page moved instead of "next start"', async () => {
+  const restore = installDocument()
+  const { api, calls } = fakeApi()
+  api.put = async (path, body) => {
+    calls.push({ method: 'PUT', path, body })
+    return { ...settingsPayload, restart: true, url: 'http://127.0.0.1:47000/', previousUrl: 'http://127.0.0.1:46728/' }
+  }
+  const root = makeElement('main')
+  const cleanup = mountSettings(root, { api })
+  try {
+    await tick()
+    findByClass(root, 'settings-form').dispatch('submit')
+    await tick()
+    const text = textOf(root)
+    assert.match(text, /端口已切换/)
+    assert.match(text, /47000/)
+    assert.doesNotMatch(text, /下次启动/)
+  } finally {
+    cleanup()
+    restore()
+  }
+})

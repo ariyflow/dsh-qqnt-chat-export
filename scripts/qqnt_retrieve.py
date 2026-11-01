@@ -302,7 +302,10 @@ def _ann_candidates(dconn, ann_path, query_vec, filters, limit):
         return [], False
     ids = [chunk_id for chunk_id, _score in raw]
     clauses, params = _filters(filters)
-    sql = ('SELECT id FROM chunks WHERE id IN (%s)' % ','.join('?' * len(ids)))
+    # The filter clauses are written against the `c` alias (see _filters),
+    # so the table must carry it too or every filtered query throws and
+    # silently loses the ANN ranking.
+    sql = ('SELECT c.id FROM chunks c WHERE c.id IN (%s)' % ','.join('?' * len(ids)))
     if clauses:
         sql += ' AND ' + ' AND '.join(clauses)
     try:

@@ -42,6 +42,7 @@ export const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
 export function createJobQueue({
   settings,
   concurrency = DEFAULT_CONCURRENCY,
+  timeoutGraceMs = 5000,
   runners = {},
   timeoutMs = DEFAULT_TIMEOUT_MS,
   maxKept = MAX_KEPT,
@@ -83,7 +84,10 @@ export function createJobQueue({
       startedAt: job.startedAt || 0,
       finishedAt: job.finishedAt || 0,
       canCancel: job.state === 'running' || job.state === 'queued',
-      canRetry: ['done', 'failed', 'canceled', 'interrupted'].includes(job.state),
+      // A cancel request flips the row before the runner stops; retrying
+      // in that window would start a second copy of the same work.
+      canRetry: ['done', 'failed', 'canceled', 'interrupted'].includes(job.state)
+        && Number(job.finishedAt) > 0,
     }
     if (withLog) row.log = job.log.slice(-40)
     return row
@@ -202,7 +206,9 @@ export function createJobQueue({
   /** Start queued jobs while a slot is free. */
   function pump() {
     if (closed) return
-    for (const job of queued()) {
+    // `jobs` is newest-first, so walk it backwards: the queue must start the
+    // oldest waiting job first (FIFO), not the one just clicked.
+    for (const job of queued().slice().reverse()) {
       if (active() >= concurrency) return
       void start(job)
     }
@@ -228,8 +234,23 @@ export function createJobQueue({
     persist()
 
     const timer = setTimeout(() => {
+      // Two steps: ask the runner to stop, then make sure a runner that
+      // ignores the flag cannot pin the slot forever. The row stays untouched
+      // for the grace period so a runner that does stop reports its own verdict.
+      ctx.timedOut = true
       ctx.canceled = true
       job.error = job.error || '任务超时'
+      persist()
+      const grace = setTimeout(() => {
+        if (job.state !== 'running') return
+        job.state = 'failed'
+        job.error = job.error || '任务超时'
+        job.finishedAt = Math.floor(Date.now() / 1000)
+        contexts.delete(job.id)
+        persist()
+        pump()
+      }, timeoutGraceMs)
+      timers.set(`grace:${job.id}`, grace)
     }, timeoutMs)
     timers.set(job.id, timer)
 
@@ -238,7 +259,10 @@ export function createJobQueue({
       job.result = result === undefined ? null : result
       // `cancel()` may already have flipped the state while the runner was
       // finishing; that verdict wins over the runner's return value.
-      if (ctx.canceled || job.state === 'canceled') {
+      if (ctx.timedOut) {
+        job.state = 'failed'
+        job.error = job.error || '任务超时'
+      } else if (ctx.canceled || job.state === 'canceled') {
         job.state = 'canceled'
       } else {
         job.state = 'done'
@@ -252,6 +276,8 @@ export function createJobQueue({
       }
     } finally {
       clearTimeout(timer)
+      clearTimeout(timers.get(`grace:${job.id}`))
+      timers.delete(`grace:${job.id}`)
       timers.delete(job.id)
       contexts.delete(job.id)
       job.finishedAt = Math.floor(Date.now() / 1000)
@@ -292,6 +318,7 @@ export function createJobQueue({
     const job = jobs.find((entry) => entry.id === id)
     if (!job) return null
     if (!['failed', 'canceled', 'interrupted', 'done'].includes(job.state)) return null
+    if (contexts.has(job.id)) return null
     if (!job.params) {
       // Restored rows lost their params: retrying them would silently run a
       // different job, so the caller is told to start a fresh one instead.
@@ -307,8 +334,19 @@ export function createJobQueue({
       .map((job) => publicRow(job))
   }
 
+  /**
+   * One job by id. A unique prefix is accepted too: the download link is built
+   * from the id, but a hand-typed or copied short id should still resolve.
+   * An ambiguous prefix resolves to nothing rather than to the wrong job.
+   */
   function get(id) {
-    const job = jobs.find((entry) => entry.id === id)
+    const key = String(id || '')
+    if (key === '') return null
+    let job = jobs.find((entry) => entry.id === key)
+    if (!job) {
+      const matches = jobs.filter((entry) => entry.id.startsWith(key))
+      if (matches.length === 1) job = matches[0]
+    }
     return job ? publicRow(job, { withLog: true }) : null
   }
 

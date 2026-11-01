@@ -104,10 +104,21 @@ END;
 '''
 
 
+# Two jobs may write this store at once (OCR + ASR, or chunks after either):
+# Python's default 5 s lock wait is short enough that a long batch in one
+# process fails the other with "database is locked". The pragma is what the
+# timeout below actually enforces.
+LOCK_WAIT_MS = 30000
+
+
 def connect(path):
     """Open the derived store; callers close it."""
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=LOCK_WAIT_MS / 1000)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute('PRAGMA busy_timeout=%d' % LOCK_WAIT_MS)
+    except sqlite3.Error:
+        pass      # an old SQLite without the pragma keeps the connect timeout
     return conn
 
 

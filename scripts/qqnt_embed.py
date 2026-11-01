@@ -171,13 +171,43 @@ MARK_SCHEMA = '''CREATE TABLE IF NOT EXISTS chunk_marks(
     updated_at INTEGER NOT NULL,
     PRIMARY KEY(chat_kind, chat_id))'''
 
+# The timestamp watermark alone cannot see a message that arrives inside the
+# same second as the last chunked one (QQ stamps are whole seconds), so the
+# newest message id of each chat is remembered separately.
+MSG_MARK_SCHEMA = '''CREATE TABLE IF NOT EXISTS chunk_msgmarks(
+    chat_kind TEXT    NOT NULL,
+    chat_id   TEXT    NOT NULL,
+    msg_id    INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(chat_kind, chat_id))'''
+
 
 def _ensure_marks(conn):
     try:
         conn.execute(MARK_SCHEMA)
+        conn.execute(MSG_MARK_SCHEMA)
         conn.commit()
     except sqlite3.Error:
         pass      # A read-only store just means no marks; chunks still work.
+
+
+def _msg_watermark(conn, kind, chat_id):
+    try:
+        return conn.execute(
+            'SELECT msg_id FROM chunk_msgmarks WHERE chat_kind=? AND chat_id=?',
+            (kind, chat_id)).fetchone()[0]
+    except (sqlite3.Error, TypeError):
+        return 0
+
+
+def _set_msg_watermark(conn, kind, chat_id, msg_id):
+    try:
+        conn.execute(
+            'INSERT OR REPLACE INTO chunk_msgmarks(chat_kind, chat_id, msg_id,'
+            " updated_at) VALUES (?,?,?, strftime('%s','now'))",
+            (kind, chat_id, int(msg_id or 0)))
+    except sqlite3.Error:
+        pass
 
 
 def _content_watermark(conn, kind, chat_id):
@@ -308,8 +338,12 @@ def run(index_path, derived_path, embedder=None, model=DEFAULT_MODEL,
                 'SELECT max(id) FROM content WHERE chat_kind=? AND chat_id=?',
                 (kind, chat_id)).fetchone()[0] or 0
             stale = bool(last) and content_max > _content_watermark(dconn, kind, chat_id)
+            last_msg = index.execute(
+                'SELECT max(msg_id) FROM messages WHERE chat_kind=? AND chat_id=?',
+                (kind, chat_id)).fetchone()[0] or 0
+            same_second = last_msg > _msg_watermark(dconn, kind, chat_id)
             if (last and last['end_ts'] >= (row['last_ts'] or 0) and not force
-                    and not stale):
+                    and not stale and not same_second):
                 stats['skipped'] += 1
                 continue
             media = _media_texts(dconn, kind, chat_id)
@@ -349,7 +383,19 @@ def run(index_path, derived_path, embedder=None, model=DEFAULT_MODEL,
                 pending_text.clear()
                 pending_ids.clear()
 
+            used_starts = set()
             for block in blocks:
+                # Windows overlap by design; with dense timestamps two of them
+                # can start in the same second, which the unique key refuses.
+                while dconn.execute(
+                        'SELECT 1 FROM chunks WHERE chat_kind=? AND chat_id=?'
+                        ' AND start_ts=? AND strategy=?',
+                        (kind, chat_id, block['start_ts'], block['strategy'])).fetchone() \
+                        or block['start_ts'] in used_starts:
+                    block['start_ts'] += 1
+                used_starts.add(block['start_ts'])
+                if block['end_ts'] < block['start_ts']:
+                    block['end_ts'] = block['start_ts']
                 cur = dconn.execute(
                     'INSERT INTO chunks(chat_kind, chat_id, start_ts, end_ts, msg_ids,'
                     " text, tokens, strategy, created_at) VALUES (?,?,?,?,?,?,?,?,"
@@ -377,6 +423,7 @@ def run(index_path, derived_path, embedder=None, model=DEFAULT_MODEL,
                 stats['failed'] += len(pending_ids)
                 stats['error'] = str(exc)
             _set_watermark(dconn, kind, chat_id, content_max)
+            _set_msg_watermark(dconn, kind, chat_id, last_msg)
             dconn.commit()
             stats['chats'] += 1
             if progress and (done % 5 == 0 or done == total):

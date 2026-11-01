@@ -18,19 +18,27 @@ export const SEARCH_MODES = [['fts', 'FTS5（快，需重建一次）'], ['like'
 /** Form values → the patch `PUT /api/settings` expects. */
 export function settingsPatch(values) {
   const patch = {}
-  const port = Number(values?.webPort)
-  if (Number.isFinite(port)) patch.webPort = Math.round(port)
+  // `Number('')` is 0, and 0 is a real value here (webPort 0 turns the web UI
+  // off). An empty field means "leave it alone", not "set it to zero".
+  const number = (value) => {
+    const text = String(value ?? '').trim()
+    if (text === '') return null
+    const parsed = Number(text)
+    return Number.isFinite(parsed) ? Math.round(parsed) : null
+  }
+  const port = number(values?.webPort)
+  if (port !== null) patch.webPort = port
   patch.workDir = String(values?.workDir ?? '').trim()
   patch.installer = String(values?.installer ?? 'auto')
   patch.pythonPath = String(values?.pythonPath ?? '').trim()
   patch.tencentRoot = String(values?.tencentRoot ?? '').trim()
   patch.account = String(values?.account ?? '').trim()
-  const keep = Number(values?.keepAccountIndexes)
-  if (Number.isFinite(keep)) patch.keepAccountIndexes = Math.round(keep)
+  const keep = number(values?.keepAccountIndexes)
+  if (keep !== null) patch.keepAccountIndexes = keep
   patch.searchIndex = String(values?.searchIndex ?? 'fts')
   patch.autoSync = values?.autoSync === true
-  const interval = Number(values?.syncIntervalMinutes)
-  if (Number.isFinite(interval)) patch.syncIntervalMinutes = Math.round(interval)
+  const interval = number(values?.syncIntervalMinutes)
+  if (interval !== null) patch.syncIntervalMinutes = interval
   return patch
 }
 
@@ -344,8 +352,20 @@ export function mountSettings(root, { api }) {
     if (event && typeof event.preventDefault === 'function') event.preventDefault()
     save.disabled = true
     try {
-      await api.put('/api/settings', settingsPatch(values()))
-      runtimeNote.textContent = '已保存；端口与工作目录的改动在下次启动时生效。'
+      const result = await api.put('/api/settings', settingsPatch(values()))
+      if (result && result.restart) {
+        // The old listener is closed right after this response, so the page has
+        // to move to the new address instead of quietly dying here.
+        const target = String(result.url || '')
+        runtimeNote.textContent = target
+          ? `端口已切换，正在打开 ${target}`
+          : '网页服务已按设置关闭（端口 0）。'
+        if (target && typeof location !== 'undefined') {
+          setTimeout(() => { location.href = target }, 400)
+        }
+        return
+      }
+      runtimeNote.textContent = '已保存；工作目录等改动立即生效。'
       await loadSettings()
     } catch (error) {
       runtimeNote.textContent = `保存失败：${error.message}`
@@ -568,6 +588,8 @@ export function mountSettings(root, { api }) {
       await loadStorage()
     } catch (error) {
       storageNote.textContent = `删除失败：${error.message}`
+      cleanupButton.disabled = storageChecks.size === 0
+      cleanupButton.textContent = '删除选中'
     }
   }
 

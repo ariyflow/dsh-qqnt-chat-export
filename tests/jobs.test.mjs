@@ -265,3 +265,112 @@ test('sweep drops old finished rows and an unknown kind is rejected', async () =
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('a runner that never returns is failed by the timeout, freeing its slot', async () => {
+  const dir = await tempDir()
+  const started = []
+  const queue = createJobQueue({
+    settings: { workDir: dir },
+    concurrency: 1,
+    timeoutMs: 40,
+    timeoutGraceMs: 40,
+    runners: {
+      hang: () => new Promise(() => {}),
+      quick: async () => {
+        started.push('quick')
+        return { ok: true }
+      },
+    },
+  })
+  try {
+    const stuck = queue.submit('hang', { summary: '挂住' })
+    await tick()
+    const waiting = queue.submit('quick', { summary: '等' })
+    // The timeout is the only thing that can release the slot here.
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await tick()
+      const row = queue.list().find((job) => job.id === stuck.id)
+      if (row.state === 'failed') break
+    }
+    const failed = queue.list().find((job) => job.id === stuck.id)
+    assert.equal(failed.state, 'failed')
+    assert.match(failed.error, /超时/)
+    assert.ok(failed.finishedAt > 0)
+    assert.equal(failed.canRetry, true)
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await tick()
+      if (queue.list().find((job) => job.id === waiting.id)?.state === 'done') break
+    }
+    assert.equal(queue.list().find((job) => job.id === waiting.id).state, 'done')
+    assert.deepEqual(started, ['quick'])
+  } finally {
+    await queue.shutdown()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a cancelled job cannot be retried while its runner is still alive', async () => {
+  const dir = await tempDir()
+  const gateOne = gate()
+  const queue = createJobQueue({
+    settings: { workDir: dir },
+    runners: {
+      slow: async (job, ctx) => {
+        await gateOne.promise
+        return { canceled: ctx.isCanceled() }
+      },
+    },
+  })
+  try {
+    const job = queue.submit('slow', { summary: '慢' })
+    await tick()
+    const canceled = queue.cancel(job.id)
+    assert.equal(canceled.state, 'canceled')
+    // The runner has not returned yet: retrying now would start a second copy.
+    assert.equal(canceled.canRetry, false)
+    assert.equal(queue.retry(job.id), null)
+    gateOne.release()
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await tick()
+      if (queue.list().find((row) => row.id === job.id).finishedAt > 0) break
+    }
+    const done = queue.list().find((row) => row.id === job.id)
+    assert.equal(done.canRetry, true)
+  } finally {
+    await queue.shutdown()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('queued work starts oldest first', async () => {
+  const dir = await tempDir()
+  const order = []
+  let release
+  const gateOne = new Promise((resolve) => { release = resolve })
+  const queue = createJobQueue({
+    settings: { workDir: dir },
+    concurrency: 1,
+    runners: {
+      demo: async (job) => {
+        order.push(job.params.name)
+        if (job.params.name === 'first') await gateOne
+        return {}
+      },
+    },
+  })
+  try {
+    queue.submit('demo', { summary: '一', params: { name: 'first' } })
+    await tick()
+    queue.submit('demo', { summary: '二', params: { name: 'second' } })
+    queue.submit('demo', { summary: '三', params: { name: 'third' } })
+    release()
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      await tick()
+      if (order.length === 3) break
+    }
+    assert.deepEqual(order, ['first', 'second', 'third'])
+  } finally {
+    await queue.shutdown()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
