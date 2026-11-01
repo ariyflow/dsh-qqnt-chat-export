@@ -49,6 +49,21 @@ export function storageSummary(storage) {
   return `${items.length} 类 · 共 ${formatBytes(storage.totalBytes)}`
 }
 
+/**
+ * `{os, arch, bits, …}` → `linux x86_64`.
+ *
+ * `/api/diagnostics` reports the platform as an object (the diagnostics bundle
+ * wants the structure); the card prints a sentence, so `String(object)` used to
+ * render the literal "[object Object]".
+ */
+export function platformLabel(platform) {
+  if (!platform) return ''
+  if (typeof platform !== 'object') return String(platform)
+  return [platform.os, platform.arch]
+    .filter((part) => typeof part === 'string' && part.trim() !== '')
+    .join(' ')
+}
+
 /** The setup job's one-line state, in Chinese. */
 export function setupStateLabel(setup) {
   const state = String(setup?.state || 'idle')
@@ -508,7 +523,7 @@ export function mountSettings(root, { api }) {
         ['插件版本', payload?.pluginVersion],
         ['Python', `${payload?.python || ''} ${payload?.version || ''}`.trim()],
         ['sqlcipher3', payload?.sqlcipher3 ? '可用' : '缺失'],
-        ['平台', payload?.platform],
+        ['平台', platformLabel(payload?.platform)],
         ['密钥', payload?.key ? '已缓存' : '未提取'],
         ['索引', payload?.index ? '已建立' : '未建立'],
         ['venv', payload?.venv?.python],

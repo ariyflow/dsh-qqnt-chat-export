@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-  keyStateLabel, mountSettings, settingsPatch, setupStateLabel, storageSummary,
+  keyStateLabel, mountSettings, platformLabel, settingsPatch, setupStateLabel, storageSummary,
 } from '../web/js/views/settings.js'
 import { findAllByClass, findByClass, installDocument, makeElement, textOf } from './support/dom.mjs'
 
@@ -247,4 +247,34 @@ test('a port change tells the user the page moved instead of "next start"', asyn
     cleanup()
     restore()
   }
+})
+
+test('the diagnostics card prints the platform, not "[object Object]"', async () => {
+  const restore = installDocument()
+  const { api } = fakeApi({
+    '/api/diagnostics': {
+      pluginVersion: '0.17.3', python: 'python3', version: '3.12', sqlcipher3: true,
+      platform: { os: 'linux', arch: 'x86_64', bits: 64, python: '3.12' },
+      key: false, index: true, venv: { python: '/v/bin/python' },
+    },
+  })
+  const root = makeElement('main')
+  const cleanup = mountSettings(root, { api })
+  try {
+    await tick()
+    const grid = findByClass(root, 'diag-grid')
+    const values = findAllByClass(grid, 'diag-value').map((node) => node.textContent)
+    assert.ok(values.includes('linux x86_64'), `no platform value in ${JSON.stringify(values)}`)
+    assert.doesNotMatch(textOf(grid), /\[object Object\]/)
+  } finally {
+    cleanup()
+    restore()
+  }
+})
+
+test('platformLabel accepts the object and the plain string', () => {
+  assert.equal(platformLabel({ os: 'linux', arch: 'x86_64' }), 'linux x86_64')
+  assert.equal(platformLabel({ os: 'win32' }), 'win32')
+  assert.equal(platformLabel('linux'), 'linux')
+  assert.equal(platformLabel(null), '')
 })

@@ -96,6 +96,8 @@ export function mountStats(root, { api, initialChat = null }) {
 
   let closed = false
   let data = null
+  /** Which `load()` owns the screen; only the newest answer renders. */
+  let loadSeq = 0
   const state = { chat: initialChat || null }
 
   function bar(label, count, max, extraClass = '') {
@@ -191,6 +193,7 @@ export function mountStats(root, { api, initialChat = null }) {
 
   async function load(event) {
     if (event && typeof event.preventDefault === 'function') event.preventDefault()
+    const seq = ++loadSeq
     scope.textContent = '正在统计…'
     const params = {}
     if (state.chat) {
@@ -201,14 +204,16 @@ export function mountStats(root, { api, initialChat = null }) {
     if (String(since.value || '').trim() !== '') params.since = String(since.value).trim()
     if (String(until.value || '').trim() !== '') params.until = String(until.value).trim()
     try {
-      data = await api.get('/api/stats', params)
-      if (closed) return
+      const payload = await api.get('/api/stats', params)
+      // A second submit while the first is still running decides for itself.
+      if (closed || seq !== loadSeq) return
+      data = payload
       scope.textContent = state.chat
         ? `${state.chat.name || state.chat.id} · ${data.total} 条`
         : `全部会话 · ${data.total} 条`
       render()
     } catch (error) {
-      if (!closed) scope.textContent = `统计失败：${error.message}`
+      if (!closed && seq === loadSeq) scope.textContent = `统计失败：${error.message}`
     }
   }
 
@@ -251,14 +256,20 @@ export function mountStats(root, { api, initialChat = null }) {
       state.chat = null
     } else {
       const index = value.indexOf(':')
-      state.chat = { kind: value.slice(0, index), id: value.slice(index + 1), name: '' }
+      // The option label is the display name; without it the heading fell back
+      // to the raw chat id right after the reader picked a chat.
+      const option = [...(chatSelect.children || [])].find((child) => child.value === value)
+      const name = String(option ? (option.textContent || '') : '').trim()
+      state.chat = { kind: value.slice(0, index), id: value.slice(index + 1), name }
     }
   })
   form.addEventListener('submit', load)
   csv.addEventListener('click', saveCsv)
 
+  // One load, after the picker is filled: the old pair (`fillChats().then(load)`
+  // plus an immediate `load()`) asked for the same numbers twice and let the
+  // slower answer of the two win the render.
   fillChats().then(() => load())
-  load()
 
   return () => {
     closed = true

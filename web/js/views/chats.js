@@ -364,6 +364,7 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
   const storage = typeof localStorage === 'undefined' ? null : localStorage
   const state = {
     sessions: [], query: '', selected: null, rows: [], offset: 0, total: 0,
+    anchored: false,
     album: { open: false, offset: 0, total: 0 },
     hidden: false,
     batch: new Set(),
@@ -371,6 +372,13 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
     history: readList(storage, HISTORY_KEY),
   }
   let closed = false
+  // Requests come back in whatever order the helper finishes them. Without a
+  // generation counter a slow page for the previous chat lands after the new
+  // one, and the reader shows one conversation's rows under another chat's
+  // title (or the same page twice when "载入更早" is clicked twice). Every load
+  // takes a number and only the newest one may touch the DOM.
+  let loadSeq = 0
+  let albumSeq = 0
 
   function renderList() {
     const visible = filterSessions(state.sessions, state.query)
@@ -504,20 +512,26 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
     if (reset) messages.replaceChildren()
     for (const row of rows) messages.append(messageRow(row, { onOpenMedia: openMedia }))
     more.hidden = state.rows.length >= state.total
+    // A window centred on a hit is not a page of the newest-first list: paging
+    // from it would append rows from an unrelated offset, so the button means
+    // "back to the newest" while the window is anchored.
+    more.textContent = state.anchored ? '回到最新' : '载入更早'
   }
 
   /** Album page: images of the selected chat, appended so paging keeps order. */
   async function loadAlbum(reset) {
-    if (!state.selected) return
+    const session = state.selected
+    if (!session) return
+    const seq = ++albumSeq
     const offset = reset ? 0 : state.album.offset + albumGrid.children.length
     try {
       const payload = await api.get('/api/media/list', {
-        chatKind: state.selected.kind,
-        chatId: state.selected.id,
+        chatKind: session.kind,
+        chatId: session.id,
         offset,
         limit: 60,
       })
-      if (closed) return
+      if (closed || seq !== albumSeq) return
       const items = Array.isArray(payload?.items) ? payload.items : []
       if (reset) albumGrid.replaceChildren()
       for (const item of items) {
@@ -535,7 +549,7 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
         : `本机图片 ${state.album.total} 张`
       albumMore.hidden = albumGrid.children.length >= state.album.total
     } catch (error) {
-      if (!closed) albumHint.textContent = `读取相册失败：${error.message}`
+      if (!closed && seq === albumSeq) albumHint.textContent = `读取相册失败：${error.message}`
     }
   }
 
@@ -550,11 +564,13 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
   }
 
   async function loadMessages(reset, around = null) {
-    if (!state.selected) return
+    const session = state.selected
+    if (!session) return
+    const seq = ++loadSeq
     const offset = reset ? 0 : state.offset + state.rows.length
     const args = {
-      chatKind: state.selected.kind,
-      chatId: state.selected.id,
+      chatKind: session.kind,
+      chatId: session.id,
       offset,
       limit: PAGE_SIZE,
       order: 'desc',
@@ -567,22 +583,26 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
     }
     try {
       const payload = await api.get('/api/messages', args)
-      if (closed) return
+      // A newer selection (or a newer page for the same chat) owns the list
+      // now: drawing this page would mix two conversations together.
+      if (closed || seq !== loadSeq) return
       const rows = Array.isArray(payload?.rows) ? payload.rows : []
       state.rows = reset ? rows : state.rows.concat(rows)
+      state.anchored = Boolean(around)
       state.offset = offset
       state.total = Number(payload?.total) || state.rows.length
       // Only the new page is appended; `renderMessages(false, state.rows)`
       // would draw every page a second time.
       renderMessages(reset, rows)
     } catch (error) {
-      if (closed) return
+      if (closed || seq !== loadSeq) return
       title.textContent = `读取消息失败：${error.message}`
       more.hidden = true
     }
   }
 
   async function search(keyword, includeOcr) {
+    const seq = ++loadSeq
     const args = { keyword, limit: 100, order: 'desc' }
     if (!includeOcr) args.sources = ['text']
     title.textContent = `搜索：${keyword}`
@@ -593,7 +613,7 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
     renderHistory()
     try {
       const payload = await api.get('/api/messages', args)
-      if (closed) return
+      if (closed || seq !== loadSeq) return
       const rows = Array.isArray(payload?.rows) ? payload.rows : []
       state.rows = rows
       state.total = Number(payload?.total) || rows.length
@@ -623,7 +643,7 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
         messages.append(item)
       }
     } catch (error) {
-      if (!closed) title.textContent = `搜索失败：${error.message}`
+      if (!closed && seq === loadSeq) title.textContent = `搜索失败：${error.message}`
     }
   }
 
@@ -671,7 +691,10 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
     hitBar.hidden = true
     state.selected = session
     state.rows = []
+    state.anchored = false
     state.album = { open: false, offset: 0, total: 0 }
+    // An album page for the chat we just left must not paint into the new one.
+    albumSeq += 1
     album.hidden = true
     albumGrid.replaceChildren()
     galleryButton.classList.remove('is-active')
@@ -684,7 +707,13 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
     state.query = filter.value
     renderList()
   })
-  more.addEventListener('click', () => loadMessages(false))
+  more.addEventListener('click', () => {
+    if (state.anchored && state.selected) {
+      select(state.selected)
+      return
+    }
+    loadMessages(false)
+  })
   galleryButton.addEventListener('click', toggleAlbum)
   albumMore.addEventListener('click', () => loadAlbum(false))
   saveButton.addEventListener('click', saveCurrent)

@@ -505,3 +505,156 @@ test('search results offer "export these chats" for the distinct hits', async ()
     restore()
   }
 })
+
+/** A page of rows whose text says which chat they belong to. */
+function page(chat, texts) {
+  return {
+    total: texts.length,
+    offset: 0,
+    limit: 50,
+    rows: texts.map((text) => ({ ts: 1730000000, sender: chat, text })),
+  }
+}
+
+test('a slow page for the previous chat never paints into the new one', async () => {
+  const restore = installDocument()
+  const pending = new Map()
+  const api = {
+    get: (path, params) => {
+      if (path === '/api/sessions') return Promise.resolve({ sessions })
+      return new Promise((resolve) => pending.set(params.chatId, resolve))
+    },
+  }
+  const root = makeElement('main')
+  const cleanup = mountChats(root, { api })
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const shell = root.children[0]
+    const list = findByClass(shell, 'chat-list')
+    const main = findByClass(shell, 'chat-main')
+    const msgList = findByClass(main, 'msg-list')
+    const title = findByClass(main, 'chat-title')
+
+    pending.get('111')(page('老师', ['第一条']))
+    pending.clear()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    assert.equal(msgList.children.length, 1)
+
+    // Open the private chat, then immediately go back to the group one. Both
+    // requests are still running; the group answer lands first, the private one
+    // last - which is exactly the order that used to show the wrong chat.
+    list.children[1].dispatch('click')
+    list.children[0].dispatch('click')
+    const newest = pending.get('111')
+    const stale = pending.get('u_abc')
+    pending.clear()
+    assert.ok(stale, 'the superseded request must still be in flight')
+
+    newest(page('老师', ['第二条']))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    stale(page('小林', ['不该出现的私聊']))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    assert.match(title.textContent, /课程群/)
+    assert.equal(msgList.children.length, 1)
+    assert.match(textOf(msgList), /第二条/)
+    assert.doesNotMatch(textOf(msgList), /不该出现/)
+  } finally {
+    cleanup()
+    restore()
+  }
+})
+
+test('two quick "载入更早" clicks append one page, not two copies', async () => {
+  const restore = installDocument()
+  const pending = []
+  const api = {
+    get: (path, params) => {
+      if (path === '/api/sessions') return Promise.resolve({ sessions })
+      return new Promise((resolve) => pending.push(resolve))
+    },
+  }
+  const root = makeElement('main')
+  const cleanup = mountChats(root, { api })
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    pending.shift()({ total: 4, offset: 0, limit: 2, rows: [
+      { ts: 2, sender: '甲', text: '第二页首条' },
+      { ts: 1, sender: '甲', text: '第二页次条' },
+    ] })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const shell = root.children[0]
+    const main = findByClass(shell, 'chat-main')
+    const msgList = findByClass(main, 'msg-list')
+    const more = main.children.find((item) => textOf(item) === '载入更早')
+    assert.equal(more.hidden, false)
+
+    more.dispatch('click')
+    more.dispatch('click')
+    pending.shift()(page('甲', ['甲页']))
+    pending.shift()(page('甲', ['乙页']))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // Two rows from the first page plus one appended page: the older of the two
+    // "载入更早" answers is dropped instead of being appended a second time.
+    assert.equal(msgList.children.length, 3)
+    assert.match(textOf(msgList), /乙页/)
+    assert.doesNotMatch(textOf(msgList), /甲页/)
+  } finally {
+    cleanup()
+    restore()
+  }
+})
+
+test('an anchored window goes back to the newest instead of appending an offset', async () => {
+  const restore = installDocument()
+  const calls = []
+  const hit = { ts: 9, sender: '甲', text: '命中', chatKind: 'group', chatId: '111', chatName: '课程群', rowId: 7 }
+  const api = {
+    get: async (path, params) => {
+      calls.push({ path, params })
+      if (path === '/api/sessions') return { sessions }
+      if (params.keyword) return { total: 1, rows: [hit] }
+      if (params.around) {
+        return { total: 200, offset: 0, limit: 50, rows: [
+          { ts: 3, sender: '甲', text: '窗口甲' },
+          { ts: 2, sender: '甲', text: '窗口乙' },
+        ] }
+      }
+      return { total: 200, offset: 0, limit: 2, rows: [
+        { ts: 9, sender: '甲', text: '最新甲' },
+        { ts: 8, sender: '甲', text: '最新乙' },
+      ] }
+    },
+  }
+  const root = makeElement('main')
+  const cleanup = mountChats(root, { api })
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const shell = root.children[0]
+    const main = findByClass(shell, 'chat-main')
+    const msgList = findByClass(main, 'msg-list')
+
+    // Search, then open the hit: this asks for a window centred on the message.
+    findByClass(shell, 'chat-search-input').value = '命中'
+    findByClass(shell, 'chat-search').dispatch('submit')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    msgList.children[0].dispatch('click')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    assert.equal(calls.at(-1).params.around, 7)
+    assert.match(textOf(msgList), /窗口甲/)
+
+    // "载入更早" here would ask for offset 50 of a list that is not on screen.
+    const more = main.children.find((item) => textOf(item) === '回到最新')
+    assert.ok(more, 'the button must say 回到最新 for an anchored window')
+    assert.equal(more.hidden, false)
+    more.dispatch('click')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    assert.equal(calls.at(-1).params.around, undefined)
+    assert.equal(calls.at(-1).params.offset, 0)
+    assert.match(textOf(msgList), /最新甲/)
+    assert.doesNotMatch(textOf(msgList), /窗口甲/)
+  } finally {
+    cleanup()
+    restore()
+  }
+})

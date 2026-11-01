@@ -418,7 +418,7 @@ function readInt(value, fallback) {
 }
 
 /** Collect the filter parameters shared by the message list and the exports. */
-function filtersFrom(params) {
+export function filtersFrom(params) {
   const args = {
     chatKind: params.get('chatKind') || '',
     chatId: params.get('chatId') || '',
@@ -427,6 +427,9 @@ function filtersFrom(params) {
     senderRegex: params.get('senderRegex') === '1' ? '1' : '',
     since: params.get('since') || '',
     until: params.get('until') || '',
+    // The reader sends `order=desc`; dropping it here made a documented
+    // parameter look supported while the helper only ever saw its default.
+    order: ['asc', 'desc'].includes(params.get('order')) ? params.get('order') : '',
   }
   // `sources` narrows the keyword to message text, recognized media or both;
   // absent means the helper's default (all of them).

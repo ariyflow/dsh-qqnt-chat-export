@@ -393,6 +393,24 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
     }
   }
 
+  /**
+   * Rebuild the preset dropdown from `state.presets`.
+   *
+   * Appending one option after a save instead of rebuilding left a stale
+   * duplicate behind when the name already existed: the duplicate's copy of
+   * the settings won the lookup, so re-saving a preset appeared to do nothing.
+   */
+  function renderPresetOptions() {
+    preset.replaceChildren(presetEmpty)
+    for (const item of state.presets) {
+      const option = document.createElement('option')
+      option.value = item.name
+      option.textContent = item.name
+      option.dataset.preset = JSON.stringify(item)
+      preset.append(option)
+    }
+  }
+
   async function loadOptions() {
     try {
       const payload = await api.get('/api/sessions')
@@ -420,13 +438,7 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
       const payload = await api.get('/api/presets')
       if (closed) return
       state.presets = Array.isArray(payload?.presets) ? payload.presets : []
-      for (const item of state.presets) {
-        const option = document.createElement('option')
-        option.value = item.name
-        option.textContent = item.name
-        option.dataset.preset = JSON.stringify(item)
-        preset.append(option)
-      }
+      renderPresetOptions()
     } catch {
       // No presets file yet.
     }
@@ -436,7 +448,7 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
     if (typeof window === 'undefined' || typeof window.prompt !== 'function') return
     const name = window.prompt('预设名字（例如「CSV 只要时间与正文」）', '')
     if (!name || String(name).trim() === '') return
-    const preset = {
+    const entry = {
       name: String(name).trim().slice(0, 40),
       format: format.value,
       redact: redact.value,
@@ -449,14 +461,11 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
     try {
       // One preset at a time: the server merges against the list on disk, so
       // a preset saved in another tab is not dropped.
-      const payload = await api.post('/api/presets', { add: preset })
+      const payload = await api.post('/api/presets', { add: entry })
       state.presets = Array.isArray(payload?.presets) ? payload.presets : state.presets
-      const option = document.createElement('option')
-      option.value = preset.name
-      option.textContent = preset.name
-      option.dataset.preset = JSON.stringify(preset)
-      preset.append(option)
-      derived.textContent = `已保存预设「${preset.name}」`
+      renderPresetOptions()
+      preset.value = entry.name
+      derived.textContent = `已保存预设「${entry.name}」`
     } catch (error) {
       derived.textContent = `保存预设失败：${error.message}`
     }

@@ -9,6 +9,16 @@ import { findAllByClass, findByClass, installDocument, makeElement, textOf } fro
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 20))
 
+/** The element whose children include `target`. */
+function parentOf(node, target) {
+  if ((node.children || []).includes(target)) return node
+  for (const child of node.children || []) {
+    const found = parentOf(child, target)
+    if (found) return found
+  }
+  return null
+}
+
 const data = {
   total: 12, chats: 2, senders: 3,
   firstTime: '2026-10-01 09:00', lastTime: '2026-10-31 22:00',
@@ -119,6 +129,58 @@ test('bars and heat cells write the size to the style property', async () => {
     const cells = findAllByClass(root, 'heat-cell')
     assert.ok(cells.length > 0)
     for (const cell of cells) assert.match(String(cell.style.opacity), /^0\.\d+$|^1$/)
+  } finally {
+    cleanup()
+    restore()
+  }
+})
+
+test('picking a chat in the picker keeps its name in the heading', async () => {
+  const restore = installDocument()
+  const api = {
+    get: async (path) => (path === '/api/sessions'
+      ? { sessions: [{ kind: 'group', id: '123', name: '示例课程群' }] }
+      : data),
+  }
+  const root = makeElement('main')
+  const cleanup = mountStats(root, { api })
+  try {
+    await tick()
+    const select = findByClass(root, 'stats-chat')
+    assert.ok(select, 'no chat picker rendered')
+    // The heading used to fall back to the raw id because the picker only kept
+    // `kind`/`id`; the option label is the name the reader already knows.
+    select.value = 'group:123'
+    select.dispatch('change')
+    const form = parentOf(root, select)
+    assert.ok(form, 'the picker must live in the stats form')
+    form.dispatch('submit')
+    await tick()
+    assert.match(textOf(root), /示例课程群 · 12 条/)
+    assert.doesNotMatch(textOf(root), /123 · 12 条/)
+  } finally {
+    cleanup()
+    restore()
+  }
+})
+
+test('mounting asks for the numbers once, not twice', async () => {
+  const restore = installDocument()
+  const asked = []
+  const api = {
+    get: async (path) => {
+      asked.push(path)
+      return path === '/api/sessions'
+        ? { sessions: [{ kind: 'group', id: '123', name: '示例课程群' }] }
+        : data
+    },
+  }
+  const root = makeElement('main')
+  const cleanup = mountStats(root, { api })
+  try {
+    await tick()
+    await tick()
+    assert.equal(asked.filter((path) => path === '/api/stats').length, 1)
   } finally {
     cleanup()
     restore()

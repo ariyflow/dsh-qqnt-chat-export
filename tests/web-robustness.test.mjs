@@ -11,7 +11,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { startWebServer } from '../web.js'
+import { filtersFrom, startWebServer } from '../web.js'
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -154,4 +154,29 @@ test('presets accept add and remove without clobbering the other tab', async () 
     await server.close()
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+test('the message filters the page sends reach the helper', () => {
+  // `order` is the one the reader sends on every page; it used to be dropped
+  // here, so a documented parameter only ever existed on the client.
+  const params = new URLSearchParams({
+    chatKind: 'private', chatId: 'u1', keyword: '开会', sender: '小林',
+    senderRegex: '1', since: '2026-10-01', until: '2026-10-31', order: 'asc',
+  })
+  params.append('sources', 'text')
+  params.append('sources', 'ocr')
+  assert.deepEqual(filtersFrom(params), {
+    chatKind: 'private',
+    chatId: 'u1',
+    keyword: '开会',
+    sender: '小林',
+    senderRegex: '1',
+    since: '2026-10-01',
+    until: '2026-10-31',
+    order: 'asc',
+    sources: ['text', 'ocr'],
+  })
+  // An unknown or absent order stays absent: the helper's default wins.
+  assert.equal(filtersFrom(new URLSearchParams({ order: 'sideways' })).order, undefined)
+  assert.equal(filtersFrom(new URLSearchParams({ order: 'desc' })).order, 'desc')
 })

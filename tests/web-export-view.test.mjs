@@ -226,3 +226,70 @@ test('picking 内嵌图片 clears the options it disables before submitting', as
     restore()
   }
 })
+
+/** First element in the subtree whose own text is exactly `text`. */
+function byText(node, text) {
+  if (typeof node.textContent === 'string' && node.textContent === text) return node
+  for (const child of node.children || []) {
+    const found = byText(child, text)
+    if (found) return found
+  }
+  return null
+}
+
+test('saving a preset updates the dropdown instead of throwing or duplicating', async () => {
+  const restore = installDocument()
+  const previousWindow = globalThis.window
+  globalThis.window = { prompt: () => '我的预设' }
+  let stored = []
+  const api = {
+    get: async (path) => {
+      if (path === '/api/sessions') return { sessions: [] }
+      if (path === '/api/presets') return { presets: stored }
+      return { jobs: [] }
+    },
+    post: async (path, body) => {
+      if (path === '/api/presets') {
+        // The server merges one preset and answers with the whole list.
+        stored = [...stored.filter((item) => item.name !== body.add.name), body.add]
+        return { presets: stored }
+      }
+      return { id: 'job1', state: 'queued' }
+    },
+  }
+  const root = makeElement('main')
+  const cleanup = mountExport(root, { api })
+  try {
+    await tick()
+    // A browser selects the first option ('txt') by default; the shim has no
+    // option machinery, so the test states it explicitly.
+    findByClass(root, 'export-format').value = 'txt'
+    const save = byText(root, '存为预设')
+    assert.ok(save, 'the export page must offer 存为预设')
+    save.dispatch('click')
+    await tick()
+
+    const picker = findByClass(root, 'export-preset')
+    const saved = picker.children.filter((option) => option.value === '我的预设')
+    assert.equal(saved.length, 1)
+    assert.match(saved[0].dataset.preset, /"format":"txt"/)
+    assert.match(textOf(root), /已保存预设「我的预设」/)
+    assert.doesNotMatch(textOf(root), /保存预设失败/)
+
+    // Saving the same name with another format replaces the old copy: no stale
+    // duplicate may win the lookup in the change handler.
+    findByClass(root, 'export-format').value = 'json'
+    byText(root, '存为预设').dispatch('click')
+    await tick()
+    const again = findByClass(root, 'export-preset').children
+      .filter((option) => option.value === '我的预设')
+    assert.equal(again.length, 1)
+    assert.match(again[0].dataset.preset, /"format":"json"/)
+    assert.equal(stored.length, 1)
+  } finally {
+    cleanup()
+    restore()
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  }
+})
