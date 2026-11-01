@@ -10,6 +10,8 @@ import { fileURLToPath } from 'node:url'
 import {
   askTool,
   doctorTool,
+  jobsTool,
+  mediaTool,
   exportBatchTool,
   exportChatTool,
   indexTool,
@@ -94,6 +96,31 @@ async function addChat(work, { kind, id, name, msgId, ts, text }) {
   ].join('\n'))
   execFileSync(PYTHON, [script, path.join(work, 'index.sqlite'), kind, id, name,
     String(msgId), String(ts), text], { stdio: 'pipe' })
+}
+
+/** Put one "downloaded" image on disk and in the fixture index. */
+async function addImage(work, { kind = 'group', id = 'g1', msgId = 11, name = 'pic.png' } = {}) {
+  const root = path.join(work, 'media-root')
+  await mkdir(root, { recursive: true })
+  const file = path.join(root, name)
+  await writeFile(file, Buffer.from('89504e470d0a1a0a', 'hex'))
+  const script = path.join(work, `image-${id}-${msgId}.py`)
+  const source = `import os, sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("INSERT OR REPLACE INTO meta VALUES ('datadir', ?)", (sys.argv[2],))
+conn.execute(
+    "INSERT OR REPLACE INTO media (chat_kind, msg_id, chat_id, seq, kind,"
+    " name, size, md5, server, path, thumbnail, reason)"
+    " VALUES (?,?,?,1,'image',?,8,'','',?,0,'')",
+    (sys.argv[3], int(sys.argv[4]), sys.argv[5], sys.argv[6],
+     os.path.join(sys.argv[2], sys.argv[6])))
+conn.commit()
+conn.close()
+`
+  await writeFile(script, source)
+  execFileSync(PYTHON, [script, path.join(work, 'index.sqlite'), root, kind,
+    String(msgId), id, name], { stdio: 'pipe' })
+  return { root, file }
 }
 
 test('index tools list both group and private chats', { skip: !hasPython() && 'python is not installed' }, async () => {
@@ -685,6 +712,189 @@ test('batch export narrows every chat with the same filters', { skip: !hasPython
     // The chat the filter excluded is reported rather than silently missing.
     assert.match(result.output, /1 个会话没有匹配的消息/)
     assert.ok(existsSync(result.outPath), result.outPath)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+/** A stand-in for the queue the web server owns. */
+function fakeQueue(rows = []) {
+  const state = rows.map((row) => ({ ...row }))
+  const calls = []
+  return {
+    calls,
+    state,
+    list: ({ kind = '' } = {}) => state.filter((row) => kind === '' || row.kind === kind),
+    get: (id) => state.find((row) => row.id === id || String(row.id).startsWith(id)) || null,
+    submit(kind, { summary, params }) {
+      calls.push(['submit', kind, summary, params])
+      const row = {
+        id: `job${state.length + 1}`, kind, summary, state: 'queued', progress: 0,
+        message: '', error: '', result: null, canCancel: true, canRetry: false, log: [],
+      }
+      state.unshift(row)
+      return row
+    },
+    cancel(id) {
+      calls.push(['cancel', id])
+      const row = state.find((entry) => entry.id === id)
+      row.state = 'canceling'
+      return row
+    },
+    retry(id) {
+      calls.push(['retry', id])
+      const row = state.find((entry) => entry.id === id)
+      row.state = 'queued'
+      return row
+    },
+  }
+}
+
+test('jobs lists the queue with the panel wording', async () => {
+  const queue = fakeQueue([
+    { id: 'j1', kind: 'ocr', summary: '识别图片文字', state: 'running', progress: 0.42, message: '识别 312/750 张' },
+    { id: 'j2', kind: 'chunks', summary: '分块与嵌入', state: 'done', progress: 1, message: '', result: { chunks: 11 } },
+    { id: 'j3', kind: 'asr', summary: '转写语音', state: 'failed', progress: 0.1, error: '语音模型未下载' },
+  ])
+  const tool = jobsTool({ workDir: '/tmp/qqnt-jobs-fixture' }, () => queue)
+  const listed = await tool.execute({}, { signal: signal() })
+  assert.equal(listed.ok, true, listed.output)
+  assert.equal(listed.jobs, 3)
+  assert.equal(listed.running, 1)
+  assert.match(listed.output, /任务（3）/)
+  assert.match(listed.output, /识别图片文字（ocr）进行中 · 42% · 识别 312\/750 张 · id j1/)
+  assert.match(listed.output, /分块与嵌入（chunks）完成 · id j2/)
+  // A failed row carries its reason, not just "失败".
+  assert.match(listed.output, /转写语音（asr）失败 · 10% · 语音模型未下载 · id j3/)
+
+  const only = await tool.execute({ kind: 'chunks' }, { signal: signal() })
+  assert.match(only.output, /任务（1）/)
+  assert.doesNotMatch(only.output, /j1/)
+})
+
+test('jobs explains a missing queue instead of crashing', async () => {
+  const tool = jobsTool({ workDir: '/tmp/qqnt-jobs-fixture' }, () => null)
+  const result = await tool.execute({}, { signal: signal() })
+  assert.equal(result.ok, false)
+  assert.match(result.output, /任务队列没有起来/)
+  assert.match(result.output, /端口/)
+})
+
+test('jobs starts work on the shared queue and waits for it', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  const queue = fakeQueue()
+  // Chunking needs neither a component nor a model, so it is the one kind that
+  // can start anywhere; the fake queue reports it finished on the second poll.
+  let polls = 0
+  const originalGet = queue.get
+  queue.get = (id) => {
+    polls += 1
+    if (polls > 1) {
+      const row = originalGet(id)
+      row.state = 'done'
+      row.progress = 1
+      row.result = { chunks: 11, vectors: 0, note: '嵌入模型未下载' }
+    }
+    return originalGet(id)
+  }
+  try {
+    const tool = jobsTool(settings, () => queue)
+    const started = await tool.execute(
+      { action: 'start', kind: 'chunks', waitSeconds: 10 }, { signal: signal() })
+    assert.equal(started.ok, true, started.output)
+    assert.deepEqual(queue.calls[0].slice(0, 3), ['submit', 'chunks', '分块与嵌入'])
+    assert.match(started.output, /已排队：分块与嵌入（chunks）/)
+    assert.match(started.output, /任务完成：chunks=11/)
+
+    // Content jobs refuse to start without the index they read.
+    const bare = await jobsTool({ ...settings, workDir: path.join(work, 'empty') }, () => queue)
+      .execute({ action: 'start', kind: 'ocr' }, { signal: signal() })
+    assert.equal(bare.ok, false)
+    assert.match(bare.output, /还没有索引/)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('jobs refuses work that cannot run and runaway exports', async () => {
+  const queue = fakeQueue()
+  const tool = jobsTool({ workDir: '/tmp/qqnt-jobs-fixture' }, () => queue)
+  const noGroups = await tool.execute(
+    { action: 'start', kind: 'components', params: { groups: [] } }, { signal: signal() })
+  assert.equal(noGroups.ok, false)
+  assert.match(noGroups.output, /params\.groups/)
+
+  const noId = await tool.execute(
+    { action: 'start', kind: 'model-download' }, { signal: signal() })
+  assert.equal(noId.ok, false)
+  assert.match(noId.output, /params\.id/)
+
+  // Exports have their own tools: the queue would need the page's request body.
+  const exported = await tool.execute(
+    { action: 'start', kind: 'export' }, { signal: signal() })
+  assert.equal(exported.ok, false)
+  assert.match(exported.output, /qqnt_export_chat/)
+  assert.deepEqual(queue.calls, [], 'nothing may be queued for a refused start')
+})
+
+test('jobs gets, cancels and retries one row by id', async () => {
+  const queue = fakeQueue([
+    { id: 'j1', kind: 'ocr', summary: '识别图片文字', state: 'running', progress: 0.5, message: '一半', log: ['a', 'b'] },
+    { id: 'j2', kind: 'asr', summary: '转写语音', state: 'failed', error: '模型未下载', canRetry: true },
+  ])
+  const tool = jobsTool({ workDir: '/tmp/qqnt-jobs-fixture' }, () => queue)
+  const one = await tool.execute({ action: 'get', id: 'j1' }, { signal: signal() })
+  assert.equal(one.ok, true, one.output)
+  assert.match(one.output, /识别图片文字（ocr）/)
+  assert.match(one.output, /最近日志\n {2}a\n {2}b/)
+
+  const canceled = await tool.execute({ action: 'cancel', id: 'j1' }, { signal: signal() })
+  assert.match(canceled.output, /已请求取消/)
+  assert.deepEqual(queue.calls.at(-1), ['cancel', 'j1'])
+
+  const retried = await tool.execute({ action: 'retry', id: 'j2' }, { signal: signal() })
+  assert.match(retried.output, /已重新排队/)
+  assert.deepEqual(queue.calls.at(-1), ['retry', 'j2'])
+
+  const missing = await tool.execute({ action: 'get', id: 'nope' }, { signal: signal() })
+  assert.equal(missing.ok, false)
+  assert.match(missing.output, /没有这个任务：nope/)
+})
+
+test('media lists, resolves and copies the downloaded images of a chat', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const none = await mediaTool(settings).execute({ chat: '测试群' }, { signal: signal() })
+    assert.equal(none.ok, true, none.output)
+    assert.equal(none.total, 0)
+    assert.match(none.output, /本机没有下载过的图片/)
+
+    const { file } = await addImage(work)
+    const listed = await mediaTool(settings).execute({ chat: '测试群' }, { signal: signal() })
+    assert.equal(listed.ok, true, listed.output)
+    assert.equal(listed.total, 1)
+    assert.match(listed.output, /测试群：1 张/)
+    assert.match(listed.output, /pic\.png/)
+    assert.match(listed.output, /rowId=1 seq=1/)
+
+    const one = await mediaTool(settings).execute(
+      { action: 'get', rowId: 1, seq: 1 }, { signal: signal() })
+    assert.equal(one.ok, true, one.output)
+    assert.ok(one.output.includes(file), one.output)
+    assert.match(one.output, /没有复制/)
+
+    const outDir = path.join(work, 'pics')
+    const copied = await mediaTool(settings).execute(
+      { action: 'export', chat: '测试群', outDir, count: 5 }, { signal: signal() })
+    assert.equal(copied.ok, true, copied.output)
+    assert.equal(copied.files, 1)
+    assert.equal(copied.bytes, 8)
+    assert.ok(existsSync(path.join(outDir, '001-pic.png')), copied.output)
+
+    const missingFile = await mediaTool(settings).execute(
+      { action: 'get', rowId: 99 }, { signal: signal() })
+    assert.equal(missingFile.ok, false)
+    assert.match(missingFile.output, /索引里没有这条消息/)
   } finally {
     await rm(work, { recursive: true, force: true })
   }

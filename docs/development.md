@@ -1,7 +1,7 @@
 # 开发
 
 ```
-index.js              插件入口：十三个工具 + 启动网页服务 + 侧边栏面板路由
+index.js              插件入口：十五个工具 + 启动网页服务 + 侧边栏面板路由
 client.js             浏览器半边：侧边栏图标 / 主面板 / better-sidebar tab（原生 iframe）
 web.js                本地 HTTP 服务与 JSON API
 jobs.js               通用后台任务队列（排队、并发、取消、重试、落盘恢复）

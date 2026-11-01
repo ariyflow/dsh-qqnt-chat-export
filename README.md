@@ -1,6 +1,6 @@
 # dsh-qqnt-chat-export
 
-把 **Windows / Linux 上的 NTQQ（QQ NT / 9.9.x）聊天记录**读出来、搜出来、导出来 —— 一个 DeepSeek Harness 插件包：十三个模型工具 + 一个本地网页界面，支持群聊和私聊，可导出 6 种格式，还能识别截图里的文字、转写语音，并按问题检索聊天记录、给出可点回的引用。
+把 **Windows / Linux 上的 NTQQ（QQ NT / 9.9.x）聊天记录**读出来、搜出来、导出来 —— 一个 DeepSeek Harness 插件包：十五个模型工具 + 一个本地网页界面，支持群聊和私聊，可导出 6 种格式，还能识别截图里的文字、转写语音，并按问题检索聊天记录、给出可点回的引用。
 
 Read, search, and export NTQQ chat history from a DeepSeek Harness session or from a local web page, on Windows or Linux.
 
@@ -10,7 +10,7 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
 
 ## 功能
 
-- **十三个模型工具**：体检与排障（`qqnt_doctor`）、建索引（`qqnt_index`）、统计（`qqnt_stats`）、提取密钥、群列表、会话列表、跨会话搜索、单群 / 单会话 / 批量导出，以及问答检索（`qqnt_ask`）与主题回看（`qqnt_recall`）；
+- **十五个模型工具**：体检与排障（`qqnt_doctor`）、建索引（`qqnt_index`）、统计（`qqnt_stats`）、后台任务（`qqnt_jobs`）、取图（`qqnt_media`）、提取密钥、群列表、会话列表、跨会话搜索、单群 / 单会话 / 批量导出，以及问答检索（`qqnt_ask`）与主题回看（`qqnt_recall`）；
 - **本地网页界面**（`http://127.0.0.1:46728`）：全部会话列表、组合查询与高亮、图片预览 / 相册、统计、批量导出、导出预设；
 - **索引与搜索**：首次同步建旁路明文索引 `index.sqlite`，之后查询与导出只读它；关键词走 FTS5 trigram，中文子串也是索引查找；支持多账号索引缓存；
 - **看得懂内容**：截图里的文字可以 OCR 成可搜索文本，语音消息可以转写成文字，两者都进入搜索与问答的文本池；模型文件按需下载、在「模型与组件」里逐个删除，OCR/转写/向量需要的 Python 组件也在那里一键安装；
@@ -77,6 +77,8 @@ dsh plugin --profile web remove dsh-qqnt-chat-export
 | `qqnt_list_chats` | 索引里的**全部会话**（群聊 + 私聊）：类型、id、名称、消息数、最后时间；`query` 可按名字/别名/群号/QQ 过滤 |
 | `qqnt_search` | 跨会话关键词搜索（可限定会话、发送者、日期；`senderRegex` 把发送者当正则） |
 | `qqnt_stats` | 聚合统计：总量、会话数、发言人数、月度、Top 发言人 / 会话、24 小时分布；与搜索同名的过滤条件 |
+| `qqnt_jobs` | 看 / 起 / 取消 / 重试后台任务（图片识别、语音转写、分块嵌入、下载模型、安装组件）；和网页共用一条队列，两边看到的是同一批任务，缺组件/模型时先说缺什么而不是排一个注定失败的任务 |
+| `qqnt_media` | 一个会话的图片：`list` 分页列表、`get` 给出原图路径（不复制）、`export` 按时间范围拷到下载目录；只算本机已经下载过的图片，不会联网补 |
 | `qqnt_export_chat` | 导出任意会话为 txt / csv / json / md / html / sqlite；`chat` 可直接给名字（歧义时拒绝并返回候选），`dryRun` 先预演，`keyword`/`sender`/`since`/`until` 只导一部分 |
 | `qqnt_export_batch` | 一次导出最多 200 个会话到一个 ZIP（每会话一份文件 + `manifest.json`）；`chatNames` 可直接给名字列表，`keyword`/`sender`/`since`/`until` 对每个会话同时生效 |
 

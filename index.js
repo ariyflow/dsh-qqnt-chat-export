@@ -1665,6 +1665,565 @@ export function doctorTool(settings, currentUrl) {
   }
 }
 
+/**
+ * `进行中 42% · 识别 312/750 张` — the same wording the web task panel uses.
+ *
+ * Kept as a local copy instead of importing `web/js/views/jobs.js`: the host
+ * half must boot even if the frontend module is ever reorganised, and the two
+ * strings are pinned by tests on both sides.
+ */
+function jobStatusText(job) {
+  const labels = {
+    queued: '排队中', running: '进行中', canceling: '正在停止…',
+    done: '完成', failed: '失败', canceled: '已取消', interrupted: '被中断',
+  }
+  const state = String(job?.state || '')
+  const label = labels[state] || state || '未知'
+  const progress = Number(job?.progress) > 0 && state !== 'done'
+    ? `${Math.round(Number(job.progress) * 100)}%`
+    : ''
+  const failed = state === 'failed' || state === 'interrupted'
+  const detail = failed ? (job.error || job.message) : job.message
+  return [label, progress, detail]
+    .filter((part) => part !== '' && part !== undefined).join(' · ')
+}
+
+/** Numeric and short-string fields of a runner result, for one line. */
+function resultLine(result) {
+  if (!result || typeof result !== 'object') return ''
+  const parts = []
+  for (const [key, value] of Object.entries(result)) {
+    if (typeof value === 'number' || typeof value === 'boolean') parts.push(`${key}=${value}`)
+    else if (typeof value === 'string' && value !== '' && value.length <= 60) parts.push(`${key}=${value}`)
+    if (parts.length >= 6) break
+  }
+  return parts.join(' · ')
+}
+
+/** Task kinds the queue knows; only the first five can be started by a tool. */
+const JOB_KINDS = ['ocr', 'asr', 'chunks', 'components', 'model-download', 'export']
+const STARTABLE_JOB_KINDS = ['ocr', 'asr', 'chunks', 'components', 'model-download']
+const JOB_SUMMARIES = {
+  ocr: '识别图片文字',
+  asr: '转写语音',
+  chunks: '分块与嵌入',
+  components: '安装组件',
+  'model-download': '下载模型',
+}
+/**
+ * What each task cannot run without. OCR falls back to the weights bundled in
+ * its wheel, and chunking without the embedding model still writes chunks (the
+ * helper reports that as a note), so only these two are hard requirements.
+ */
+const JOB_NEEDS = {
+  ocr: { components: ['ocr'] },
+  asr: { components: ['asr'], models: ['paraformer-zh-small'] },
+}
+
+/** The missing pieces that would make `kind` fail, as sentences. */
+async function dependencyGaps(settings, kind, exec) {
+  const need = JOB_NEEDS[kind]
+  if (!need) return []
+  const [componentAnswer, modelAnswer] = await Promise.all([
+    need.components
+      ? runQueryJson(settings, ['components', '--json', JSON.stringify({ action: 'status' })], exec)
+        .catch(() => null)
+      : null,
+    need.models
+      ? runQueryJson(settings, ['models', '--json', '{}'], exec).catch(() => null)
+      : null,
+  ])
+  const gaps = []
+  const found = componentAnswer?.payload?.components ?? null
+  for (const id of need.components || []) {
+    const item = found ? found[id] : null
+    if (item && item.installed === false) {
+      gaps.push(`${item.label || id}组件没装（${(item.packages || []).join(' ')}）：`
+        + `用 action=start、kind=components、params={"groups":["${id}"]} 装。`)
+    }
+  }
+  const known = modelAnswer?.payload ?? null
+  for (const id of need.models || []) {
+    const item = known ? known[id] : null
+    if (item && item.installed === false) {
+      gaps.push(`模型「${item.label || id}」没下载（约 ${sizeText(item.expectedBytes)}）：`
+        + `用 action=start、kind=model-download、params={"id":"${id}"} 下载。`)
+    }
+  }
+  return gaps
+}
+
+/**
+ * The task panel, seen from the model side.
+ *
+ * The queue belongs to the web server (`startWebServer` creates it), so this
+ * tool shares that object rather than starting a second queue: an OCR job
+ * started here shows up in the page's panel, and cancelling there stops it
+ * here. `getJobs` returns `null` while the listener does not exist, which is
+ * also the only case where no task could run at all.
+ */
+export function jobsTool(settings, getJobs) {
+  const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms) })
+  return {
+    name: 'qqnt_jobs',
+    description: 'Inspect, start, cancel or retry the background tasks behind this plugin: OCR of screenshots, speech transcription, chunking plus embeddings, model downloads and component installs. The queue is shared with the web UI, so a task started here appears in the page\'s task panel and one started there appears here. start refuses a task whose component or model is missing and names the exact call that installs it instead of queueing work that cannot run. Exports have their own tools (qqnt_export_chat / qqnt_export_batch).',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['list', 'get', 'start', 'cancel', 'retry'],
+          description: 'Defaults to list.',
+        },
+        kind: {
+          type: 'string',
+          enum: JOB_KINDS,
+          description: 'list: only tasks of this kind. start: which task to run (export cannot be started here).',
+        },
+        id: {
+          type: 'string',
+          description: 'Task id for get / cancel / retry. A unique prefix is accepted.',
+        },
+        params: {
+          type: 'object',
+          description: 'start only. ocr/asr: {"limit": n} (how many items). chunks: {"limit": n, "force": true}. components: {"groups": ["ocr"|"asr"|"embed"]}. model-download: {"id": "bge-small-zh-v1.5"}.',
+        },
+        waitSeconds: {
+          type: 'integer',
+          minimum: 0,
+          maximum: 120,
+          description: 'start only: wait up to this long for the task to finish before reporting its progress. Defaults to 0.',
+        },
+      },
+    },
+    output: {
+      schema: outputSchema({
+        jobs: { type: 'integer' },
+        running: { type: 'integer' },
+      }),
+      render: renderReport,
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const base = { ok: true, exitCode: 0, jobs: 0, running: 0 }
+      const queue = typeof getJobs === 'function' ? getJobs() : null
+      if (!queue || typeof queue.list !== 'function') {
+        return {
+          ...base, ok: false, exitCode: 1,
+          output: '任务队列没有起来：它属于插件的网页服务，而网页现在没有在监听'
+            + '（设置里的端口为空，或端口起不来）。把端口设成一个可用值并重载插件，'
+            + '或用网页手动跑这些任务。',
+        }
+      }
+      const action = ['get', 'start', 'cancel', 'retry'].includes(args.action)
+        ? args.action : 'list'
+      const rows = queue.list({})
+      const running = rows.filter((row) => row.state === 'running' || row.state === 'queued').length
+      const counts = { ...base, jobs: rows.length, running }
+      if (action === 'list') {
+        const kind = JOB_KINDS.includes(args.kind) ? args.kind : ''
+        const shown = kind === '' ? rows : rows.filter((row) => row.kind === kind)
+        if (shown.length === 0) {
+          return { ...counts, output: kind === '' ? '还没有任何任务。' : `还没有「${kind}」任务。` }
+        }
+        const lines = [`任务（${shown.length}）`]
+        for (const row of shown.slice(0, 20)) {
+          // One line per task: a long error belongs in `get`, not in the list.
+          lines.push(`  - ${row.summary || row.kind}（${row.kind}）${flat(jobStatusText(row), 120)} · id ${row.id}`)
+        }
+        if (shown.length > 20) lines.push(`  …共 ${shown.length} 个，只列最近 20 个`)
+        lines.push('', '看单个任务的日志用 action=get + id；取消用 cancel，重试用 retry。')
+        return { ...counts, output: lines.join('\n') }
+      }
+      if (action === 'start') {
+        const kind = String(args.kind || '')
+        if (!STARTABLE_JOB_KINDS.includes(kind)) {
+          return {
+            ...counts, ok: false, exitCode: 1,
+            output: `这里只能起 ${STARTABLE_JOB_KINDS.join(' / ')}；导出用 qqnt_export_chat 或 qqnt_export_batch。`,
+          }
+        }
+        if (['ocr', 'asr', 'chunks'].includes(kind) && !existsSync(indexPath(settings))) {
+          // `missingIndex` must win over the counts' `ok: true`.
+          return { ...missingIndex(settings), jobs: counts.jobs, running: counts.running }
+        }
+        const params = args.params && typeof args.params === 'object' ? { ...args.params } : {}
+        let summary = JOB_SUMMARIES[kind]
+        if (kind === 'components') {
+          const groups = Array.isArray(params.groups) ? params.groups.map(String) : []
+          const unknown = groups.filter((group) => !['ocr', 'asr', 'embed'].includes(group))
+          if (groups.length === 0 || unknown.length > 0) {
+            return {
+              ...counts, ok: false, exitCode: 1,
+              output: 'components 需要 params.groups，可选 ocr / asr / embed（分别是截图识别、语音转写、语义检索）。',
+            }
+          }
+          params.groups = groups
+          summary = `安装组件：${groups.join('、')}`
+        }
+        if (kind === 'model-download' && String(params.id || '').trim() === '') {
+          return {
+            ...counts, ok: false, exitCode: 1,
+            output: 'model-download 需要 params.id：rapidocr-v4（截图识别）/ bge-small-zh-v1.5（语义检索）/ paraformer-zh-small（语音转写）。',
+          }
+        }
+        // Starting work that is certain to fail wastes a queue slot and leaves
+        // the user with a red row instead of the one command that fixes it.
+        const gaps = await dependencyGaps(settings, kind, exec)
+        if (gaps.length > 0) {
+          return {
+            ...counts, ok: false, exitCode: 1,
+            output: ['这个任务现在还跑不起来：', ...gaps.map((gap) => `  · ${gap}`), '', '装好后再调一次。'].join('\n'),
+          }
+        }
+        let job
+        try {
+          job = queue.submit(kind, { summary, params })
+        } catch (error) {
+          return {
+            ...counts, ok: false, exitCode: 1,
+            output: `没法排队：${error instanceof Error ? error.message : String(error)}`,
+          }
+        }
+        const wait = Math.min(Math.max(Number(args.waitSeconds) || 0, 0), 120)
+        const deadline = Date.now() + wait * 1000
+        let row = job
+        while (wait > 0 && Date.now() < deadline) {
+          row = queue.get(job.id) || row
+          if (['done', 'failed', 'canceled', 'interrupted'].includes(row.state)) break
+          await sleep(500)
+        }
+        const lines = [`已排队：${summary}（${kind}）· id ${row.id}`, jobStatusText(row)]
+        if (row.state === 'failed' || row.state === 'interrupted') {
+          lines.push(`原因：${row.error || '（没有写原因）'}`, '修好后可以 action=retry。')
+          return {
+            ...counts, jobs: rows.length + 1, running: running + 1,
+            ok: false, exitCode: 1, output: lines.join('\n'),
+          }
+        }
+        if (row.state === 'done') {
+          const summaryLine = resultLine(row.result)
+          lines.push(summaryLine === '' ? '任务完成。' : `任务完成：${summaryLine}`)
+        } else {
+          lines.push('任务在后台跑，网页右下角也能看到；用 action=get + id 看进度。')
+        }
+        return { ...counts, jobs: rows.length + 1, running: running + 1, output: lines.join('\n') }
+      }
+      // get / cancel / retry all need one existing row.
+      const wanted = String(args.id ?? '').trim()
+      const current = wanted === '' ? null : queue.get(wanted)
+      if (current === null) {
+        return {
+          ...counts, ok: false, exitCode: 1,
+          output: wanted === '' ? '需要 id：先 action=list 看现有任务。' : `没有这个任务：${wanted}。用 action=list 看现有任务。`,
+        }
+      }
+      if (action === 'get') {
+        const lines = [
+          `${current.summary || current.kind}（${current.kind}）`,
+          `状态：${jobStatusText(current)}`,
+          `id：${current.id}`,
+        ]
+        if (current.error) lines.push(`原因：${current.error}`)
+        const summaryLine = resultLine(current.result)
+        if (summaryLine !== '') lines.push(`结果：${summaryLine}`)
+        const log = Array.isArray(current.log) ? current.log.slice(-10) : []
+        if (log.length > 0) lines.push('', '最近日志', ...log.map((line) => `  ${line}`))
+        return { ...counts, output: lines.join('\n') }
+      }
+      let updated
+      try {
+        updated = action === 'cancel' ? queue.cancel(current.id) : queue.retry(current.id)
+      } catch (error) {
+        return {
+          ...counts, ok: false, exitCode: 1,
+          output: `${action === 'cancel' ? '取消' : '重试'}失败：`
+            + (error instanceof Error ? error.message : String(error)),
+        }
+      }
+      const verb = action === 'cancel' ? '已请求取消' : '已重新排队'
+      return {
+        ...counts,
+        output: `${verb}：${updated.summary || updated.kind} · ${jobStatusText(updated)} · id ${updated.id}`,
+      }
+    },
+  }
+}
+
+/** `2026-11-01` or Unix seconds → seconds at the start (or end) of that day. */
+function dayBoundary(value, end) {
+  const text = String(value ?? '').trim()
+  if (text === '') return null
+  if (/^\d+$/.test(text)) return Number(text)
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text)
+  if (match === null) return null
+  const when = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]),
+    end ? 23 : 0, end ? 59 : 0, end ? 59 : 0)
+  const seconds = Math.floor(when.getTime() / 1000)
+  return Number.isFinite(seconds) ? seconds : null
+}
+
+/** A file name that survives Windows and keeps the original extension. */
+function mediaFileName(item, source, index) {
+  const original = String(item?.name || path.basename(source) || 'image')
+  const extension = path.extname(original).toLowerCase()
+  const base = path.basename(original, extension)
+  return `${String(index + 1).padStart(3, '0')}-${fileStem(base, 'image')}${extension}`
+}
+
+/** `dir/name`, `dir/name-2`, … so two images with the same name both survive. */
+function unusedName(dir, name) {
+  const extension = path.extname(name)
+  const base = extension === '' ? name : name.slice(0, -extension.length)
+  let candidate = name
+  for (let suffix = 2; existsSync(path.join(dir, candidate)); suffix += 1) {
+    candidate = `${base}-${suffix}${extension}`
+  }
+  return path.join(dir, candidate)
+}
+
+/**
+ * The gallery, from the model side: list, fetch one file's path, or copy a
+ * batch out.
+ *
+ * The helper only ever resolves paths inside QQ's media folder and this tool
+ * never writes there; `get` is read-only, `export` copies into the user's
+ * downloads directory (or `outDir`) and stages nothing inside QQ's folder.
+ */
+export function mediaTool(settings) {
+  const PAGE_SIZE = 200
+  const MAX_PAGES = 8
+  const MAX_FILES = 200
+  const MAX_BYTES = 2 * 1024 ** 3
+  return {
+    name: 'qqnt_media',
+    description: 'The images of one chat, from the local index: action=list pages through the gallery (newest first), action=get returns the real file path of one item without copying it, action=export copies the matching files into a new folder under the user\'s downloads directory and returns that folder. Only media the QQ client already downloaded exists locally — nothing is fetched from the network, and a file that is not on disk is reported as missing rather than downloaded. Name the chat with chat (a name, alias, group number or QQ) or with chatKind + chatId. Requires the sidecar index.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['list', 'get', 'export'], description: 'Defaults to list.' },
+        chat: { type: 'string', minLength: 1, description: 'The chat as the user named it: a name, an alias, a group number or a QQ number.' },
+        chatKind: { type: 'string', enum: ['group', 'private'], description: 'Optional when `chat` is given: restrict the search to one kind.' },
+        chatId: { type: 'string', description: 'Group number, or the other party\'s uid.' },
+        offset: { type: 'integer', minimum: 0, description: 'list: items to skip (paging).' },
+        limit: { type: 'integer', minimum: 1, maximum: 200, description: 'list: how many items to show. Defaults to 30.' },
+        rowId: { type: 'integer', minimum: 1, description: 'get: the message row id printed by list.' },
+        seq: { type: 'integer', minimum: 1, description: 'get: which media of that message, starting at 1. Defaults to 1.' },
+        since: { type: 'string', description: 'export: only images from this date on (`YYYY-MM-DD`) or Unix seconds.' },
+        until: { type: 'string', description: 'export: only images up to this date (`YYYY-MM-DD`) or Unix seconds.' },
+        count: { type: 'integer', minimum: 1, maximum: 200, description: 'export: how many files to copy. Defaults to 50.' },
+        outDir: { type: 'string', description: 'export: absolute target directory. Defaults to QQ媒体_<stamp> in the downloads folder.' },
+      },
+    },
+    output: {
+      schema: outputSchema({
+        total: { type: 'integer' },
+        files: { type: 'integer' },
+        bytes: { type: 'integer' },
+      }),
+      render: renderReport,
+    },
+    timeoutMs: 10 * 60_000,
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const empty = { ok: false, exitCode: 1, total: 0, files: 0, bytes: 0 }
+      if (!existsSync(indexPath(settings))) return missingIndex(settings, empty)
+      const action = ['get', 'export'].includes(args.action) ? args.action : 'list'
+      if (action === 'get') {
+        const rowId = Number(args.rowId)
+        const seq = Math.max(Number(args.seq) || 1, 1)
+        if (!Number.isInteger(rowId) || rowId < 1) {
+          return { ...empty, output: 'get 需要 rowId（图片列表里每行末尾的那个数字）。' }
+        }
+        let answer
+        try {
+          answer = await runQueryJson(settings,
+            ['media', '--json', JSON.stringify({ rowId, seq, allowLarge: true })], exec)
+        } catch (error) {
+          return { ...empty, output: `读取图片失败：${error instanceof Error ? error.message : String(error)}` }
+        }
+        if (answer.code !== 0) {
+          return { ...empty, output: answer.payload.error || '这张图片取不到。' }
+        }
+        const payload = answer.payload
+        return {
+          ok: true, exitCode: 0, total: 1, files: 0, bytes: Number(payload.size) || 0,
+          output: [
+            `文件：${payload.path}`,
+            `名称：${payload.name} · ${sizeText(payload.size)} · ${payload.mime || 'application/octet-stream'}`,
+            '这一步只给出路径，没有复制；要落到磁盘用 action=export。',
+          ].join('\n'),
+        }
+      }
+      const resolved = await lookupChat(settings, exec, args)
+      if (!resolved.chat) return { ...empty, output: resolved.output }
+      const kind = resolved.chat.kind
+      const chatId = String(resolved.chat.id)
+      const name = resolved.chat.name || chatId
+      const gallery = async (offset, limit) => {
+        const answer = await runQueryJson(settings, ['media-list', '--json', JSON.stringify({
+          chatKind: kind, chatId, offset, limit,
+        })], exec)
+        if (answer.code !== 0) {
+          throw new Error(answer.payload.error || '读取图片列表失败')
+        }
+        return answer.payload
+      }
+      if (action === 'list') {
+        const limit = Math.min(Math.max(Number(args.limit) || 30, 1), 200)
+        const offset = Math.max(Math.trunc(Number(args.offset) || 0), 0)
+        let payload
+        try {
+          payload = await gallery(offset, limit)
+        } catch (error) {
+          return { ...empty, output: error.message }
+        }
+        const total = Number(payload.total) || 0
+        const items = Array.isArray(payload.items) ? payload.items : []
+        if (total === 0) {
+          return {
+            ok: true, exitCode: 0, total: 0, files: 0, bytes: 0,
+            output: `${name}：本机没有下载过的图片（图片要在 QQ 里打开过才会落到磁盘）。`,
+          }
+        }
+        const lines = [`${name}：${withCommas(total)} 张（只算已下载到本机的）`
+          + ` · 显示第 ${offset + 1}-${offset + items.length} 张`]
+        for (const item of items) {
+          lines.push(`  ${item.time} ${item.sender || '?'} · ${sizeText(item.size)} · ${item.name || '(无文件名)'}`
+            + ` · rowId=${item.rowId} seq=${item.seq}`)
+        }
+        lines.push('', '取原图用 action=get + rowId/seq（只给路径）；要拷到磁盘用 action=export。')
+        return { ok: true, exitCode: 0, total, files: 0, bytes: 0, output: lines.join('\n') }
+      }
+      // export: newest first, stop once the requested range is behind us.
+      const count = Math.min(Math.max(Number(args.count) || 50, 1), MAX_FILES)
+      const since = String(args.since ?? '').trim()
+      const until = String(args.until ?? '').trim()
+      const sinceSeconds = dayBoundary(since, false)
+      const untilSeconds = dayBoundary(until, true)
+      if (since !== '' && sinceSeconds === null) {
+        return { ...empty, output: 'since 格式不对：用 YYYY-MM-DD 或 Unix 秒。' }
+      }
+      if (until !== '' && untilSeconds === null) {
+        return { ...empty, output: 'until 格式不对：用 YYYY-MM-DD 或 Unix 秒。' }
+      }
+      const picked = []
+      let scanned = 0
+      let reachedEnd = false
+      for (let page = 0; page < MAX_PAGES && picked.length < count; page += 1) {
+        let payload
+        try {
+          payload = await gallery(page * PAGE_SIZE, PAGE_SIZE)
+        } catch (error) {
+          return { ...empty, output: error.message }
+        }
+        const items = Array.isArray(payload.items) ? payload.items : []
+        scanned += items.length
+        for (const item of items) {
+          const at = Number(item.ts) || 0
+          if (untilSeconds !== null && at > untilSeconds) continue
+          if (sinceSeconds !== null && at < sinceSeconds) {
+            reachedEnd = true
+            break
+          }
+          picked.push(item)
+          if (picked.length >= count) break
+        }
+        if (items.length < PAGE_SIZE) {
+          reachedEnd = true
+          break
+        }
+      }
+      if (picked.length === 0) {
+        return {
+          ok: true, exitCode: 0, total: 0, files: 0, bytes: 0,
+          output: `${name}：这个范围里没有已下载的图片（扫了 ${withCommas(scanned)} 张）。`
+            + '去掉 since/until 再看一次。',
+        }
+      }
+      const outDir = typeof args.outDir === 'string' && args.outDir.trim() !== ''
+        ? path.resolve(args.outDir.trim())
+        : path.join(defaultDownloadDir(), `QQ媒体_${fileStamp()}`)
+      mkdirSync(outDir, { recursive: true, mode: 0o700 })
+      let files = 0
+      let bytes = 0
+      let missing = 0
+      let tooBig = 0
+      for (const [index, item] of picked.entries()) {
+        let answer
+        try {
+          answer = await runQueryJson(settings, ['media', '--json', JSON.stringify({
+            rowId: item.rowId, seq: item.seq, allowLarge: true,
+          })], exec)
+        } catch {
+          missing += 1
+          continue
+        }
+        if (answer.code !== 0) {
+          missing += 1
+          continue
+        }
+        const payload = answer.payload
+        const size = Number(payload.size) || 0
+        if (bytes + size > MAX_BYTES) {
+          tooBig += 1
+          break
+        }
+        const target = unusedName(outDir, mediaFileName(item, payload.path, index))
+        try {
+          copyFileSync(payload.path, target)
+        } catch {
+          missing += 1
+          continue
+        }
+        files += 1
+        bytes += size
+      }
+      const lines = [`已复制 ${files} 个文件 / ${sizeText(bytes)} 到 ${outDir}`]
+      if (missing > 0) lines.push(`没取到 ${missing} 个：原图不在本机了（QQ 里可能只在别的设备上）。`)
+      if (tooBig > 0) lines.push(`达到单次体积上限（2 GB），剩下的没有再复制；缩小 count 或分开导。`)
+      if (!reachedEnd && picked.length >= count) {
+        lines.push(`只复制了最近的 ${count} 张；要更多就调大 count 或给 since/until。`)
+      }
+      lines.push('', '文件按「序号-原名」命名，序号跟列表顺序一致。')
+      return { ok: true, exitCode: 0, total: picked.length, files, bytes, output: lines.join('\n') }
+    },
+  }
+}
+
+/**
+ * Resolve the chat a tool was pointed at: a name/alias/number via `chat`, or
+ * `chatKind` + `chatId`. Returns `{ chat }` or `{ output }` (the refusal).
+ */
+async function lookupChat(settings, exec, args) {
+  const phrase = typeof args.chat === 'string' ? args.chat.trim() : ''
+  const kind = ['group', 'private'].includes(String(args.chatKind || '')) ? String(args.chatKind) : ''
+  const chatId = String(args.chatId ?? '').trim()
+  if (phrase === '' && (kind === '' || chatId === '')) {
+    return { output: '给一个 chat（名字/别名/群号/QQ），或者同时给 chatKind 与 chatId。' }
+  }
+  let sessions = []
+  try {
+    const answer = await runQueryJson(settings, ['sessions'], exec)
+    sessions = mergeChatState(settings.workDir, answer.payload.sessions, true)
+  } catch (error) {
+    return { output: `读取索引里的会话列表失败：${error instanceof Error ? error.message : String(error)}` }
+  }
+  if (phrase === '') {
+    const found = sessions.find((item) => item.kind === kind && String(item.id) === chatId)
+    return found
+      ? { chat: found }
+      : { output: `索引里没有这个会话：${kind}/${chatId}。先用 qqnt_list_chats 查一下，或直接把名字传给 chat。` }
+  }
+  const pool = kind === '' ? sessions : sessions.filter((item) => item.kind === kind)
+  const picked = pickChat(pool, phrase)
+  if (picked.tie) return { output: ambiguousChats(phrase, picked.ranked) }
+  if (picked.chat === null) return { output: unknownChat(phrase, sessions) }
+  return { chat: picked.chat }
+}
+
 /** Reports the Python/SQLCipher environment plus the exporter's data info. */
 export function statusTool(settings) {
   return {
@@ -1931,6 +2490,10 @@ export function apply(ctx, config) {
   ctx.tools.register(exportChatTool(settings))
   // Batch export: one ZIP, one manifest, instead of N tool calls.
   ctx.tools.register(exportBatchTool(settings))
+  // The queue the page owns: an OCR task started here shows up in its panel.
+  ctx.tools.register(jobsTool(settings, () => (webServer && webServer.jobs) || null))
+  // The gallery: list, fetch a path, or copy a chat's images out.
+  ctx.tools.register(mediaTool(settings))
   // Question answering in two steps: this side retrieves and cites, the host
   // model writes the sentence (ADR-008).
   ctx.tools.register(askTool(settings))

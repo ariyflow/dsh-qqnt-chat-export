@@ -2150,7 +2150,10 @@ def cmd_media(p, args):
         size = os.path.getsize(path)
     except OSError:
         raise BadInput('媒体文件无法读取')
-    if size > MAX_PREVIEW_BYTES:
+    # The cap exists to keep a preview inside one HTTP response; a caller that
+    # is copying the file (the media tool's export) asks for the path instead,
+    # so it may opt out.
+    if size > MAX_PREVIEW_BYTES and not args.get('allowLarge'):
         raise BadInput('媒体文件超过 %d MB，请用导出功能下载'
                        % (MAX_PREVIEW_BYTES // 1024 // 1024))
     mime = mimetypes.guess_type(path)[0] or 'application/octet-stream'
