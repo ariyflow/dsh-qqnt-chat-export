@@ -1235,19 +1235,24 @@ export function apply(ctx, config) {
     }
   }
 
+  // Long jobs run through the task panel; each kind is one runner. Built once
+  // and handed to *every* listener: the startup path used to forget it, so
+  // exports (and OCR/ASR) were rejected with "未知的任务类型" on a normal start
+  // while a bind-tested listener worked.
+  const jobRunners = {
+    ocr: makeOcrRunner({ settings, queryCli: QUERY_CLI }),
+    asr: makeAsrRunner({ settings, queryCli: QUERY_CLI }),
+    chunks: makeChunksRunner({ settings, queryCli: QUERY_CLI }),
+    components: makeComponentsRunner({ settings, queryCli: QUERY_CLI }),
+    export: makeExportRunner({ settings, queryCli: QUERY_CLI }),
+  }
+
   /** Start a listener on an explicit port (used for bind-testing a new one). */
   const launch = async (port, host) => {
     if (!port) return null
     const server = startWebServer(settings, port, host, {
       handlers,
-      // Long jobs run through the task panel; each kind is one runner.
-      runners: {
-        ocr: makeOcrRunner({ settings, queryCli: QUERY_CLI }),
-        asr: makeAsrRunner({ settings, queryCli: QUERY_CLI }),
-        chunks: makeChunksRunner({ settings, queryCli: QUERY_CLI }),
-        components: makeComponentsRunner({ settings, queryCli: QUERY_CLI }),
-        export: makeExportRunner({ settings, queryCli: QUERY_CLI }),
-      },
+      runners: jobRunners,
     })
     await server.ready
     return server
@@ -1908,6 +1913,7 @@ function isInsideDir(parent, child) {
         if (webServer === server) webUrl = ''
       },
       handlers,
+      runners: jobRunners,
     })
     webServer = server
     server.ready.then(() => {

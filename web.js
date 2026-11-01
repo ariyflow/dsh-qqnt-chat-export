@@ -1611,7 +1611,10 @@ function exportRequest(body) {
     options.onError?.(error)
   })
   server.listen(port, host, () => {
-    console.log(`[qqnt-chat-export] web UI listening on ${state.url}`)
+    // Listing the kinds makes a wiring mistake (a listener without its
+    // runners) visible in the log instead of only as a 500 on click.
+    console.log(`[qqnt-chat-export] web UI listening on ${state.url}`
+      + ` (jobs: ${Object.keys(runners).sort().join(', ')})`)
     sweepExports(path.join(settings.workDir, 'exports'))
     resolveReady(state.url)
   })
