@@ -72,10 +72,10 @@ dsh plugin --profile web remove dsh-qqnt-chat-export
 | `qqnt_extract_key` | 从**已登录**的 QQ 进程内存里取出数据库密钥并缓存 |
 | `qqnt_list_groups` | 群列表：消息数、时间范围、群名 |
 | `qqnt_export_group` | 导出单个群为 txt / sqlite / csv |
-| `qqnt_list_chats` | 索引里的**全部会话**（群聊 + 私聊）：类型、id、名称、消息数、最后时间 |
+| `qqnt_list_chats` | 索引里的**全部会话**（群聊 + 私聊）：类型、id、名称、消息数、最后时间；`query` 可按名字/别名/群号/QQ 过滤 |
 | `qqnt_search` | 跨会话关键词搜索（可限定会话、发送者、日期；`senderRegex` 把发送者当正则） |
-| `qqnt_export_chat` | 导出任意会话为 txt / csv / json / md / html / sqlite；可选脱敏、含媒体、按天、内嵌图片、导出预设 |
-| `qqnt_export_batch` | 一次导出最多 200 个会话到一个 ZIP（每会话一份文件 + `manifest.json`） |
+| `qqnt_export_chat` | 导出任意会话为 txt / csv / json / md / html / sqlite；`chat` 可直接给名字（歧义时拒绝并返回候选），`dryRun` 先预演，`keyword`/`sender`/`since`/`until` 只导一部分 |
+| `qqnt_export_batch` | 一次导出最多 200 个会话到一个 ZIP（每会话一份文件 + `manifest.json`）；`chatNames` 可直接给名字列表 |
 
 后三个工具读的是网页建立的旁路索引，因此能覆盖私聊和跨会话搜索；没有索引时会提示先去网页点「从 QQ 同步」。
 

@@ -515,6 +515,9 @@ function mergeChatState(workDir, sessions, includeHidden) {
     if (patch.hidden && !includeHidden) continue
     out.push({
       ...session,
+      // The name QQ gave the chat, kept even when the user renamed it: people
+      // (and an Agent with older context) still refer to the real name.
+      originalName: session.name,
       name: typeof patch.alias === 'string' && patch.alias.trim()
         ? patch.alias.trim() : session.name,
       alias: typeof patch.alias === 'string' ? patch.alias : '',
@@ -1648,4 +1651,6 @@ function exportRequest(body) {
   }
 }
 
-export { DEFAULT_PORT, DEFAULT_HOST }
+// Shared with the tools: exporting by name has to see the same aliases and
+// hidden flags the page shows, or a chat the user renamed cannot be found.
+export { DEFAULT_PORT, DEFAULT_HOST, mergeChatState }

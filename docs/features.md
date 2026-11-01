@@ -10,10 +10,10 @@
 | `qqnt_extract_key` | 从**已登录**的 QQ 进程内存里取出数据库密钥并缓存 |
 | `qqnt_list_groups` | 群列表：消息数、时间范围、群名 |
 | `qqnt_export_group` | 导出单个群为 txt / sqlite / csv |
-| `qqnt_list_chats` | 索引里的**全部会话**（群聊 + 私聊）：类型、id、名称、消息数、最后时间 |
+| `qqnt_list_chats` | 索引里的**全部会话**（群聊 + 私聊）：类型、id、名称、消息数、最后时间；`query` 按名字/别名/群号/QQ 过滤，完全一致排在包含之前 |
 | `qqnt_search` | 跨会话关键词搜索（可限定会话、发送者、日期；`senderRegex` 可把发送者当正则），返回会话/发送者/时间 |
-| `qqnt_export_chat` | 按 `chatKind` + `chatId` 导出任意会话为 txt / csv / json / md / html / sqlite；可选 `redact`（脱敏）、`media`（含媒体，ZIP）、`split=day`（按天分文件，ZIP）、`embed`（图片内嵌的单文件 HTML）、`preset`（套用网页里保存的导出预设） |
-| `qqnt_export_batch` | 一次导出最多 200 个会话到一个 ZIP（每个会话一份文件 + `manifest.json`），支持格式、脱敏、媒体、按天、密码与预设 |
+| `qqnt_export_chat` | 导出任意会话为 txt / csv / json / md / html / sqlite。会话用 `chat`（名字/别名/群号/QQ，「和某某的私聊」）或 `chatKind` + `chatId` 指定；名字解析出多个候选时**不写文件**并返回候选。`dryRun` 预演条数与目标目录，`keyword`/`sender`/`since`/`until` 只导一部分；可选 `redact`（脱敏）、`media`（含媒体，ZIP）、`split=day`（按天分文件，ZIP）、`embed`（图片内嵌的单文件 HTML）、`preset`（套用网页里保存的导出预设） |
+| `qqnt_export_batch` | 一次导出最多 200 个会话到一个 ZIP（每个会话一份文件 + `manifest.json`），会话可给 `chatNames`（名字列表），支持格式、脱敏、媒体、按天、密码与预设 |
 | `qqnt_ask` | 问答检索：给一个问题，返回最可能回答它的对话片段（会话、时间范围、逐条消息与引用编号）；插件不生成句子，答案由宿主模型来写 |
 | `qqnt_recall` | 同一套检索的时间线视图：按天分组，用来看一个话题、价格或决定是怎么变的 |
 

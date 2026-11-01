@@ -70,6 +70,16 @@
 
 ## 3. 新增工具（按优先级）
 
+### 已完成（0.17.8）：先把“按名字找会话”补上
+
+`qqnt_export_chat` 现在接受 `chat`（名字 / 别名 / 群号 / QQ / 「和某某的私聊」），配 `dryRun`
+预演和 `keyword` / `sender` / `since` / `until` 过滤；`qqnt_export_batch` 有 `chatNames`，
+`qqnt_list_chats` 有 `query` / `kind`。解析逻辑在 `chatlookup.js`：完全一致 > 开头 > 包含，
+两个同样合适的候选时**不写文件**、返回候选。
+
+这是下面五个工具的前置能力——`qqnt_index`、`qqnt_media`、`qqnt_jobs` 同样会遇到“用户说的是
+名字而不是 id”。
+
 ### P0-1 `qqnt_index` — 建立/刷新侧车索引
 
 **解决**：索引不存在或过期时，`qqnt_list_chats` / `qqnt_search` / `qqnt_ask` / 导出全部

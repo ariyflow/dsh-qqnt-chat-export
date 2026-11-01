@@ -1,12 +1,13 @@
 # 开发
 
 ```
-index.js              插件入口：八个工具 + 启动网页服务 + 侧边栏面板路由
+index.js              插件入口：十个工具 + 启动网页服务 + 侧边栏面板路由
 client.js             浏览器半边：侧边栏图标 / 主面板 / better-sidebar tab（原生 iframe）
 web.js                本地 HTTP 服务与 JSON API
 jobs.js               通用后台任务队列（排队、并发、取消、重试、落盘恢复）
 runners.js            任务执行器：OCR / 语音 / 分块 / 模型下载 / 组件安装 / 导出
 presets.js            导出预设的读写与合并（workDir/presets.json）
+chatlookup.js         把「名字/别名/群号/和某某的私聊」解析成会话（导出工具用）
 settings.js           设置持久化、校验与默认值
 storage.js            生成文件统计与白名单清理
 web/                  前端（原生 ESM，无构建）：index.html、css/base.css、

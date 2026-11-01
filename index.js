@@ -33,7 +33,8 @@ import {
 import { buildRunning, cleanupStorage, migrateWorkDir, removeWorkDirEntries, storageSnapshot } from './storage.js'
 import { applyPreset, readPresets } from './presets.js'
 import { makeAsrRunner, makeChunksRunner, makeComponentsRunner, makeExportRunner, makeOcrRunner } from './runners.js'
-import { BUNDLE_VERSION, panelInfo, pruneAccountIndexes, spawnAutosync, startWebServer } from './web.js'
+import { BUNDLE_VERSION, mergeChatState, panelInfo, pruneAccountIndexes, spawnAutosync, startWebServer } from './web.js'
+import { describeChat, pickChat, rankChats } from './chatlookup.js'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'qqnt-chat-export'
@@ -295,6 +296,36 @@ function missingIndex(settings, extra = {}) {
   }
 }
 
+/**
+ * "Which of these did you mean?" — never a guess.
+ *
+ * Exporting is a write with the user's data in it; picking one of two equally
+ * good matches is a decision the tool is not allowed to make.
+ */
+function ambiguousChats(phrase, ranked, limit = 5) {
+  const shown = ranked.slice(0, limit)
+  const lines = [`「${phrase}」匹配到 ${ranked.length} 个会话，没有导出：`]
+  shown.forEach((item, index) => {
+    const via = item.matched && item.matched !== phrase ? `（按「${item.matched}」匹配）` : ''
+    lines.push(`  ${index + 1}. ${describeChat(item.chat)} ${via}`.trimEnd())
+  })
+  lines.push('')
+  lines.push('换一个更完整的名字，或直接传 chatKind + chatId；也可以先用 qqnt_list_chats 的 query 看一下候选。')
+  return lines.join('\n')
+}
+
+/** No match: show what is there instead of an empty error. */
+function unknownChat(phrase, chats, limit = 5) {
+  const recent = chats.slice(0, limit)
+  const lines = [`没有找到匹配「${phrase}」的会话，没有导出。`]
+  if (recent.length > 0) {
+    lines.push('', '最近活跃的会话：')
+    recent.forEach((chat, index) => lines.push(`  ${index + 1}. ${describeChat(chat)}`))
+  }
+  lines.push('', '用 qqnt_list_chats 的 query 参数可以按名字/群号/QQ 找。')
+  return lines.join('\n')
+}
+
 /** A chat name is also a file name; strip what Windows/Linux cannot store. */
 function fileStem(text, fallback) {
   const stem = String(text).replace(/[\\/:*?"<>|\r\n\t]+/g, '_').replace(/^\.+/, '').trim().slice(0, 60)
@@ -440,6 +471,11 @@ export function listChatsTool(settings) {
       type: 'object',
       additionalProperties: false,
       properties: {
+        query: {
+          type: 'string',
+          description: 'What the user called the chat: part of a name, an alias set in the web UI, a group number, or a QQ number. Matching is case-insensitive and ignores spaces; the most literal match comes first.',
+        },
+        kind: { type: 'string', enum: ['group', 'private'], description: 'Only list chats of this kind.' },
         limit: {
           type: 'integer',
           minimum: 1,
@@ -455,14 +491,29 @@ export function listChatsTool(settings) {
       if (code !== 0 || !Array.isArray(payload.sessions)) {
         return { ok: false, exitCode: code, output: payload.error || '无法读取会话列表' }
       }
+      // Aliases and hidden flags live in the page's chats-state.json; a chat
+      // the user renamed must be findable under the new name.
+      const sessions = mergeChatState(settings.workDir, payload.sessions, true)
+      const kind = ['group', 'private'].includes(args.kind) ? args.kind : ''
+      const pool = kind === '' ? sessions : sessions.filter((chat) => chat.kind === kind)
+      const query = typeof args.query === 'string' ? args.query.trim() : ''
+      const ranked = query === '' ? null : rankChats(pool, query)
+      const ordered = ranked === null ? pool : ranked.map((item) => item.chat)
       const limit = Math.min(Math.max(Number(args.limit) || 200, 1), 1000)
-      const chats = payload.sessions.slice(0, limit)
-      const lines = chats.map((chat) =>
-        `${chat.kind} ${chat.id} ${chat.name || '(未命名)'} — ${chat.messages} 条，最后 ${chat.lastTime || '-'}`)
-      if (payload.sessions.length > chats.length) {
-        lines.push(`…共 ${payload.sessions.length} 个会话，只显示前 ${chats.length} 个`)
+      const chats = ordered.slice(0, limit)
+      const lines = []
+      if (ranked !== null) {
+        const what = kind === '' ? '会话' : (kind === 'group' ? '群聊' : '私聊')
+        lines.push(ranked.length === 0
+          ? `没有匹配「${query}」的${what}（索引里有 ${pool.length} 个）。`
+          : `匹配「${query}」：${ranked.length} 个${what}${ranked.length > chats.length ? `，显示前 ${chats.length} 个` : ''}`)
+      }
+      for (const chat of chats) lines.push(describeChat(chat))
+      if (ordered.length > chats.length) {
+        lines.push(`…共 ${ordered.length} 个会话，只显示前 ${chats.length} 个`)
       }
       lines.push('', '传 chatKind + chatId 给 qqnt_search / qqnt_export_chat；私聊的 chatId 是对方 uid。')
+      lines.push('导出时也可以直接把名字/群号传给 qqnt_export_chat 的 chat 参数，不用先查 id。')
       return { ok: true, exitCode: 0, output: lines.join('\n') }
     },
   }
@@ -648,14 +699,26 @@ export function recallTool(settings) {
 export function exportChatTool(settings) {
   return {
     name: 'qqnt_export_chat',
-    description: 'Export one chat — group or private — from the local QQ index to txt, csv, json, md, html, or sqlite, and return the written file path. Set media=true to also copy downloaded pictures/files/voice/video (returns a ZIP), split=day for one file per day (ZIP), embed=true for a single self-contained HTML, and redact to pseudonymise senders. Requires the sidecar index.',
+    description: 'Export one chat — group or private — from the local QQ index to txt, csv, json, md, html, or sqlite, and return the written file path. Name the chat either by `chat` (a name, an alias, a group number or a QQ, as the user said it) or by chatKind + chatId; a phrase that matches several chats exports nothing and returns the candidates, so ask instead of guessing. Narrow the content with keyword/sender/since/until, and set dryRun=true to preview the count and target directory before writing. media=true copies downloaded pictures/files/voice/video into a ZIP, split=day writes one file per day (ZIP), embed=true makes a single self-contained HTML, redact pseudonymises senders. Requires the sidecar index.',
     parameters: {
       type: 'object',
       additionalProperties: false,
-      required: ['chatKind', 'chatId'],
       properties: {
-        chatKind: { type: 'string', enum: ['group', 'private'] },
+        chat: {
+          type: 'string',
+          minLength: 1,
+          description: 'The chat as the user named it: a name, an alias, a group number or a QQ number ("示例课程群", "群号 123", "和妈妈的私聊"). Resolved against the index; when two chats match equally well nothing is exported and the candidates come back.',
+        },
+        chatKind: { type: 'string', enum: ['group', 'private'], description: 'Optional when `chat` is given: restrict the search to one kind.' },
         chatId: { type: 'string', description: 'Group number, or the other party\'s uid for a private chat.' },
+        keyword: { type: 'string', description: 'Only messages containing this text (substring, Chinese included).' },
+        sender: { type: 'string', description: 'Only messages from this sender: a name fragment or an exact QQ number.' },
+        since: { type: 'string', description: 'Exports messages from this date on (`YYYY-MM-DD`) or Unix seconds.' },
+        until: { type: 'string', description: 'Exports messages up to this date (`YYYY-MM-DD`) or Unix seconds.' },
+        dryRun: {
+          type: 'boolean',
+          description: 'Preview only: report the resolved chat, how many messages match, the format and the target directory without writing a file. Use it before a large or ambiguous export.',
+        },
         format: { type: 'string', enum: ['txt', 'csv', 'json', 'md', 'html', 'sqlite'], description: 'Defaults to txt.' },
         outDir: { type: 'string', description: 'Absolute output directory. Defaults to QQ导出_<chat> inside the user\'s downloads folder.' },
         label: { type: 'string', description: 'Chat name used in the file name and heading. Defaults to the name in the index.' },
@@ -700,10 +763,14 @@ export function exportChatTool(settings) {
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       if (!existsSync(indexPath(settings))) return missingIndex(settings, { outPath: '' })
-      const kind = String(args.chatKind ?? '')
-      const chatId = String(args.chatId ?? '').trim()
-      if (!['group', 'private'].includes(kind) || chatId === '') {
-        return { ok: false, exitCode: 1, outPath: '', output: 'chatKind 必须是 group 或 private，且 chatId 不能为空' }
+      let kind = String(args.chatKind ?? '')
+      let chatId = String(args.chatId ?? '').trim()
+      const phrase = typeof args.chat === 'string' ? args.chat.trim() : ''
+      if (phrase === '' && (!['group', 'private'].includes(kind) || chatId === '')) {
+        return {
+          ok: false, exitCode: 1, outPath: '',
+          output: '给一个 chat（名字/别名/群号/QQ），或者同时给 chatKind 与 chatId；拿不准时先用 qqnt_list_chats 的 query 找一下',
+        }
       }
       if (typeof args.preset === 'string' && args.preset.trim() !== '') {
         const wanted = args.preset.trim()
@@ -743,32 +810,85 @@ export function exportChatTool(settings) {
       // successful export.
       let label = typeof args.label === 'string' ? args.label.trim() : ''
       let known = null
+      let chats = []
       try {
         const sessions = await runQueryJson(settings, ['sessions'], exec)
-        known = (sessions.payload.sessions || [])
-          .find((item) => item.kind === kind && String(item.id) === chatId) || null
+        chats = mergeChatState(settings.workDir, sessions.payload.sessions, true)
       } catch (error) {
         return {
           ok: false, exitCode: 1, outPath: '',
           output: `读取索引里的会话列表失败：${error.message}`,
         }
       }
-      if (known === null) {
-        return {
-          ok: false, exitCode: 1, outPath: '',
-          output: `索引里没有这个会话：${kind}/${chatId}。先用 qqnt_list_chats 查一下会话 id 与类型。`,
+      if (phrase !== '') {
+        // A kind given alongside the name narrows the pool ("private 妈妈").
+        const pool = ['group', 'private'].includes(kind)
+          ? chats.filter((chat) => chat.kind === kind) : chats
+        const picked = pickChat(pool, phrase)
+        if (picked.tie) {
+          return { ok: false, exitCode: 1, outPath: '', output: ambiguousChats(phrase, picked.ranked) }
+        }
+        if (picked.chat === null) {
+          return { ok: false, exitCode: 1, outPath: '', output: unknownChat(phrase, chats) }
+        }
+        known = picked.chat
+        kind = known.kind
+        chatId = String(known.id)
+      } else {
+        known = chats.find((item) => item.kind === kind && String(item.id) === chatId) || null
+        if (known === null) {
+          return {
+            ok: false, exitCode: 1, outPath: '',
+            output: `索引里没有这个会话：${kind}/${chatId}。先用 qqnt_list_chats 查一下会话 id 与类型，或者把名字直接传给 chat。`,
+          }
         }
       }
       if (label === '') label = known.name || chatId
+      // Content filters: "只导出九月的" / "只看小王发的" / "只导开会相关".
+      const filters = {}
+      for (const key of ['keyword', 'sender', 'since', 'until']) {
+        const value = typeof args[key] === 'string' ? args[key].trim() : ''
+        if (value !== '') filters[key] = value
+      }
       const outDir = typeof args.outDir === 'string' && args.outDir.trim() !== ''
         ? path.resolve(args.outDir.trim())
         : path.join(defaultDownloadDir(), `QQ导出_${fileStem(label, chatId)}`)
+      if (args.dryRun === true) {
+        // Preview through `stats`: same WHERE clause, counts only, no file.
+        let total = 0
+        let range = ''
+        try {
+          const stats = await runQueryJson(settings, ['stats', '--json', JSON.stringify({
+            chatKind: kind, chatId, ...filters,
+          })], exec)
+          if (stats.code === 0) {
+            total = Number(stats.payload.total) || 0
+            if (stats.payload.firstTime && stats.payload.lastTime) {
+              range = `${stats.payload.firstTime} → ${stats.payload.lastTime}`
+            }
+          }
+        } catch {
+          // A preview that cannot count is still useful; the export itself
+          // reports the real error.
+        }
+        const scoped = Object.entries(filters)
+          .map(([key, value]) => ({ keyword: '关键词', sender: '发送者', since: '起', until: '止' }[key] + `「${value}」`))
+        const lines = [
+          `将导出：${known.name || chatId}（${kind}/${chatId}）`,
+          `条数：${total}${range ? ` · ${range}` : ''}`,
+          `范围：${scoped.length > 0 ? scoped.join(' · ') : '整个会话'}`,
+          `格式：${container.toUpperCase()}${container === 'zip' ? '（打包）' : ''}`,
+          `目标：${outDir}`,
+          '这一步没有写文件；确认后去掉 dryRun 再调一次。',
+        ]
+        return { ok: true, exitCode: 0, outPath: '', output: lines.join('\n') }
+      }
       mkdirSync(outDir, { recursive: true, mode: 0o700 })
       // The query layer may only write inside workDir/exports; stage there and
       // move the finished file to the directory the user asked for.
       const staging = path.join(settings.workDir, 'exports',
         `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${container}`)
-      const payloadArgs = { chatKind: kind, chatId, format, label, out: staging }
+      const payloadArgs = { chatKind: kind, chatId, format, label, out: staging, ...filters }
       if (redact) payloadArgs.redact = redact
       if (media) payloadArgs.media = true
       if (split) payloadArgs.split = 'day'
@@ -809,12 +929,18 @@ export function exportBatchTool(settings) {
   const CHAT_LIMIT = 200
   return {
     name: 'qqnt_export_batch',
-    description: 'Export up to 200 chats from the local QQ index into one ZIP that also contains a manifest.json (one file per chat). Supports formats, redaction, media, day-splitting, password ZIPs and a saved export preset. Requires the sidecar index.',
+    description: 'Export up to 200 chats from the local QQ index into one ZIP that also contains a manifest.json (one file per chat). List the chats as `chatNames` (names, aliases, group numbers or QQs, as the user said them) or as `chats` with kind + id; a name matching several chats refuses the whole call instead of dropping one. Supports formats, redaction, media, day-splitting, password ZIPs and a saved export preset. Requires the sidecar index.',
     parameters: {
       type: 'object',
       additionalProperties: false,
-      required: ['chats'],
       properties: {
+        chatNames: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 200,
+          items: { type: 'string', minLength: 1 },
+          description: 'Chat names/aliases/group numbers as the user said them; resolved against the index before anything is written.',
+        },
         chats: {
           type: 'array',
           minItems: 1,
@@ -870,9 +996,34 @@ export function exportBatchTool(settings) {
         args = applyPreset(args, preset)
       }
       const raw = Array.isArray(args.chats) ? args.chats : []
-      if (raw.length === 0) return { ...empty, output: 'chats 不能为空：至少给一个会话' }
-      if (raw.length > CHAT_LIMIT) return { ...empty, output: `一次最多导出 ${CHAT_LIMIT} 个会话（收到 ${raw.length} 个）` }
+      const names = (Array.isArray(args.chatNames) ? args.chatNames : [])
+        .map((value) => String(value ?? '').trim()).filter((value) => value !== '')
+      if (raw.length === 0 && names.length === 0) {
+        return { ...empty, output: 'chats 或 chatNames 不能为空：至少给一个会话' }
+      }
+      if (raw.length + names.length > CHAT_LIMIT) {
+        return { ...empty, output: `一次最多导出 ${CHAT_LIMIT} 个会话（收到 ${raw.length + names.length} 个）` }
+      }
       const chats = []
+      if (names.length > 0) {
+        let sessions = []
+        try {
+          const answer = await runQueryJson(settings, ['sessions'], exec)
+          sessions = mergeChatState(settings.workDir, answer.payload.sessions, true)
+        } catch (error) {
+          return { ...empty, output: `读取索引里的会话列表失败：${error.message}` }
+        }
+        for (const name of names) {
+          const picked = pickChat(sessions, name)
+          if (picked.tie) return { ...empty, output: ambiguousChats(name, picked.ranked) }
+          if (picked.chat === null) return { ...empty, output: unknownChat(name, sessions) }
+          chats.push({
+            kind: picked.chat.kind,
+            id: String(picked.chat.id),
+            label: picked.chat.name || String(picked.chat.id),
+          })
+        }
+      }
       for (const item of raw) {
         const kind = String(item?.kind ?? '')
         const id = String(item?.id ?? '').trim()
@@ -1076,7 +1227,7 @@ function groupsTool(settings) {
 /** Workflow and guardrails the tool definitions do not carry. */
 const GUIDANCE = `## QQ chat export
 
-The qqnt_* tools read the message database of the NTQQ client installed on this machine. Use them in order: qqnt_status, then qqnt_extract_key, then qqnt_list_groups, then qqnt_export_group. Finding the key is slow: before calling qqnt_extract_key, tell the user that searching for the key takes one to three minutes and to please wait patiently (查找密钥耗时较长，请耐心等待); the call returns only when the scan finishes, so do not retry or cancel it while it runs. Key extraction only works while QQ is logged in; when it finds no key, ask the user to confirm QQ is signed in rather than retrying. Confirm the exact group number with the user before exporting, because the common off-by-one-digit guess exports nothing. Never move, edit, or delete files under the QQ data directory, and do not end the QQ process. Never install Python packages into the global/system interpreter; use a virtualenv, and the local web UI offers a one-click venv setup. On Linux the key is read from the qq main process memory: if the kernel's ptrace scope denies it, the tool prints the exact sysctl command to run; report that fix instead of retrying blindly.`
+The qqnt_* tools read the message database of the NTQQ client installed on this machine. Use them in order: qqnt_status, then qqnt_extract_key, then qqnt_list_groups, then qqnt_export_group. Finding the key is slow: before calling qqnt_extract_key, tell the user that searching for the key takes one to three minutes and to please wait patiently (查找密钥耗时较长，请耐心等待); the call returns only when the scan finishes, so do not retry or cancel it while it runs. Key extraction only works while QQ is logged in; when it finds no key, ask the user to confirm QQ is signed in rather than retrying. Confirm the exact group number with the user before exporting, because the common off-by-one-digit guess exports nothing. Never move, edit, or delete files under the QQ data directory, and do not end the QQ process. Never install Python packages into the global/system interpreter; use a virtualenv, and the local web UI offers a one-click venv setup. On Linux the key is read from the qq main process memory: if the kernel's ptrace scope denies it, the tool prints the exact sysctl command to run; report that fix instead of retrying blindly. When the user names a chat instead of giving an id — a group name, a nickname, a group number, or 「和某某的私聊」 — pass that phrase as chat to qqnt_export_chat (or as chatNames to qqnt_export_batch) instead of listing every chat and guessing: the tool resolves names and aliases, and refuses to export when two chats match equally well. Use dryRun: true to preview the resolved chat, the message count and the target directory before a large export, and narrow the content with keyword / sender / since / until instead of filtering the file afterwards.`
 
 /** Appended only while the browsing UI is actually listening. */
 function webGuidance(url) {

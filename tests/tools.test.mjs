@@ -69,6 +69,22 @@ async function fixture() {
   return { work, settings }
 }
 
+/** Add one more chat to the fixture index: used where two names collide. */
+async function addChat(work, { kind, id, name, msgId, ts, text }) {
+  const script = path.join(work, `add-${id}.py`)
+  await writeFile(script, [
+    'import sqlite3, sys',
+    'conn = sqlite3.connect(sys.argv[1])',
+    'conn.execute("INSERT INTO chats VALUES (?,?,?,?)", (sys.argv[2], sys.argv[3], sys.argv[4], ""))',
+    'conn.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",',
+    '  (int(sys.argv[5]), int(sys.argv[5]), sys.argv[2], sys.argv[3], int(sys.argv[6]), "u", "9", "丁", 0, 1, 1, "", sys.argv[7]))',
+    'conn.commit()',
+    'conn.close()',
+  ].join('\n'))
+  execFileSync(PYTHON, [script, path.join(work, 'index.sqlite'), kind, id, name,
+    String(msgId), String(ts), text], { stdio: 'pipe' })
+}
+
 test('index tools list both group and private chats', { skip: !hasPython() && 'python is not installed' }, async () => {
   const { work, settings } = await fixture()
   try {
@@ -361,7 +377,7 @@ test('the batch tool refuses a bad chat entry with a sentence', { skip: !hasPyth
 
     const empty = await exportBatchTool(settings).execute({ chats: [] }, { signal: signal() })
     assert.equal(empty.ok, false)
-    assert.match(empty.output, /chats 不能为空/)
+    assert.match(empty.output, /chats 或 chatNames 不能为空/)
 
     const tooMany = await exportBatchTool(settings).execute({
       chats: Array.from({ length: 201 }, (_, index) => ({ kind: 'group', id: String(index) })),
@@ -407,6 +423,99 @@ test('recall renders the spans as a dated timeline', { skip: !hasPython() && 'py
     assert.match(result.output, /主题：群里第一条消息/)
     assert.match(result.output, /\d{4}-\d{2}-\d{2}/)
     assert.match(result.output, /测试群/)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+
+test('list_chats filters by the name the user used', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const hit = await listChatsTool(settings).execute({ query: '测试' }, { signal: signal() })
+    assert.equal(hit.ok, true, hit.output)
+    assert.match(hit.output, /匹配「测试」：1 个会话/)
+    assert.match(hit.output, /group g1 测试群/)
+    assert.doesNotMatch(hit.output, /private p1/)
+
+    const miss = await listChatsTool(settings).execute({ query: '查无此群' }, { signal: signal() })
+    assert.equal(miss.ok, true, miss.output)
+    assert.match(miss.output, /没有匹配「查无此群」/)
+
+    const kind = await listChatsTool(settings).execute({ kind: 'private' }, { signal: signal() })
+    assert.match(kind.output, /private p1 丙/)
+    assert.doesNotMatch(kind.output, /group g1/)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('export accepts the chat name instead of its id', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const outDir = path.join(work, 'by-name')
+    const result = await exportChatTool(settings).execute(
+      { chat: '测试群', format: 'txt', outDir }, { signal: signal() })
+    assert.equal(result.ok, true, result.output)
+    assert.ok(existsSync(result.outPath), result.outPath)
+    const body = readFileSync(result.outPath, 'utf8')
+    assert.match(body, /群里第一条消息/)
+    assert.doesNotMatch(body, /私聊内容/)
+
+    // "和X的私聊" is how people describe a private conversation.
+    const priv = await exportChatTool(settings).execute(
+      { chat: '和丙的私聊', format: 'txt', outDir }, { signal: signal() })
+    assert.equal(priv.ok, true, priv.output)
+    assert.match(readFileSync(priv.outPath, 'utf8'), /私聊内容/)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('dryRun counts the matching messages and writes nothing', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const outDir = path.join(work, 'preview')
+    const result = await exportChatTool(settings).execute(
+      { chat: '测试群', keyword: '第一条', dryRun: true, outDir }, { signal: signal() })
+    assert.equal(result.ok, true, result.output)
+    assert.match(result.output, /将导出：测试群（group\/g1）/)
+    assert.match(result.output, /条数：1/)
+    assert.match(result.output, /关键词「第一条」/)
+    assert.equal(result.outPath, '')
+    assert.equal(existsSync(outDir), false, 'a preview must not create the output directory')
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('an unknown name exports nothing and shows the nearest chats', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const outDir = path.join(work, 'unknown')
+    const result = await exportChatTool(settings).execute(
+      { chat: '查无此群', outDir }, { signal: signal() })
+    assert.equal(result.ok, false)
+    assert.match(result.output, /没有找到匹配「查无此群」/)
+    assert.match(result.output, /测试群/)
+    assert.equal(existsSync(outDir), false)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('two chats with the same name refuse the export', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    await addChat(work, { kind: 'group', id: 'g9', name: '测试群', msgId: 99, ts: 1700000300, text: '同名群' })
+    const outDir = path.join(work, 'tied')
+    const result = await exportChatTool(settings).execute(
+      { chat: '测试群', outDir }, { signal: signal() })
+    assert.equal(result.ok, false)
+    assert.match(result.output, /匹配到 2 个会话，没有导出/)
+    assert.match(result.output, /group g1 测试群/)
+    assert.match(result.output, /group g9 测试群/)
+    assert.equal(existsSync(outDir), false, 'an ambiguous name must not create anything')
   } finally {
     await rm(work, { recursive: true, force: true })
   }
