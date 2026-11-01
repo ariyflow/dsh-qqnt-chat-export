@@ -100,13 +100,16 @@ export function mountModels(root, { api }) {
   root.append(section)
 
   let closed = false
+  /** False until the first list is on screen; only that paint staggers. */
+  let painted = false
   /** id → timestamp of the first click on 删除. */
   const pending = new Map()
   let timer = null
 
-  function componentRow(item) {
+  function componentRow(item, isEnter = false) {
     const row = document.createElement('li')
     row.className = 'component-row'
+    if (isEnter) row.classList.add('is-enter')
 
     const name = document.createElement('span')
     name.className = 'component-name'
@@ -141,9 +144,10 @@ export function mountModels(root, { api }) {
     return row
   }
 
-  function rowFor(item) {
+  function rowFor(item, isEnter = false) {
     const row = document.createElement('li')
     row.className = 'model-row'
+    if (isEnter) row.classList.add('is-enter')
 
     const name = document.createElement('span')
     name.className = 'model-name'
@@ -231,10 +235,14 @@ export function mountModels(root, { api }) {
         api.get('/api/components').catch(() => null),
       ])
       if (closed) return
+      // Only the first paint staggers: the 4 s armed-delete re-render must not
+      // replay it under the pointer.
+      const animate = !painted
+      painted = true
       components.replaceChildren()
-      for (const item of componentList(componentPayload)) components.append(componentRow(item))
+      for (const item of componentList(componentPayload)) components.append(componentRow(item, animate))
       list.replaceChildren()
-      for (const item of modelList(modelPayload)) list.append(rowFor(item))
+      for (const item of modelList(modelPayload)) list.append(rowFor(item, animate))
       if (componentList(componentPayload).length === 0) {
         componentsTitle.hidden = true
         componentsHint.hidden = true

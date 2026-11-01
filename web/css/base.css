@@ -28,6 +28,13 @@
   --content: 1120px;
   --shadow-sm: 0 1px 2px rgb(16 24 40 / 6%);
   --shadow-md: 0 10px 30px rgb(16 24 40 / 10%);
+  /* Motion: one ease and three durations. Anything animated in this file uses
+   * these so a page switch, a row landing and a panel opening feel like the
+   * same interface. `--ease-out` decelerates hard at the end, which is what
+   * makes short UI moves read as "settled" rather than "slid". */
+  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --dur-1: 120ms;
+  --dur-2: 200ms;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
@@ -89,8 +96,60 @@ a:hover { text-decoration: underline; }
 
 h1, h2, h3 { line-height: 1.35; }
 
+/* Reduced motion wins over everything below. Closes that wait for an exit
+ * animation (the lightbox) use a timer, not `animationend`, so they still
+ * complete here. */
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
+}
+
+/* ------------------------------------------------------- motion primitives */
+
+/* Shared keyframes. All of them end at the natural state, so an element that
+ * loses its class mid-flight simply snaps to where it belongs. */
+@keyframes fade-in { from { opacity: 0; } }
+
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(6px); }
+}
+
+@keyframes row-in {
+  from { opacity: 0; transform: translateY(4px); }
+}
+
+@keyframes pop-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.99); }
+}
+
+@keyframes panel-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+}
+
+@keyframes bar-grow {
+  from { transform: scaleX(0); }
+}
+
+@keyframes cell-in {
+  from { opacity: 0; transform: scale(0.55); }
+}
+
+@keyframes image-in {
+  from { opacity: 0; transform: scale(0.94); }
+}
+
+@keyframes fade-out { to { opacity: 0; } }
+
+@keyframes pulse-dot {
+  50% { opacity: 0.35; transform: scale(0.72); }
+}
+
+@keyframes pill-in {
+  from { opacity: 0.4; transform: scale(0.92); }
+}
+
+/* A jumped-to message flashes its tint, then settles into the static one. */
+@keyframes anchor-pulse {
+  from { background-color: color-mix(in srgb, var(--accent) 26%, transparent); }
 }
 
 /* ---------------------------------------------------------------- header */
@@ -183,6 +242,11 @@ h1, h2, h3 { line-height: 1.35; }
   font-weight: 600;
 }
 
+/* The raised pill is the only thing on the header that moves between clicks;
+ * growing it into place from 92% makes the switch read as a selection. */
+.nav-views .ghost.is-active,
+.nav-group:not(.nav-views) .ghost.is-active { animation: pill-in var(--dur-2) var(--ease-out); }
+
 /* ------------------------------------------------------------------ shell */
 
 .app-main {
@@ -236,6 +300,9 @@ h1, h2, h3 { line-height: 1.35; }
   padding: 8px 9px;
   border-radius: 10px;
   cursor: pointer;
+  transition:
+    background-color var(--dur-1) var(--ease-out),
+    box-shadow var(--dur-1) var(--ease-out);
 }
 
 .chat-item:hover { background: var(--bg); }
@@ -244,6 +311,21 @@ h1, h2, h3 { line-height: 1.35; }
   background: var(--accent-soft);
   box-shadow: inset 2px 0 0 var(--accent);
 }
+
+/* First paint only: rows land one after another, like a list being read out.
+ * Later renders (filtering, re-fetch) skip it — typing must not animate. */
+.chat-item.is-enter { animation: row-in 240ms var(--ease-out) backwards; }
+
+.chat-item.is-enter:nth-child(2) { animation-delay: 18ms; }
+.chat-item.is-enter:nth-child(3) { animation-delay: 36ms; }
+.chat-item.is-enter:nth-child(4) { animation-delay: 54ms; }
+.chat-item.is-enter:nth-child(5) { animation-delay: 72ms; }
+.chat-item.is-enter:nth-child(6) { animation-delay: 90ms; }
+.chat-item.is-enter:nth-child(7) { animation-delay: 108ms; }
+.chat-item.is-enter:nth-child(8) { animation-delay: 126ms; }
+.chat-item.is-enter:nth-child(9) { animation-delay: 144ms; }
+.chat-item.is-enter:nth-child(10) { animation-delay: 162ms; }
+.chat-item.is-enter:nth-child(n + 11) { animation-delay: 180ms; }
 
 .chat-check {
   grid-row: 1 / span 3;
@@ -293,7 +375,10 @@ h1, h2, h3 { line-height: 1.35; }
   margin-top: 2px;
 }
 
-.chat-item:hover .chat-actions { display: flex; }
+.chat-item:hover .chat-actions {
+  display: flex;
+  animation: pop-in var(--dur-1) var(--ease-out);
+}
 
 .chat-action { margin: 0; padding: 1px 7px; font-size: 10px; }
 
@@ -308,7 +393,7 @@ h1, h2, h3 { line-height: 1.35; }
 
 .saved { margin: 2px 0; font-size: 12px; }
 .saved summary { color: var(--muted); cursor: pointer; }
-.saved-list { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+.saved-list { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; animation: pop-in var(--dur-2) var(--ease-out); }
 .saved-row { display: flex; gap: 4px; align-items: center; }
 
 .saved-play {
@@ -413,6 +498,12 @@ h1, h2, h3 { line-height: 1.35; }
   background: var(--surface);
 }
 
+/* Bars that appear because of a click — a search summary, a batch selection,
+ * the album — drop in under the header instead of just being there. */
+.hit-bar:not([hidden]),
+.batch-bar:not([hidden]),
+.album-panel:not([hidden]) { animation: pop-in var(--dur-2) var(--ease-out); }
+
 .album-grid { display: flex; flex-wrap: wrap; gap: 6px; }
 
 .album-thumb {
@@ -422,7 +513,10 @@ h1, h2, h3 { line-height: 1.35; }
   border-radius: 8px;
   object-fit: cover;
   cursor: zoom-in;
+  transition: transform var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out);
 }
+
+.album-thumb:hover { transform: scale(1.04); border-color: var(--border-strong); }
 
 .msg-list {
   display: flex;
@@ -438,16 +532,22 @@ h1, h2, h3 { line-height: 1.35; }
 .msg-row {
   padding: 10px 10px 12px;
   border-bottom: 1px solid var(--border);
+  /* Rows are new elements on every page load, so this plays for a chat switch
+   * and for "载入更早" without any JS. */
+  animation: fade-in 160ms var(--ease-out);
+  transition: background-color var(--dur-1) var(--ease-out);
 }
 
 .msg-row:hover { background: var(--surface); }
 .msg-row.is-clickable { cursor: pointer; }
 .msg-row.is-clickable:hover { box-shadow: inset 2px 0 0 var(--accent); }
 
-/* The message a search hit jumped to. */
+/* The message a search hit jumped to: the row still fades in, and the tint
+ * flashes brighter first so the eye lands on the right line. */
 .msg-row.is-anchor {
   background: var(--accent-soft);
   box-shadow: inset 3px 0 0 var(--accent);
+  animation: fade-in 160ms var(--ease-out), anchor-pulse 1100ms var(--ease-out);
 }
 
 .msg-head {
@@ -519,8 +619,19 @@ h1, h2, h3 { line-height: 1.35; }
   font: inherit;
   font-size: 13px;
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  transition:
+    background var(--dur-1) var(--ease-out),
+    border-color var(--dur-1) var(--ease-out),
+    box-shadow var(--dur-1) var(--ease-out),
+    color var(--dur-1) var(--ease-out),
+    transform var(--dur-1) var(--ease-out);
 }
+
+/* Press feedback: 1px, not a bounce. The eye reads it as the button taking the
+ * click; a scale would resize the label. */
+.ghost:active:not([disabled]),
+.primary:active:not([disabled]),
+.danger:active:not([disabled]) { transform: translateY(1px); }
 
 .ghost { align-self: flex-start; border-color: transparent; background: transparent; color: var(--muted); }
 .ghost:hover { border-color: var(--border); background: var(--surface-2); color: var(--text); }
@@ -573,6 +684,9 @@ h1, h2, h3 { line-height: 1.35; }
   right: 18px;
   bottom: 18px;
   z-index: 40;
+  display: flex;
+  gap: 6px;
+  align-items: center;
   padding: 7px 14px;
   border: 1px solid var(--border);
   border-radius: 999px;
@@ -582,9 +696,28 @@ h1, h2, h3 { line-height: 1.35; }
   font-size: 12px;
   cursor: pointer;
   box-shadow: var(--shadow-md);
+  transition: color var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out);
 }
 
 .jobs-dock:hover { color: var(--text); border-color: var(--border-strong); }
+
+/* Something is running: a dot that breathes, so a collapsed panel still tells
+ * you whether work is happening. */
+.jobs-dock.is-live::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  animation: pulse-dot 1.8s var(--ease-out) infinite;
+}
+
+.jobs-panel:not([hidden]) { animation: panel-in var(--dur-2) var(--ease-out); }
+.jobs-dock:not([hidden]) { animation: pop-in var(--dur-2) var(--ease-out); }
+
+/* Only rows that are new in the latest poll animate: the list is rebuilt every
+ * two seconds, and animating all of them would make it flicker forever. */
+.job-row.is-enter { animation: row-in var(--dur-2) var(--ease-out) backwards; }
 
 .jobs-head {
   display: flex;
@@ -634,6 +767,20 @@ h1, h2, h3 { line-height: 1.35; }
   padding: 24px var(--pad) 128px;
   overflow-y: auto;
 }
+
+/* A view switch is a change of place, so the new page rises a little instead
+ * of appearing. Opacity+transform only: it must not cost a layout.
+ *
+ * A View Transition was tried for this and removed on purpose: of a page's two
+ * states it snapshots the new one before its entrance animations advance, so a
+ * cross-fade would show the settings page with no cards until it ended. The
+ * rise-in is the whole transition and always matches what is on screen. */
+.app-shell,
+.ask-view,
+.export-view,
+.stats-view,
+.settings-view,
+.models-view { animation: rise-in var(--dur-2) var(--ease-out); }
 
 .export-form {
   display: flex;
@@ -738,6 +885,10 @@ h1, h2, h3 { line-height: 1.35; }
 .export-task.is-failed .export-task-meta { color: var(--danger); }
 .export-task.is-running .export-task-meta { color: var(--accent); }
 
+/* A task that just appeared (or just came back from "显示全部") lands; the ones
+ * already on screen stay put because the row list is diffed, not rebuilt. */
+.export-task.is-enter { animation: row-in var(--dur-2) var(--ease-out) backwards; }
+
 /* ------------------------------------------------------------------ stats */
 
 .stats-form {
@@ -822,7 +973,25 @@ h1, h2, h3 { line-height: 1.35; }
   box-shadow: inset 0 0 0 1px var(--border);
 }
 
-.stat-bar-fill { display: block; height: 100%; border-radius: 999px; background: var(--accent); }
+.stat-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transform-origin: left center;
+  /* The width is inline; scaling the painted box keeps the growth on the
+   * compositor instead of re-laying out 24 rows per frame. */
+  animation: bar-grow 420ms var(--ease-out) backwards;
+}
+
+.stat-bar:nth-child(2) .stat-bar-fill { animation-delay: 24ms; }
+.stat-bar:nth-child(3) .stat-bar-fill { animation-delay: 48ms; }
+.stat-bar:nth-child(4) .stat-bar-fill { animation-delay: 72ms; }
+.stat-bar:nth-child(5) .stat-bar-fill { animation-delay: 96ms; }
+.stat-bar:nth-child(6) .stat-bar-fill { animation-delay: 120ms; }
+.stat-bar:nth-child(7) .stat-bar-fill { animation-delay: 144ms; }
+.stat-bar:nth-child(8) .stat-bar-fill { animation-delay: 168ms; }
+.stat-bar:nth-child(n + 9) .stat-bar-fill { animation-delay: 192ms; }
 .stat-bar-value { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
 
 .stats-heat {
@@ -841,6 +1010,9 @@ h1, h2, h3 { line-height: 1.35; }
   background: var(--accent);
   color: #fff;
   font-size: 8px;
+  /* `stats.js` sets the delay per column, so the grid resolves left to right
+   * like a 24-hour clock instead of all at once. */
+  animation: cell-in var(--dur-2) var(--ease-out) backwards;
 }
 
 /* -------------------------------------------------------------- settings */
@@ -857,6 +1029,16 @@ h1, h2, h3 { line-height: 1.35; }
 
 .settings-card { min-width: 0; }
 .settings-card--wide { grid-column: 1 / -1; }
+
+/* Six cards arriving together read as a wall; a 45 ms offset makes the grid
+ * resolve top-left to bottom-right. */
+.settings-grid > .settings-card { animation: rise-in var(--dur-2) var(--ease-out) backwards; }
+.settings-grid > .settings-card:nth-child(2) { animation-delay: 45ms; }
+.settings-grid > .settings-card:nth-child(3) { animation-delay: 90ms; }
+.settings-grid > .settings-card:nth-child(4) { animation-delay: 135ms; }
+.settings-grid > .settings-card:nth-child(5) { animation-delay: 180ms; }
+.settings-grid > .settings-card:nth-child(6) { animation-delay: 225ms; }
+.settings-grid > .settings-card:nth-child(n + 7) { animation-delay: 260ms; }
 
 .settings-card h3 {
   display: flex;
@@ -1014,6 +1196,18 @@ h1, h2, h3 { line-height: 1.35; }
   background: var(--surface);
 }
 
+.component-row.is-enter,
+.model-row.is-enter { animation: row-in var(--dur-2) var(--ease-out) backwards; }
+
+.component-row.is-enter:nth-child(2),
+.model-row.is-enter:nth-child(2) { animation-delay: 40ms; }
+.component-row.is-enter:nth-child(3),
+.model-row.is-enter:nth-child(3) { animation-delay: 80ms; }
+.component-row.is-enter:nth-child(4),
+.model-row.is-enter:nth-child(4) { animation-delay: 120ms; }
+.component-row.is-enter:nth-child(n + 5),
+.model-row.is-enter:nth-child(n + 5) { animation-delay: 160ms; }
+
 .component-name,
 .model-name { font-size: 13px; font-weight: 550; }
 .component-meta,
@@ -1064,7 +1258,13 @@ h1, h2, h3 { line-height: 1.35; }
   border-radius: var(--radius);
   background: var(--surface);
   box-shadow: var(--shadow-sm);
+  animation: rise-in var(--dur-2) var(--ease-out) backwards;
 }
+
+.ask-hit:nth-child(2) { animation-delay: 40ms; }
+.ask-hit:nth-child(3) { animation-delay: 80ms; }
+.ask-hit:nth-child(4) { animation-delay: 120ms; }
+.ask-hit:nth-child(n + 5) { animation-delay: 160ms; }
 
 .ask-hit-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
 .ask-hit-title { font-size: 13px; font-weight: 650; }
@@ -1112,6 +1312,13 @@ h1, h2, h3 { line-height: 1.35; }
   background: rgb(0 0 0 / 0.78);
   inset: 0;
 }
+
+.media-lightbox:not([hidden]) { animation: fade-in 140ms var(--ease-out); }
+.media-lightbox:not([hidden]) .media-lightbox-image { animation: image-in var(--dur-2) var(--ease-out); }
+
+/* Closing waits for this (see `chats.js`): a hard cut from a full-screen image
+ * is the one transition a reader notices as a flash. */
+.media-lightbox.is-closing { animation: fade-out 140ms var(--ease-out) forwards; }
 
 .media-lightbox-image { max-width: 92vw; max-height: 82vh; border-radius: 10px; background: #fff; }
 .media-lightbox-close { background: var(--surface); }

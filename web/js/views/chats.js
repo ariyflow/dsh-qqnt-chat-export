@@ -116,6 +116,12 @@ export function pushHistory(rows, keyword) {
   return [text, ...rows.filter((item) => item !== text)].slice(0, MAX_HISTORY)
 }
 
+/** The OS-level motion preference; `scrollIntoView` ignores the CSS rule. */
+function prefersReducedMotion() {
+  return typeof matchMedia === 'function'
+    && matchMedia('(prefers-reduced-motion: reduce)').matches
+}
+
 /** Key of one saved search, so the same filter combination is kept once. */
 function savedKey(saved) {
   return [saved.chat ? `${saved.chat.kind}:${saved.chat.id}` : '',
@@ -354,17 +360,44 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
   lightboxClose.textContent = '关闭'
   lightbox.append(lightboxImage, lightboxClose)
 
+  // Closing is the one exit animation with a timer behind it: a full-screen
+  // image that disappears between two frames reads as a flash. Without a frame
+  // loop (the test shim) the box closes at once instead of waiting.
+  const animatedClose = typeof requestAnimationFrame === 'function'
+  let closeTimer = null
+
   function openMedia(rowId, seq) {
+    if (closeTimer) {
+      clearTimeout(closeTimer)
+      closeTimer = null
+    }
+    lightbox.classList.remove('is-closing')
     lightboxImage.src = `/api/media/${rowId}?seq=${seq}`
     lightbox.hidden = false
   }
-  lightboxClose.addEventListener('click', () => { lightbox.hidden = true })
+
+  function closeMedia() {
+    if (lightbox.hidden) return
+    if (!animatedClose) {
+      lightbox.hidden = true
+      return
+    }
+    lightbox.classList.add('is-closing')
+    if (closeTimer) clearTimeout(closeTimer)
+    closeTimer = setTimeout(() => {
+      closeTimer = null
+      lightbox.hidden = true
+      lightbox.classList.remove('is-closing')
+    }, 150)
+  }
+
+  lightboxClose.addEventListener('click', closeMedia)
   const onKey = (event) => {
-    if (event && event.key === 'Escape') lightbox.hidden = true
+    if (event && event.key === 'Escape') closeMedia()
   }
   if (typeof document.addEventListener === 'function') document.addEventListener('keydown', onKey)
   lightbox.addEventListener('click', (event) => {
-    if (event && event.target === lightbox) lightbox.hidden = true
+    if (event && event.target === lightbox) closeMedia()
   })
 
   searchBar.append(searchInput, historyList, ocrLabel, saveButton, exportButton, galleryButton)
@@ -390,8 +423,15 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
   // takes a number and only the newest one may touch the DOM.
   let loadSeq = 0
   let albumSeq = 0
+  let painted = false
 
-  function renderList() {
+  /**
+   * Rebuild the session list.
+   *
+   * @param {boolean} [animate] stagger the rows in; only the first paint does
+   *   this — filtering must follow the keyboard without a queue of animations.
+   */
+  function renderList(animate = false) {
     const visible = filterSessions(state.sessions, state.query)
     list.replaceChildren()
     hint.textContent = state.sessions.length === 0
@@ -401,6 +441,11 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
       const key = `${session.kind}:${session.id}`
       const item = document.createElement('li')
       item.className = 'chat-item'
+      // Which row this is, so selecting a chat can repaint in place instead of
+      // rebuilding the list (a rebuild replays the enter animation and drops
+      // keyboard focus).
+      item.dataset.key = key
+      if (animate) item.classList.add('is-enter')
       if (state.selected && state.selected.kind === session.kind
         && state.selected.id === session.id) item.classList.add('is-active')
 
@@ -456,6 +501,17 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
       list.append(item)
     }
     renderSaved()
+  }
+
+  /** Move the selection tint without touching the rows themselves. */
+  function paintActive() {
+    const wanted = state.selected ? `${state.selected.kind}:${state.selected.id}` : ''
+    for (const item of list.children) {
+      item.classList.remove('is-active')
+      if (wanted !== '' && item.dataset && item.dataset.key === wanted) {
+        item.classList.add('is-active')
+      }
+    }
   }
 
   function renderBatch() {
@@ -544,7 +600,10 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
       if (item.dataset && item.dataset.rowId !== wanted) continue
       item.classList.add('is-anchor')
       if (typeof item.scrollIntoView === 'function') {
-        item.scrollIntoView({ block: 'center' })
+        // A jump across a long page of messages is disorienting; the scroll
+        // itself shows where the hit sits in the conversation. Reduced motion
+        // asks for no travel, not just no animation.
+        item.scrollIntoView({ block: 'center', behavior: prefersReducedMotion() ? 'auto' : 'smooth' })
       }
     }
   }
@@ -741,7 +800,7 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
     albumGrid.replaceChildren()
     galleryButton.classList.remove('is-active')
     title.textContent = `${session.name || session.id} · ${sessionMeta(session)}`
-    renderList()
+    paintActive()
     loadMessages(true, around)
   }
 
@@ -801,7 +860,10 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
       const again = state.selected && state.sessions.find((session) =>
         session.kind === state.selected.kind && String(session.id) === String(state.selected.id))
       state.selected = again || null
-      renderList()
+      // Only the first paint staggers; a re-fetch after pinning or hiding is a
+      // correction, not a new list.
+      renderList(!painted)
+      painted = true
       if (jump && !state.selected) select(jump, initial.around || null)
       else if (!state.selected && state.sessions.length > 0) select(state.sessions[0])
     } catch (error) {
@@ -814,6 +876,7 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
 
   return () => {
     closed = true
+    if (closeTimer) clearTimeout(closeTimer)
     if (typeof document.removeEventListener === 'function') {
       document.removeEventListener('keydown', onKey)
     }

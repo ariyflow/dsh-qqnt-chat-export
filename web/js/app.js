@@ -152,13 +152,20 @@ function setView(next, { chat = null, chats = null } = {}) {
   view = next
   initialChat = chat
   initialChats = chats
-  paintNav()
   mount()
 }
 
-/** Mount the active view once the first status arrives (or the index is absent). */
+/**
+ * Mount the active view once the first status arrives (or the index is absent).
+ *
+ * The switch itself is a plain replacement; the motion lives in `base.css` (the
+ * new view rises in, its rows cascade). A View Transition was tried here and
+ * dropped: its snapshot of the new page is taken before the entrance animations
+ * advance, so a cross-fade showed an empty settings page until it finished.
+ */
 function mount() {
   if (!main) return
+  paintNav()
   if (typeof unmount === 'function') unmount()
   if (view === 'ask') {
     // A citation card opens the reader on that message: same page, no reload.

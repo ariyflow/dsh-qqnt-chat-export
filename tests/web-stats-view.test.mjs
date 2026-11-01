@@ -129,6 +129,10 @@ test('bars and heat cells write the size to the style property', async () => {
     const cells = findAllByClass(root, 'heat-cell')
     assert.ok(cells.length > 0)
     for (const cell of cells) assert.match(String(cell.style.opacity), /^0\.\d+$|^1$/)
+    // The grid resolves left to right: the delay follows the hour of the day,
+    // not the position in the flattened list.
+    assert.equal(String(cells[5].style.animationDelay), '40ms')
+    assert.equal(String(cells[24 + 5].style.animationDelay), '40ms')
   } finally {
     cleanup()
     restore()

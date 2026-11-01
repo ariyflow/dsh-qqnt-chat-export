@@ -179,6 +179,9 @@ export function mountStats(root, { api, initialChat = null }) {
         cell.textContent = count === 0 ? '' : String(count)
         cell.title = `周${week[day]} ${String(hour).padStart(2, '0')}:00 · ${count} 条`
         cell.style.opacity = String(0.12 + 0.88 * (heatMax ? count / heatMax : 0))
+        // The grid resolves left to right: the delay follows the hour, so a
+        // week of activity appears like a clock sweeping through the day.
+        cell.style.animationDelay = `${hour * 8}ms`
         grid.append(cell)
       }
     }

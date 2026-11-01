@@ -92,3 +92,39 @@ test('收起 keeps the panel hidden while the same jobs are still listed', async
     restore()
   }
 })
+
+test('an unchanged poll keeps the rows, and only new work animates in', async () => {
+  const restore = installDocument()
+  let jobs = [{
+    id: 'j1', kind: 'ocr', summary: '识别图片', state: 'running',
+    progress: 0.4, message: '40/100', canCancel: true, canRetry: false,
+  }]
+  const api = { get: async () => ({ jobs }), post: async () => ({}) }
+  const root = makeElement('aside')
+  const cleanup = mountJobs(root, { api, intervalMs: 40 })
+  try {
+    await tick()
+    const panel = findByClass(root, 'jobs-panel')
+    const list = panel.children[1]
+    const row = list.children[0]
+    assert.match(row.className, /is-enter/)
+    assert.match(findByClass(root, 'jobs-dock').className, /is-live/)
+
+    // Same payload: the row must survive the poll so a button inside it keeps
+    // its focus (and the entrance animation does not loop every two seconds).
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    assert.equal(list.children[0], row)
+
+    jobs = [jobs[0], {
+      id: 'j2', kind: 'asr', summary: '转写语音', state: 'queued',
+      progress: 0, message: '', canCancel: true, canRetry: false,
+    }]
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    assert.equal(list.children.length, 2)
+    assert.doesNotMatch(list.children[0].className, /is-enter/)
+    assert.match(list.children[1].className, /is-enter/)
+  } finally {
+    cleanup()
+    restore()
+  }
+})

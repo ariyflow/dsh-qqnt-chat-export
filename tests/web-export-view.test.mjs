@@ -323,3 +323,39 @@ test('a long export history shows the recent eight and can be expanded', async (
     restore()
   }
 })
+
+test('the task list is diffed: a poll does not rebuild, revealed rows animate', async () => {
+  const restore = installDocument()
+  const jobs = Array.from({ length: 12 }, (_, index) => ({
+    id: `job${index}`, kind: 'export', summary: '导出 TXT', state: 'done',
+    result: { rows: 1, bytes: 10 }, canCancel: false,
+  }))
+  const api = {
+    get: async (path) => {
+      if (path === '/api/sessions') return { sessions: [] }
+      if (path === '/api/presets') return { presets: [] }
+      return { jobs }
+    },
+    post: async () => ({}),
+  }
+  const root = makeElement('main')
+  const cleanup = mountExport(root, { api })
+  try {
+    await tick()
+    const tasks = findByClass(root, 'export-tasks')
+    const head = tasks.children[0]
+    assert.match(head.className, /is-enter/)
+
+    await tick()
+    assert.equal(tasks.children[0], head, 'an unchanged poll must not rebuild the list')
+
+    findByClass(root, 'export-more').dispatch('click')
+    const expanded = tasks.children
+    assert.equal(expanded.length, 12)
+    assert.doesNotMatch(expanded[0].className, /is-enter/)
+    assert.match(expanded[8].className, /is-enter/, 'the revealed rows land')
+  } finally {
+    cleanup()
+    restore()
+  }
+})

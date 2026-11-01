@@ -363,10 +363,13 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
     }
   }
 
-  function taskRow(job) {
+  function taskRow(job, isEnter = false) {
     const row = document.createElement('li')
     row.className = 'export-task'
     row.classList.add(`is-${job.state}`)
+    // A row that was not on screen before (a new task, or one revealed by
+    // "显示全部") lands; the others stay put between two-second polls.
+    if (isEnter) row.classList.add('is-enter')
 
     const name = document.createElement('span')
     name.className = 'export-task-name'
@@ -420,15 +423,27 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
   }
 
   const TASKS_SHOWN = 8
+  /** What the list currently shows; an unchanged poll must not rebuild it. */
+  let renderedTasks = ''
+  let renderedIds = new Set()
 
   function renderTasks() {
     const list = state.tasks
     const shown = state.showAllTasks ? list : list.slice(0, TASKS_SHOWN)
-    tasks.replaceChildren(...shown.map(taskRow))
     tasksMore.hidden = list.length <= TASKS_SHOWN
     tasksMore.textContent = state.showAllTasks
       ? `只看最近 ${TASKS_SHOWN} 个`
       : `显示全部 ${list.length} 个`
+    const sig = [state.showAllTasks ? 'all' : 'head',
+      shown.map((job) => [job.id, job.state, job.progress, job.message,
+        job.summary, job.canCancel ? 1 : 0, job.canRetry ? 1 : 0].join('~')).join('\n')].join('\n')
+    // Rebuilding an identical list every two seconds also drops the focus of a
+    // button the user is about to press.
+    if (sig === renderedTasks) return
+    renderedTasks = sig
+    const fresh = new Set(shown.map((job) => job.id).filter((id) => !renderedIds.has(id)))
+    renderedIds = new Set(shown.map((job) => job.id))
+    tasks.replaceChildren(...shown.map((job) => taskRow(job, fresh.has(job.id))))
   }
 
   async function refresh() {

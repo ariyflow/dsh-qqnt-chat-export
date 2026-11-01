@@ -69,9 +69,12 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
   let closed = false
   let timer = null
 
-  function renderRow(job) {
+  function renderRow(job, isEnter = false) {
     const item = document.createElement('li')
     item.className = `job-row is-${job.state}`
+    // Only a row that was not on screen a moment ago animates in: the panel is
+    // rebuilt every poll, and animating all of them would pulse forever.
+    if (isEnter) item.classList.add('is-enter')
 
     const summary = document.createElement('span')
     summary.className = 'job-summary'
@@ -115,6 +118,8 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
   let collapsed = false
   let first = true
   let seen = new Set()
+  /** What the list currently shows; an unchanged poll must not rebuild it. */
+  let rendered = ''
 
   /** Jobs that are still doing something: only those deserve the panel. */
   const ACTIVE = new Set(['queued', 'running', 'canceling'])
@@ -127,6 +132,7 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
       const jobs = visibleJobs(payload?.jobs)
       const ids = new Set(jobs.map((job) => job.id))
       const isNew = [...ids].some((id) => !seen.has(id))
+      const fresh = new Set([...ids].filter((id) => !seen.has(id)))
       const active = jobs.some((job) => ACTIVE.has(job.state))
       // New work reopens the panel; an explicit 收起 keeps it shut while the
       // same rows are still on screen.
@@ -140,11 +146,18 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
       seen = ids
       title.textContent = jobs.length > 0 ? `任务 · ${jobs.length}` : '任务'
       dock.textContent = `任务 · ${jobs.length}`
+      // A collapsed pill still answers "is anything happening?" with its dot.
+      if (active) dock.classList.add('is-live')
+      else dock.classList.remove('is-live')
       const open = jobs.length > 0 && !collapsed
       panel.hidden = !open
       dock.hidden = open || jobs.length === 0
-      list.replaceChildren()
-      for (const job of jobs) list.append(renderRow(job))
+      const sig = [open ? 'open' : 'shut',
+        jobs.map((job) => [job.id, job.state, job.progress, job.message,
+          job.summary, job.canCancel ? 1 : 0, job.canRetry ? 1 : 0].join('~')).join('\n')].join('\n')
+      if (sig === rendered) return
+      rendered = sig
+      list.replaceChildren(...jobs.map((job) => renderRow(job, fresh.has(job.id))))
     } catch {
       // The panel is a convenience; a failed poll must not spam the page.
     }

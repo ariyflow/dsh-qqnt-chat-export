@@ -672,3 +672,43 @@ test('an anchored window goes back to the newest instead of appending an offset'
     restore()
   }
 })
+
+test('the first list staggers in, selecting repaints in place, filtering does not animate', async () => {
+  const restore = installDocument()
+  const api = {
+    get: async (path) => (path === '/api/sessions'
+      ? { sessions }
+      : { rows, total: 2, offset: 0, limit: 50 }),
+  }
+  const root = makeElement('main')
+  const cleanup = mountChats(root, { api })
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const shell = root.children[0]
+    const list = findByClass(shell, 'chat-list')
+    const first = list.children[0]
+    const second = list.children[1]
+    assert.match(first.className, /is-enter/, 'the first paint announces itself')
+    assert.match(first.className, /is-active/)
+
+    second.dispatch('click')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // Same nodes: the list is not rebuilt, so the stagger cannot replay over
+    // the user's click and keyboard focus stays where it was.
+    assert.equal(list.children[0], first)
+    assert.equal(list.children[1], second)
+    assert.doesNotMatch(first.className, /is-active/)
+    assert.match(second.className, /is-active/)
+
+    // Filtering follows the keyboard: rows appear without the entrance class.
+    const filter = findByClass(findByClass(shell, 'app-sidebar'), 'chat-filter')
+    filter.value = '小林'
+    filter.dispatch('input')
+    assert.equal(list.children.length, 1)
+    assert.doesNotMatch(list.children[0].className, /is-enter/)
+  } finally {
+    cleanup()
+    restore()
+  }
+})
