@@ -653,3 +653,39 @@ a:hover { text-decoration: underline; }
 }
 .storage-detail { grid-column: 2; color: var(--muted); font-size: 11px; }
 .storage-row input { grid-row: 1 / span 2; }
+
+/* First-run banner: address, environment, key, and the two fixes. */
+.startup {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  margin: 0 20px 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.startup[hidden] { display: none; }
+.startup-main { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.startup-line { color: var(--muted); font-size: 12px; }
+.startup-line.bad { color: #d92d20; }
+.startup-line code { color: var(--text); }
+.startup-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.startup-actions .primary, .startup-actions .ghost { margin: 0; padding: 3px 10px; font-size: 12px; }
+
+.hit-bar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin: 0 0 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 12px;
+}
+.hit-bar[hidden] { display: none; }
+.hit-bar .ghost { margin: 0; padding: 2px 8px; font-size: 12px; }

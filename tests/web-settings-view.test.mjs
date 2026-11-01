@@ -169,3 +169,47 @@ test('a preset can be deleted from settings', async () => {
     restore()
   }
 })
+
+test('a legacy temp work directory can be migrated from settings', async () => {
+  const restore = installDocument()
+  const posts = []
+  const legacy = {
+    settings: { ...settingsPayload.settings, workDirLegacy: true },
+    url: 'http://127.0.0.1:46728/',
+    file: '/home/user/.config/settings.json',
+  }
+  const api = {
+    get: async (path) => {
+      if (path === '/api/settings') return legacy
+      if (path === '/api/presets') return { presets: [] }
+      if (path === '/api/storage') return storagePayload
+      if (path === '/api/key/extract') return { state: 'idle', log: [] }
+      if (path === '/api/setup') return { state: 'idle', log: [] }
+      return {}
+    },
+    put: async () => ({}),
+    post: async (path, body) => {
+      posts.push({ path, body })
+      return { copied: ['key.txt', 'index.sqlite'], workDir: '/data' }
+    },
+  }
+  const root = makeElement('main')
+  const cleanup = mountSettings(root, { api })
+  try {
+    await tick()
+    assert.match(textOf(root), /地址 http:\/\/127\.0\.0\.1:46728\//)
+    const note = findByClass(root, 'migration-note')
+    const buttons = findAllByClass(root, 'ghost')
+    const migrate = buttons.find((item) => textOf(item) === '迁移到持久目录')
+    assert.ok(migrate, 'the migration button must appear for a legacy work dir')
+    migrate.dispatch('click')
+    assert.equal(migrate.textContent, '确认迁移')
+    migrate.dispatch('click')
+    await tick()
+    assert.deepEqual(posts, [{ path: '/api/workdir/migrate', body: undefined }])
+    assert.match(textOf(note), /已迁移 2 项/)
+  } finally {
+    cleanup()
+    restore()
+  }
+})

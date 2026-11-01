@@ -10,6 +10,7 @@ import { createStore } from './state.js'
 import { mountAsk } from './views/ask.js'
 import { mountExport } from './views/export.js'
 import { mountSettings } from './views/settings.js'
+import { mountStartup } from './views/startup.js'
 import { mountStats } from './views/stats.js'
 import { mountChats } from './views/chats.js'
 import { mountModels } from './views/models.js'
@@ -335,6 +336,11 @@ async function refresh() {
   } finally {
     mount()
   }
+}
+
+const startupHost = document.getElementById('startup-host')
+if (startupHost) {
+  mountStartup(startupHost, { api, onOpenSettings: () => setView('settings') })
 }
 
 render(store.get())

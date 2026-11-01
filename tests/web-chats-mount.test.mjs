@@ -461,3 +461,47 @@ test('a cross-chat hit opens its conversation at that message', async () => {
     restore()
   }
 })
+
+test('search results offer "export these chats" for the distinct hits', async () => {
+  const restore = installDocument()
+  try {
+    const exported = []
+    const api = {
+      get: async (path, params) => {
+        if (path === '/api/sessions') return { sessions }
+        if (params && params.keyword) {
+          return {
+            total: 3,
+            rows: [
+              { ts: 1, sender: '甲', text: 'a', chatKind: 'group', chatId: '111', chatName: '课程群', rowId: 1 },
+              { ts: 2, sender: '乙', text: 'b', chatKind: 'group', chatId: '111', chatName: '课程群', rowId: 2 },
+              { ts: 3, sender: '丙', text: 'c', chatKind: 'private', chatId: 'u_abc', chatName: '小林', rowId: 3 },
+            ],
+          }
+        }
+        return { rows, total: 2 }
+      },
+      post: async () => ({}),
+    }
+    const root = makeElement('main')
+    const cleanup = mountChats(root, { api, onExportBatch: (chats) => exported.push(chats) })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const shell = root.children[0]
+    const form = findByClass(shell, 'chat-search')
+    findByClass(form, 'chat-search-input').value = 'a'
+    form.dispatch('submit')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    const bar = findByClass(shell, 'hit-bar')
+    assert.equal(bar.hidden, false)
+    assert.match(textOf(bar), /命中 3 条 · 2 个会话/)
+    bar.children.find((item) => textOf(item) === '导出这些会话').dispatch('click')
+    assert.deepEqual(exported, [[
+      { kind: 'group', id: '111', label: '课程群' },
+      { kind: 'private', id: 'u_abc', label: '小林' },
+    ]])
+  } finally {
+    restore()
+  }
+})

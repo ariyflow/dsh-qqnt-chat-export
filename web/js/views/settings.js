@@ -76,6 +76,15 @@ export function mountSettings(root, { api }) {
   status.textContent = '正在读取设置…'
 
   const runtimeCard = card('运行参数')
+  const migrationNote = document.createElement('p')
+  migrationNote.className = 'hint migration-note'
+  migrationNote.hidden = true
+  const migrateButton = document.createElement('button')
+  migrateButton.type = 'button'
+  migrateButton.className = 'ghost'
+  migrateButton.textContent = '迁移到持久目录'
+  migrateButton.hidden = true
+
   const runtimeForm = document.createElement('form')
   runtimeForm.className = 'settings-form'
   const fields = {
@@ -112,7 +121,7 @@ export function mountSettings(root, { api }) {
   runtimeNote.className = 'hint'
   runtimeActions.append(save, reset, runtimeNote)
   runtimeForm.append(runtimeActions)
-  runtimeCard.body.append(runtimeForm)
+  runtimeCard.body.append(runtimeForm, migrationNote, migrateButton)
 
   const keyCard = card('数据库密钥')
   const keyLine = document.createElement('p')
@@ -282,12 +291,52 @@ export function mountSettings(root, { api }) {
     try {
       const payload = await api.get('/api/settings')
       if (closed) return
-      fill(payload?.settings || {})
+      const settings = payload?.settings || {}
+      fill(settings)
+      renderMigration(settings)
       status.textContent = payload?.file
-        ? `设置文件：${payload.file}`
+        ? `地址 ${payload.url || (typeof location !== 'undefined' ? location.origin : '')} · 设置文件：${payload.file}`
         : '设置保存在插件自己的配置目录。'
     } catch (error) {
       if (!closed) status.textContent = `读取设置失败：${error.message}`
+    }
+  }
+
+  /** The banner used to own this; without it the old temp dir would stay forever. */
+  function renderMigration(settings) {
+    const legacy = settings?.workDirLegacy === true
+    migrationNote.hidden = !legacy
+    migrateButton.hidden = !legacy
+    if (legacy) {
+      migrationNote.textContent = `工作目录还在旧的临时位置（${settings.workDir || ''}）：迁移会把密钥、索引等一起搬到持久目录。`
+    }
+  }
+
+  let migrateArmed = 0
+  async function migrate() {
+    const now = Date.now()
+    if (now - migrateArmed > 4000) {
+      migrateArmed = now
+      migrateButton.textContent = '确认迁移'
+      migrationNote.hidden = false
+      migrationNote.textContent = '迁移是「先复制、再切设置、最后删旧文件」，大索引需要几十秒。'
+      return
+    }
+    migrateArmed = 0
+    migrateButton.disabled = true
+    migrateButton.textContent = '迁移中…'
+    try {
+      const result = await api.post('/api/workdir/migrate')
+      const message = `已迁移 ${result?.copied?.length ?? 0} 项到 ${result?.workDir || '持久目录'}。`
+      await loadSettings()
+      // `loadSettings` re-renders the legacy warning; the outcome is newer.
+      migrationNote.hidden = false
+      migrationNote.textContent = message
+    } catch (error) {
+      migrationNote.textContent = `迁移失败：${error.message}`
+    } finally {
+      migrateButton.disabled = false
+      migrateButton.textContent = '迁移到持久目录'
     }
   }
 
@@ -529,6 +578,7 @@ export function mountSettings(root, { api }) {
   }
 
   runtimeForm.addEventListener('submit', saveSettings)
+  migrateButton.addEventListener('click', migrate)
   reset.addEventListener('click', resetSettings)
   keyButton.addEventListener('click', extractKey)
   setupDefault.addEventListener('click', () => startSetup('default'))

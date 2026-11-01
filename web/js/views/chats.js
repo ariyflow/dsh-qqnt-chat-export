@@ -281,6 +281,17 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
   galleryButton.textContent = '相册'
   galleryButton.title = '当前会话里本机已有的图片'
 
+  const hitBar = document.createElement('div')
+  hitBar.className = 'hit-bar'
+  hitBar.hidden = true
+  const hitText = document.createElement('span')
+  hitText.className = 'meta'
+  const hitExport = document.createElement('button')
+  hitExport.type = 'button'
+  hitExport.className = 'ghost'
+  hitExport.textContent = '导出这些会话'
+  hitBar.append(hitText, hitExport)
+
   const batchBar = document.createElement('div')
   batchBar.className = 'batch-bar'
   batchBar.hidden = true
@@ -337,12 +348,16 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
     lightbox.hidden = false
   }
   lightboxClose.addEventListener('click', () => { lightbox.hidden = true })
+  const onKey = (event) => {
+    if (event && event.key === 'Escape') lightbox.hidden = true
+  }
+  if (typeof document.addEventListener === 'function') document.addEventListener('keydown', onKey)
   lightbox.addEventListener('click', (event) => {
     if (event && event.target === lightbox) lightbox.hidden = true
   })
 
   searchBar.append(searchInput, historyList, ocrLabel, saveButton, exportButton, galleryButton)
-  main.append(title, batchBar, searchBar, album, messages, more)
+  main.append(title, batchBar, searchBar, hitBar, album, messages, more)
   shell.append(aside, main, lightbox)
   root.append(shell)
 
@@ -584,6 +599,7 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
       title.textContent = rows.length === 0
         ? `没有匹配「${keyword}」的消息`
         : `搜索「${keyword}」· ${state.total} 条（显示最近 ${rows.length} 条）`
+      renderHitBar(rows)
       for (const row of rows) {
         const item = messageRow(row, { onOpenMedia: openMedia })
         if (row.chatName) {
@@ -609,6 +625,27 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
     }
   }
 
+  /** Distinct chats behind the hits, for "导出这些会话" (legacy parity). */
+  function hitChats(rows) {
+    const seen = new Set()
+    const chats = []
+    for (const row of rows) {
+      if (!row?.chatKind || row?.chatId === undefined) continue
+      const key = `${row.chatKind}:${row.chatId}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      chats.push({ kind: row.chatKind, id: String(row.chatId), label: row.chatName || String(row.chatId) })
+    }
+    return chats
+  }
+
+  function renderHitBar(rows) {
+    const chats = hitChats(rows)
+    hitBar.hidden = chats.length === 0
+    hitText.textContent = `命中 ${rows.length} 条 · ${chats.length} 个会话`
+    hitExport.dataset.chats = JSON.stringify(chats)
+  }
+
   function renderHistory() {
     historyList.replaceChildren()
     for (const keyword of state.history) {
@@ -629,6 +666,7 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
   })
 
   function select(session, around = null) {
+    hitBar.hidden = true
     state.selected = session
     state.rows = []
     state.album = { open: false, offset: 0, total: 0 }
@@ -660,6 +698,16 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
     state.batch.clear()
     renderBatch()
     renderList()
+  })
+  hitExport.addEventListener('click', () => {
+    let chats = []
+    try {
+      chats = JSON.parse(hitExport.dataset.chats || '[]')
+    } catch {
+      chats = []
+    }
+    if (chats.length === 0) return
+    if (typeof onExportBatch === 'function') onExportBatch(chats)
   })
   batchExport.addEventListener('click', () => {
     const chats = state.sessions
@@ -693,6 +741,9 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
 
   return () => {
     closed = true
+    if (typeof document.removeEventListener === 'function') {
+      document.removeEventListener('keydown', onKey)
+    }
     shell.remove()
     lightbox.remove()
   }

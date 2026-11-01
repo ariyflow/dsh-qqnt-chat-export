@@ -86,7 +86,7 @@ test('a dead connection is reported as an ApiError with status 0', async () => {
 
 test('204 and empty bodies resolve to null', async () => {
   const api = createApi({ fetchImpl: stubFetch({ status: 204 }).impl })
-  assert.equal(await api.remove('/api/export/queue/1'), null)
+  assert.equal(await api.remove('/api/jobs/1'), null)
   const empty = createApi({ fetchImpl: stubFetch({ body: '' }).impl })
   assert.equal(await empty.get('/api/status'), null)
 })
