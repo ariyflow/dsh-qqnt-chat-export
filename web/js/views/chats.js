@@ -254,9 +254,20 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
 
   const main = document.createElement('section')
   main.className = 'chat-main'
+  const head = document.createElement('div')
+  head.className = 'chat-head'
+  // Only the single-pane layout (narrow screens) shows this: on a wide screen
+  // the list keeps sitting next to the reader, so there is nothing to go back
+  // to and the button stays display:none in CSS.
+  const back = document.createElement('button')
+  back.type = 'button'
+  back.className = 'ghost chat-back'
+  back.textContent = '‹ 会话'
+  back.addEventListener('click', () => shell.classList.remove('is-reading'))
   const title = document.createElement('h2')
   title.className = 'chat-title'
   title.textContent = '选择左侧会话'
+  head.append(back, title)
 
   // Cross-chat keyword search. `sources` decides whether recognized text
   // inside images and voice messages participates; both are on by default so
@@ -401,7 +412,7 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
   })
 
   searchBar.append(searchInput, historyList, ocrLabel, saveButton, exportButton, galleryButton)
-  main.append(title, batchBar, searchBar, hitBar, album, messages, more)
+  main.append(head, batchBar, searchBar, hitBar, album, messages, more)
   shell.append(aside, main, lightbox)
   root.append(shell)
 
@@ -800,6 +811,9 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
     albumGrid.replaceChildren()
     galleryButton.classList.remove('is-active')
     title.textContent = `${session.name || session.id} · ${sessionMeta(session)}`
+    // Under 720 px only one pane is visible; opening a chat means showing the
+    // reader, and the ‹ 会话 button in the header brings the list back.
+    shell.classList.add('is-reading')
     paintActive()
     loadMessages(true, around)
   }

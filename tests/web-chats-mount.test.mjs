@@ -712,3 +712,38 @@ test('the first list staggers in, selecting repaints in place, filtering does no
     restore()
   }
 })
+
+test('the single-pane layout switches between list and reader', async () => {
+  const restore = installDocument()
+  const api = {
+    get: async (path) => (path === '/api/sessions' ? { sessions } : { rows, total: 2, offset: 0, limit: 50 }),
+  }
+  const root = makeElement('main')
+  const cleanup = mountChats(root, { api })
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const shell = root.children[0]
+    const aside = findByClass(shell, 'app-sidebar')
+    const main = findByClass(shell, 'chat-main')
+    // The header keeps the back button next to the title; CSS decides whether
+    // it is visible (only under 720 px, where the panes do not fit together).
+    const back = findByClass(main, 'chat-back')
+    assert.equal(back.hidden, false)
+    assert.match(textOf(back), /会话/)
+    assert.equal(findByClass(main, 'chat-title').textContent.includes('课程群'), true)
+
+    // Mounting with a chat selected goes straight to the reader.
+    assert.match(shell.className, /is-reading/)
+
+    back.dispatch('click')
+    assert.doesNotMatch(shell.className, /is-reading/, 'back returns to the list')
+
+    // Choosing a chat opens the reader again.
+    findByClass(aside, 'chat-list').children[1].dispatch('click')
+    assert.match(shell.className, /is-reading/)
+  } finally {
+    cleanup()
+    restore()
+  }
+})

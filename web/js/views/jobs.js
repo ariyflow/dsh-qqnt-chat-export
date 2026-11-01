@@ -132,6 +132,10 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
   let collapsed = false
   let first = true
   let seen = new Set()
+  /** Set while the panel plays its exit animation; cleared once it is hidden. */
+  let leaving = false
+  let hideTimer = null
+  const HIDE_MS = 160
   const renderRows = createRowList(list, {
     id: (job) => String(job.id),
     // `progress` and `message` are left out on purpose: they change on every
@@ -144,6 +148,56 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
 
   /** Jobs that are still doing something: only those deserve the panel. */
   const ACTIVE = new Set(['queued', 'running', 'canceling'])
+
+  const reducedMotion = () => {
+    try {
+      return typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+        && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    } catch {
+      return false
+    }
+  }
+
+  /** Opening cancels a leave that has not finished yet. */
+  function showPanel() {
+    if (hideTimer) {
+      clearTimeout(hideTimer)
+      hideTimer = null
+    }
+    leaving = false
+    panel.classList.remove('is-leaving')
+    panel.hidden = false
+  }
+
+  /**
+   * 收起 used to set `hidden` in the same frame, so the panel vanished with no
+   * exit while every other surface in the app animates. The pill appears at
+   * once (it is the affordance for what just happened); the panel fades for
+   * 160 ms and only then stops taking clicks.
+   */
+  function hidePanel() {
+    if (hideTimer) {
+      clearTimeout(hideTimer)
+      hideTimer = null
+    }
+    if (panel.hidden) {
+      leaving = false
+      return
+    }
+    if (reducedMotion()) {
+      leaving = false
+      panel.hidden = true
+      return
+    }
+    leaving = true
+    panel.classList.add('is-leaving')
+    hideTimer = setTimeout(() => {
+      hideTimer = null
+      leaving = false
+      panel.classList.remove('is-leaving')
+      panel.hidden = true
+    }, HIDE_MS)
+  }
 
   async function refresh() {
     if (closed) return
@@ -170,8 +224,23 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
       if (active) dock.classList.add('is-live')
       else dock.classList.remove('is-live')
       const open = jobs.length > 0 && !collapsed
-      panel.hidden = !open
-      dock.hidden = open || jobs.length === 0
+      if (open) {
+        showPanel()
+        dock.hidden = true
+      } else if (jobs.length === 0) {
+        // Nothing to show: no animation to run, and no pill either.
+        if (hideTimer) {
+          clearTimeout(hideTimer)
+          hideTimer = null
+        }
+        leaving = false
+        panel.classList.remove('is-leaving')
+        panel.hidden = true
+        dock.hidden = true
+      } else {
+        if (!leaving) hidePanel()
+        dock.hidden = false
+      }
       renderRows(jobs)
     } catch {
       // The panel is a convenience; a failed poll must not spam the page.
@@ -180,8 +249,8 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
 
   close.addEventListener('click', () => {
     collapsed = true
-    panel.hidden = true
     dock.hidden = list.children.length === 0
+    hidePanel()
   })
 
   dock.addEventListener('click', () => {
@@ -195,6 +264,7 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
   return () => {
     closed = true
     if (timer) clearInterval(timer)
+    if (hideTimer) clearTimeout(hideTimer)
     panel.remove()
   }
 }

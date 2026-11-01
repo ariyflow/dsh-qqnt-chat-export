@@ -17,6 +17,7 @@ import {
   indexTool,
   listChatsTool,
   recallTool,
+  resolveGroup,
   searchTool,
   storageTool,
   statsTool,
@@ -965,4 +966,25 @@ test('storage stands aside while the page extracts the key', async () => {
   } finally {
     await rm(work, { recursive: true, force: true })
   }
+})
+
+test('export_group resolves a name, and refuses a contradictory number', () => {
+  const chats = [
+    { kind: 'group', id: '111', name: '课程群', messages: 42, lastTime: '2026-10-30 12:00' },
+    { kind: 'group', id: '222', name: '项目群', messages: 7, lastTime: '2026-10-28 18:30' },
+    { kind: 'group', id: '333', name: '课程群', messages: 3, lastTime: '2026-01-01 00:00' },
+  ]
+  assert.deepEqual(resolveGroup(chats, { chat: '项目群' }), { group: '222' })
+  // A number alone is passed through: the exporter reports "群 X 没有消息" and
+  // the nearest group numbers, which is cheaper than a listing per call.
+  assert.deepEqual(resolveGroup(chats, { group: '999' }), { group: '999' })
+  assert.deepEqual(resolveGroup(chats, { chat: '课程群', group: '111' }), { group: '111' })
+
+  // Two groups with the same name: no file may be written, candidates instead.
+  assert.match(resolveGroup(chats, { chat: '课程群' }).error, /匹配到 2 个会话，没有导出/)
+  assert.match(resolveGroup(chats, { chat: '课程群' }).error, /group 111 课程群/)
+  assert.match(resolveGroup(chats, { chat: '查无此群' }).error, /没有找到匹配「查无此群」/)
+  assert.match(resolveGroup(chats, { chat: '项目群', group: '999' }).error,
+    /「项目群」对应的是群 222，但 group 参数给的是 999/)
+  assert.match(resolveGroup(chats, {}).error, /给一个 group/)
 })

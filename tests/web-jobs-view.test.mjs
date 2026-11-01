@@ -83,7 +83,14 @@ test('收起 keeps the panel hidden while the same jobs are still listed', async
     assert.equal(panel.hidden, false)
     findByClass(root, 'jobs-head').children
       .find((child) => child.tagName === 'button').dispatch('click')
+    // 收起 fades the panel out instead of dropping it in the same frame; the
+    // pill is already up so the action stays reversible.
+    assert.match(panel.className, /is-leaving/)
+    assert.equal(panel.hidden, false)
+    assert.equal(findByClass(root, 'jobs-dock').hidden, false)
+    await new Promise((resolve) => setTimeout(resolve, 220))
     assert.equal(panel.hidden, true)
+    assert.doesNotMatch(panel.className, /is-leaving/)
     await tick()
     await tick()
     assert.equal(panel.hidden, true, 'the next poll must not reopen a collapsed panel')

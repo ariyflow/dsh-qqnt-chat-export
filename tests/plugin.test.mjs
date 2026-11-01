@@ -693,6 +693,18 @@ test('session aliases, pins and hidden chats merge in the web layer', async () =
     payload = await (await fetch(`${base}/api/sessions`)).json()
     assert.deepEqual(payload.sessions.map((row) => row.id), ['g2', 'g1'])
     assert.equal(payload.sessions[0].name, '二号群')
+
+    // The query routes call these chatKind / chatId; the state route accepts
+    // that spelling too, so a script needs one name for one conversation.
+    const aliased = await fetch(`${base}/api/chats/state`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-qqnt-action': '1' },
+      body: JSON.stringify({ chatKind: 'private', chatId: 'p1', patch: { alias: '甲' } }),
+    })
+    assert.equal(aliased.status, 200)
+    payload = await (await fetch(`${base}/api/sessions?hidden=1`)).json()
+    const renamed = payload.sessions.find((row) => row.id === 'p1')
+    assert.equal(renamed.name, '甲')
   } finally {
     await server.close()
     await rm(dir, { recursive: true, force: true })

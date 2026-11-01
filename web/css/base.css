@@ -439,11 +439,27 @@ h1, h2, h3 { line-height: 1.35; }
   padding: 14px 20px 0;
 }
 
-.chat-main > .chat-title {
-  margin: 0 0 10px;
+.chat-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  margin-bottom: 10px;
+}
+
+/* A long chat name must not push the back button off a phone screen. */
+.chat-head .chat-title {
+  margin: 0;
   font-size: 15px;
   font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+
+/* Shown only in the single-pane layout, where it is the way back. */
+.chat-back { display: none; flex: none; font-size: 13px; }
 
 .chat-title { margin: 0 0 6px; font-size: 20px; font-weight: 650; letter-spacing: -0.01em; }
 
@@ -663,6 +679,9 @@ h1, h2, h3 { line-height: 1.35; }
 .nav-group:not(.nav-views) .ghost.is-active { background: var(--accent-soft); color: var(--accent); }
 
 /* Floating task panel: one row per job, only rendered when work exists. */
+/* The pill is up while the panel plays this; a hard `hidden` looked abrupt. */
+.jobs-panel.is-leaving { animation: fade-out 160ms var(--ease-out) both; pointer-events: none; }
+
 .jobs-panel {
   position: fixed;
   right: 18px;
@@ -1413,9 +1432,14 @@ h1, h2, h3 { line-height: 1.35; }
 
 @media (max-width: 720px) {
   :root { --pad: 14px; }
+  /* One pane at a time: the list, or the reader with a way back. Stacking two
+     42vh halves left neither of them readable on a phone. */
   .app-shell { grid-template-columns: minmax(0, 1fr); }
-  .app-sidebar { max-height: 42vh; border-right: 0; border-bottom: 1px solid var(--border); }
-  .chat-main { min-height: 48vh; padding: 12px 14px 0; }
+  .app-shell:not(.is-reading) .chat-main { display: none; }
+  .app-shell.is-reading .app-sidebar { display: none; }
+  .app-sidebar { max-height: none; border-right: 0; }
+  .chat-main { min-height: 0; padding: 12px 14px 0; }
+  .chat-back { display: inline-flex; }
   .export-fields { grid-template-columns: minmax(0, 1fr); }
   .export-tasks { grid-template-columns: minmax(0, 1fr); }
   .components-list, .models-list { grid-template-columns: minmax(0, 1fr); }

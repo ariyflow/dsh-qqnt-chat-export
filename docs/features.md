@@ -11,7 +11,7 @@
 | `qqnt_index` | 索引的查看与建立：`action: "status"` 报文件、条数、构建进度；`action: "build"` 起一次构建并最多等 `waitSeconds`，超时返回进度而不是杀进程 |
 | `qqnt_extract_key` | 从**已登录**的 QQ 进程内存里取出数据库密钥并缓存 |
 | `qqnt_list_groups` | 群列表：消息数、时间范围、群名 |
-| `qqnt_export_group` | 导出单个群为 txt / sqlite / csv |
+| `qqnt_export_group` | 导出单个群为 txt / sqlite / csv。群给 `group`（群号）或 `chat`（群名，重名时不导出、返回候选；名字与群号同时给且对不上时拒绝）。它直接读加密数据库，索引没建也能用 |
 | `qqnt_list_chats` | 索引里的**全部会话**（群聊 + 私聊）：类型、id、名称、消息数、最后时间；`query` 按名字/别名/群号/QQ 过滤，完全一致排在包含之前 |
 | `qqnt_search` | 跨会话关键词搜索（可限定会话、发送者、日期；`senderRegex` 可把发送者当正则），返回会话/发送者/时间 |
 | `qqnt_stats` | 聚合统计（在 SQL 里算，不翻页）：总量、会话数、发言人数、月度、Top 发言人 / 会话、24 小时分布；过滤条件与 `qqnt_search` 同名 |

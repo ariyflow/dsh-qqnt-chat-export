@@ -1138,10 +1138,12 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
       }
       readJsonBody(req)
         .then((body) => {
-          const kind = body.kind
-          const id = String(body.id ?? '').trim()
+          // The query routes spell these `chatKind` / `chatId`; accept both
+          // here so a script does not need two names for one conversation.
+          const kind = body.chatKind ?? body.kind
+          const id = String(body.chatId ?? body.id ?? '').trim()
           if (!['group', 'private'].includes(kind) || id === '') {
-            throw Object.assign(new Error('kind 与 id 都是必需的'), { status: 400 })
+            throw Object.assign(new Error('kind 与 id 都是必需的（也接受 chatKind / chatId）'), { status: 400 })
           }
           const patch = body.patch && typeof body.patch === 'object' ? body.patch : {}
           const allowed = {}

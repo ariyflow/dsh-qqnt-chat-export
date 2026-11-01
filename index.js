@@ -433,15 +433,19 @@ function unknownPreset(wanted, workDir) {
 function exportTool(settings) {
   return {
     name: 'qqnt_export_group',
-    description: 'Export one QQ group\'s message history to an output directory as plain text, SQLite, and CSV, and return the exporter\'s report for that run.',
+    description: 'Export one QQ group\'s message history to an output directory as plain text, SQLite, and CSV, and return the exporter\'s report for that run. Name the group by `group` (its number) or by `chat` (the name the user said); a name matching several groups exports nothing and returns the candidates. This reads the message database directly, so it works before the sidecar index exists.',
     parameters: {
       type: 'object',
       additionalProperties: false,
-      required: ['group'],
       properties: {
         group: {
           type: 'string',
-          description: 'QQ group number, digits only.',
+          description: 'QQ group number, digits only. Optional when `chat` is given.',
+        },
+        chat: {
+          type: 'string',
+          minLength: 1,
+          description: 'The group as the user named it: a group name, a name with 群 around it, or the number as a string. Resolved against the account\'s group list before anything is written.',
         },
         outDir: {
           type: 'string',
@@ -465,7 +469,28 @@ function exportTool(settings) {
     timeoutMs: EXPORT_TIMEOUT_MS,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      const group = String(args.group).trim()
+      let group = String(args.group ?? '').trim()
+      const phrase = typeof args.chat === 'string' ? args.chat.trim() : ''
+      if (group === '' && phrase === '') {
+        return {
+          ok: false, exitCode: 1, outDir: '',
+          output: '给一个 group（群号）或 chat（群名）：不知道群号时先用 qqnt_list_groups 或 qqnt_list_chats 的 query 找一下。',
+        }
+      }
+      if (phrase !== '') {
+        // One `groups` call both resolves the name and shows the candidates;
+        // the exporter itself would only say "群 X 没有消息" for a wrong number.
+        const listing = await runCli(settings, [...globalArgs(settings, args.account), 'groups'], exec)
+        if (listing.code !== 0) {
+          return { ok: false, exitCode: listing.code, outDir: '', output: listing.output }
+        }
+        const chats = parseGroupTable(listing.output).map((row) => ({
+          kind: 'group', id: row.id, name: row.name, messages: row.messages, lastTime: row.last,
+        }))
+        const decided = resolveGroup(chats, { chat: phrase, group })
+        if (decided.error) return { ok: false, exitCode: 1, outDir: '', output: decided.error }
+        group = decided.group
+      }
       const outDir = typeof args.outDir === 'string' && args.outDir.trim() !== ''
         ? path.resolve(args.outDir.trim())
         : path.join(defaultDownloadDir(), `QQ导出_${group}`)
@@ -483,6 +508,40 @@ function exportTool(settings) {
       return { ok: code === 0, exitCode: code, output, outDir }
     },
   }
+}
+
+/**
+ * Which group a `chat` / `group` pair means, or the sentence that refuses it.
+ *
+ * Pure on purpose: the group table comes from the encrypted database, so the
+ * only way to test this without a QQ install is to hand it the rows.
+ */
+export function resolveGroup(chats, { chat, group }) {
+  const phrase = typeof chat === 'string' ? chat.trim() : ''
+  const given = String(group ?? '').trim()
+  if (phrase === '') {
+    return given === '' ? { error: '给一个 group（群号）或 chat（群名）。' } : { group: given }
+  }
+  const picked = pickChat(chats, phrase)
+  if (picked.tie) {
+    // A number alongside the name settles the ambiguity the name could not.
+    const numbered = given === ''
+      ? null
+      : picked.ranked.filter((item) => item.score === picked.ranked[0].score)
+        .map((item) => item.chat)
+        .find((chat) => String(chat.id) === given)
+    if (numbered) return { group: String(numbered.id) }
+    return { error: ambiguousChats(phrase, picked.ranked) }
+  }
+  if (picked.chat === null) return { error: unknownChat(phrase, chats) }
+  // Both given and disagreeing is a contradiction, not a preference: honouring
+  // either would export a group the user did not name.
+  if (given !== '' && given !== String(picked.chat.id)) {
+    return {
+      error: `「${phrase}」对应的是群 ${picked.chat.id}，但 group 参数给的是 ${given}：只留一个再调。`,
+    }
+  }
+  return { group: String(picked.chat.id) }
 }
 
 /** Lists every chat in the sidecar index, groups and private chats alike. */
