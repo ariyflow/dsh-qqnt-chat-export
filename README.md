@@ -1,6 +1,6 @@
 # dsh-qqnt-chat-export
 
-把 **Windows / Linux 上的 NTQQ（QQ NT / 9.9.x）聊天记录**读出来、搜出来、导出来 —— 一个 DeepSeek Harness 插件包：十个模型工具 + 一个本地网页界面，支持群聊和私聊，可导出 6 种格式，还能识别截图里的文字、转写语音，并按问题检索聊天记录、给出可点回的引用。
+把 **Windows / Linux 上的 NTQQ（QQ NT / 9.9.x）聊天记录**读出来、搜出来、导出来 —— 一个 DeepSeek Harness 插件包：十三个模型工具 + 一个本地网页界面，支持群聊和私聊，可导出 6 种格式，还能识别截图里的文字、转写语音，并按问题检索聊天记录、给出可点回的引用。
 
 Read, search, and export NTQQ chat history from a DeepSeek Harness session or from a local web page, on Windows or Linux.
 
@@ -10,7 +10,7 @@ Read, search, and export NTQQ chat history from a DeepSeek Harness session or fr
 
 ## 功能
 
-- **十个模型工具**：体检、提取密钥、群列表、会话列表、跨会话搜索、单群 / 单会话 / 批量导出，以及问答检索（`qqnt_ask`）与主题回看（`qqnt_recall`）；
+- **十三个模型工具**：体检与排障（`qqnt_doctor`）、建索引（`qqnt_index`）、统计（`qqnt_stats`）、提取密钥、群列表、会话列表、跨会话搜索、单群 / 单会话 / 批量导出，以及问答检索（`qqnt_ask`）与主题回看（`qqnt_recall`）；
 - **本地网页界面**（`http://127.0.0.1:46728`）：全部会话列表、组合查询与高亮、图片预览 / 相册、统计、批量导出、导出预设；
 - **索引与搜索**：首次同步建旁路明文索引 `index.sqlite`，之后查询与导出只读它；关键词走 FTS5 trigram，中文子串也是索引查找；支持多账号索引缓存；
 - **看得懂内容**：截图里的文字可以 OCR 成可搜索文本，语音消息可以转写成文字，两者都进入搜索与问答的文本池；模型文件按需下载、在「模型与组件」里逐个删除，OCR/转写/向量需要的 Python 组件也在那里一键安装；
@@ -69,15 +69,18 @@ dsh plugin --profile web remove dsh-qqnt-chat-export
 | 工具 | 作用 |
 |---|---|
 | `qqnt_status` | 体检：QQ 进程、各账号数据库体积、密钥缓存、Python / SQLCipher / 内存读取权限 |
+| `qqnt_doctor` | 一条命令说清「为什么用不了」：版本、解释器与依赖、密钥、ptrace、索引、派生库 + 下一步该做什么；`deep: true` 再查组件与模型 |
+| `qqnt_index` | 查索引状态或直接建立/刷新索引（`action: "build"`）。构建在后台跑，超时只回进度、不杀进程 |
 | `qqnt_extract_key` | 从**已登录**的 QQ 进程内存里取出数据库密钥并缓存 |
 | `qqnt_list_groups` | 群列表：消息数、时间范围、群名 |
 | `qqnt_export_group` | 导出单个群为 txt / sqlite / csv |
 | `qqnt_list_chats` | 索引里的**全部会话**（群聊 + 私聊）：类型、id、名称、消息数、最后时间；`query` 可按名字/别名/群号/QQ 过滤 |
 | `qqnt_search` | 跨会话关键词搜索（可限定会话、发送者、日期；`senderRegex` 把发送者当正则） |
+| `qqnt_stats` | 聚合统计：总量、会话数、发言人数、月度、Top 发言人 / 会话、24 小时分布；与搜索同名的过滤条件 |
 | `qqnt_export_chat` | 导出任意会话为 txt / csv / json / md / html / sqlite；`chat` 可直接给名字（歧义时拒绝并返回候选），`dryRun` 先预演，`keyword`/`sender`/`since`/`until` 只导一部分 |
-| `qqnt_export_batch` | 一次导出最多 200 个会话到一个 ZIP（每会话一份文件 + `manifest.json`）；`chatNames` 可直接给名字列表 |
+| `qqnt_export_batch` | 一次导出最多 200 个会话到一个 ZIP（每会话一份文件 + `manifest.json`）；`chatNames` 可直接给名字列表，`keyword`/`sender`/`since`/`until` 对每个会话同时生效 |
 
-后三个工具读的是网页建立的旁路索引，因此能覆盖私聊和跨会话搜索；没有索引时会提示先去网页点「从 QQ 同步」。
+`qqnt_list_chats` / `qqnt_stats` / `qqnt_search` / 两个导出工具读的是旁路索引，因此能覆盖私聊和跨会话搜索；索引不在时不用去网页点「从 QQ 同步」，直接调 `qqnt_index`（`action: "build"`）就行，它会把构建放在后台并把进度报回来。两份导出预设由工具和网页共用（`workDir/presets.json`），预设名字写错时会列出可用的那几个。
 
 ## 要求
 

@@ -14,7 +14,7 @@
  * that UI builds, so private chats and cross-chat keyword search work too.
  */
 import { spawn } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -33,7 +33,16 @@ import {
 import { buildRunning, cleanupStorage, migrateWorkDir, removeWorkDirEntries, storageSnapshot } from './storage.js'
 import { applyPreset, readPresets } from './presets.js'
 import { makeAsrRunner, makeChunksRunner, makeComponentsRunner, makeExportRunner, makeOcrRunner } from './runners.js'
-import { BUNDLE_VERSION, mergeChatState, panelInfo, pruneAccountIndexes, spawnAutosync, startWebServer } from './web.js'
+import {
+  BUNDLE_VERSION,
+  mergeChatState,
+  panelInfo,
+  pruneAccountIndexes,
+  readBuildState,
+  spawnAutosync,
+  spawnBuild,
+  startWebServer,
+} from './web.js'
 import { describeChat, pickChat, rankChats } from './chatlookup.js'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -406,6 +415,20 @@ function renderStatus(_args, value) {
   return [{ type: 'text', text: lines.join('\n\n') }]
 }
 
+/**
+ * The "that preset does not exist" message, naming the ones that do.
+ *
+ * The page and the tools share `presets.json`; a model that guessed a name had
+ * no way to learn the real ones short of asking the user to read the page.
+ */
+function unknownPreset(wanted, workDir) {
+  const names = readPresets(workDir).map((row) => row.name)
+  if (names.length === 0) {
+    return `没有名为「${wanted}」的导出预设：还没有保存过预设。先在网页「设置 → 导出预设」保存一个，或者直接给 format / redact / media 这些参数。`
+  }
+  return `没有名为「${wanted}」的导出预设：可用的是${names.map((name) => `「${name}」`).join('、')}。`
+}
+
 /** One executable that takes a single group number and one output directory. */
 function exportTool(settings) {
   return {
@@ -776,10 +799,7 @@ export function exportChatTool(settings) {
         const wanted = args.preset.trim()
         const preset = readPresets(settings.workDir).find((row) => row.name === wanted)
         if (!preset) {
-          return {
-            ok: false, exitCode: 1, outPath: '',
-            output: `没有名为「${wanted}」的导出预设：先在网页设置页的「导出预设」里保存一个`,
-          }
+          return { ok: false, exitCode: 1, outPath: '', output: unknownPreset(wanted, settings.workDir) }
         }
         args = applyPreset(args, preset)
       }
@@ -929,7 +949,7 @@ export function exportBatchTool(settings) {
   const CHAT_LIMIT = 200
   return {
     name: 'qqnt_export_batch',
-    description: 'Export up to 200 chats from the local QQ index into one ZIP that also contains a manifest.json (one file per chat). List the chats as `chatNames` (names, aliases, group numbers or QQs, as the user said them) or as `chats` with kind + id; a name matching several chats refuses the whole call instead of dropping one. Supports formats, redaction, media, day-splitting, password ZIPs and a saved export preset. Requires the sidecar index.',
+    description: 'Export up to 200 chats from the local QQ index into one ZIP that also contains a manifest.json (one file per chat). List the chats as `chatNames` (names, aliases, group numbers or QQs, as the user said them) or as `chats` with kind + id; a name matching several chats refuses the whole call instead of dropping one. Supports formats, content filters (keyword/sender/since/until, applied to every chat), redaction, media, day-splitting, password ZIPs and a saved export preset. Requires the sidecar index.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -957,6 +977,10 @@ export function exportBatchTool(settings) {
             },
           },
         },
+        keyword: { type: 'string', description: 'Only messages containing this text, in every chat of the batch.' },
+        sender: { type: 'string', description: 'Only messages from this sender: a name fragment or an exact QQ number.' },
+        since: { type: 'string', description: 'Only messages from this date on (`YYYY-MM-DD`) or Unix seconds.' },
+        until: { type: 'string', description: 'Only messages up to this date (`YYYY-MM-DD`) or Unix seconds.' },
         format: { type: 'string', enum: ['txt', 'csv', 'json', 'md', 'html', 'sqlite'], description: 'File format inside the ZIP. Defaults to txt.' },
         outDir: { type: 'string', description: 'Absolute output directory. Defaults to QQ导出_<N>个会话 inside the user\'s downloads folder.' },
         zipName: { type: 'string', description: 'Base name of the ZIP (without .zip). Defaults to QQ导出_<N>个会话.' },
@@ -991,7 +1015,7 @@ export function exportBatchTool(settings) {
         const wanted = args.preset.trim()
         const preset = readPresets(settings.workDir).find((row) => row.name === wanted)
         if (!preset) {
-          return { ...empty, output: `没有名为「${wanted}」的导出预设：先在网页设置页的「导出预设」里保存一个` }
+          return { ...empty, output: unknownPreset(wanted, settings.workDir) }
         }
         args = applyPreset(args, preset)
       }
@@ -1054,6 +1078,12 @@ export function exportBatchTool(settings) {
       const staging = path.join(settings.workDir, 'exports',
         `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.zip`)
       const payloadArgs = { format, chats, out: staging, label }
+      // Content filters apply per chat inside the bundle, so the same
+      // keyword/sender/date narrowing the single-chat export has works here.
+      for (const key of ['keyword', 'sender', 'since', 'until']) {
+        const value = typeof args[key] === 'string' ? args[key].trim() : ''
+        if (value !== '') payloadArgs[key] = value
+      }
       if (redact) payloadArgs.redact = redact
       if (media) payloadArgs.media = true
       if (split) payloadArgs.split = 'day'
@@ -1085,10 +1115,552 @@ export function exportBatchTool(settings) {
         }
       }
       const rows = Number(payload.rows) || 0
+      const skipped = Number(payload.skipped) || 0
+      const lines = [`已导出 ${chats.length} 个会话 / ${rows} 条到 ${target}`]
+      if (skipped > 0) {
+        lines.push(`${skipped} 个会话没有匹配的消息（筛选条件太窄，或会话本身是空的）：ZIP 里的 manifest.json 的 skipped 写着是哪几个。`)
+      }
       return {
         ok: true, exitCode: 0, outPath: target, chats: chats.length, rows,
-        output: `已导出 ${chats.length} 个会话 / ${rows} 条到 ${target}`,
+        output: lines.join('\n'),
       }
+    },
+  }
+}
+
+// ── Diagnostics and aggregates ───────────────────────────────────────────
+// The three tools below answer "can I read anything yet", "why not" and "how
+// much is there" without the user opening the web UI. They run the same
+// sidecar the page runs instead of looping back through HTTP, so they keep
+// working when the listener is off or another local app holds its port.
+
+/** `1204` → `1,204`. Every count in tool output is read by a person. */
+function withCommas(value) {
+  const number = Math.trunc(Number(value) || 0)
+  const digits = String(Math.abs(number)).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  return number < 0 ? `-${digits}` : digits
+}
+
+/** Byte counts for one-line summaries: `0 B`, `52.3 KB`, `1.1 GB`. */
+function sizeText(bytes) {
+  const value = Math.max(0, Number(bytes) || 0)
+  if (value < 1024) return `${value} B`
+  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`
+  if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MB`
+  return `${(value / 1024 ** 3).toFixed(1)} GB`
+}
+
+/** `2026-11-01 21:18` from Unix seconds; `''` for an unset stamp. */
+function clockText(seconds) {
+  const value = Math.trunc(Number(seconds) || 0)
+  if (value <= 0) return ''
+  const when = new Date(value * 1000)
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}`
+    + ` ${pad(when.getHours())}:${pad(when.getMinutes())}`
+}
+
+/** How stale a stamp is, in words: `刚才`, `12 分钟前`, `3 天前`, then a date. */
+function agoText(seconds) {
+  const value = Math.trunc(Number(seconds) || 0)
+  if (value <= 0) return ''
+  const delta = Date.now() - value * 1000
+  if (delta < 90_000) return '刚才'
+  if (delta < 3_600_000) return `${Math.round(delta / 60_000)} 分钟前`
+  if (delta < 86_400_000) return `${Math.round(delta / 3_600_000)} 小时前`
+  if (delta < 7 * 86_400_000) return `${Math.round(delta / 86_400_000)} 天前`
+  return clockText(value)
+}
+
+/** Global options the query CLI requires before its subcommand. */
+function queryGlobalArgs(settings, account) {
+  const argv = []
+  if (settings.tencentRoot) argv.push('--root', settings.tencentRoot)
+  if (account) argv.push('--account', String(account))
+  return argv
+}
+
+/** One `status` call against the sidecar; the index file and its counts. */
+async function queryStatus(settings, exec, account) {
+  const { code, payload } = await runQueryJson(
+    settings, [...queryGlobalArgs(settings, account), 'status'], exec)
+  return { code, payload }
+}
+
+/** `解析消息 42% · 12,345/29,000`; `''` while no build is running. */
+function buildProgressText(build) {
+  const state = build && typeof build === 'object' ? build : {}
+  if (state.state !== 'running') return ''
+  const processed = Number(state.processed) || 0
+  const total = Number(state.total) || 0
+  const step = typeof state.step === 'string' && state.step !== '' ? state.step : '处理中'
+  if (total <= 0) return step
+  const percent = Math.min(100, Math.round((processed / total) * 100))
+  return `${step} ${percent}% · ${withCommas(processed)}/${withCommas(total)}`
+}
+
+/** The one or two index lines shared by `qqnt_index` and `qqnt_doctor`. */
+function indexLines(settings, status, build, running) {
+  const index = (status && status.index) || {}
+  const file = index.path || indexPath(settings.workDir)
+  const lines = []
+  if (index.exists !== true) {
+    lines.push(`索引：还没有建立（${file}）`)
+  } else {
+    const built = Number(index.builtAt) || 0
+    const mode = index.search === 'like' ? 'LIKE' : 'FTS'
+    lines.push(`索引：${withCommas(index.messages)} 条消息 · ${withCommas(index.chats)} 个会话 · ${mode}`
+      + (built > 0 ? ` · 构建于 ${clockText(built)}（${agoText(built)}）` : ''))
+    lines.push(`文件：${file} · ${sizeText(index.size)}`)
+  }
+  if (running) lines.push(`进度：${buildProgressText(build) || '进行中'}`)
+  else if (build && build.state === 'error' && build.error) lines.push(`上次构建失败：${build.error}`)
+  return lines
+}
+
+/**
+ * Build or inspect the sidecar index.
+ *
+ * Every message-reading tool needs `index.sqlite`, and until now only the web
+ * page could create it — the one blocker an Agent cannot talk its way around.
+ * `status` is read-only. `build` spawns the same detached helper the page
+ * spawns, waits at most `waitSeconds`, and never kills the child on timeout: a
+ * large account takes minutes, and restarting it from every poll would make a
+ * build that never finishes.
+ */
+export function indexTool(settings, busy) {
+  const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms) })
+  return {
+    name: 'qqnt_index',
+    description: 'Inspect or build the local sidecar index that every message-reading qqnt_ tool needs. action="status" (the default) reports the index file, its message and chat counts, and whether a build is running; action="build" starts a build and waits up to waitSeconds for it to finish. A build copies and decrypts the QQ database, so a large account takes one to three minutes: when the call returns first, the build keeps running and a second status call reports the result. Needs a cached database key (qqnt_extract_key) unless one is already there.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['status', 'build'], description: 'Defaults to status.' },
+        refresh: {
+          type: 'boolean',
+          description: 'build only: copy the encrypted database again before parsing (after a QQ upgrade or an account switch).',
+        },
+        waitSeconds: {
+          type: 'integer',
+          minimum: 0,
+          maximum: 600,
+          description: 'build only: how long to wait before returning. Defaults to 120; 0 starts the build and returns immediately.',
+        },
+        account: {
+          type: 'string',
+          description: 'QQ number to build for when the client holds several accounts. Defaults to the configured account.',
+        },
+      },
+    },
+    output: {
+      schema: outputSchema({
+        running: { type: 'boolean' },
+        messages: { type: 'integer' },
+        chats: { type: 'integer' },
+      }),
+      render: renderReport,
+    },
+    // A wait of up to 600 s plus a status call at each end.
+    timeoutMs: 12 * 60_000,
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const base = { ok: true, exitCode: 0, running: false, messages: 0, chats: 0 }
+      const workDir = settings.workDir
+      const asked = typeof args.account === 'string' ? args.account.trim() : ''
+      const account = asked !== '' ? asked : (settings.account || '')
+      let status = null
+      try {
+        status = (await queryStatus(settings, exec, asked)).payload
+      } catch (error) {
+        // A helper that cannot even answer `status` would fail the build the
+        // same way, so this stops before spawning anything.
+        return {
+          ...base, ok: false, exitCode: 1,
+          output: `无法读取索引状态：${error instanceof Error ? error.message : String(error)}\n`
+            + '先用 qqnt_doctor 看环境（Python 解释器、sqlcipher3、密钥），修好再建索引。',
+        }
+      }
+      const build = readBuildState(workDir)
+      const running = buildRunning(workDir)
+      if (args.action !== 'build') {
+        const lines = indexLines(settings, status, build, running)
+        if (running) {
+          lines.push('再调一次 qqnt_index（action: "status"）看结果；构建进程会自己跑完。')
+        } else if (!existsSync(indexPath(settings))) {
+          lines.push('下一步：调 qqnt_index（action: "build"）建立索引。')
+          if (!existsSync(path.join(workDir, 'key.txt'))) {
+            lines.push('还没有数据库密钥：先调 qqnt_extract_key（QQ 要在登录状态，大约一到三分钟）。')
+          }
+        } else {
+          lines.push('下一步：qqnt_list_chats 看会话，或 qqnt_stats 看总量。')
+        }
+        return {
+          ...base,
+          running,
+          messages: Number(status?.index?.messages) || 0,
+          chats: Number(status?.index?.chats) || 0,
+          output: lines.join('\n'),
+        }
+      }
+      if (busy?.()) {
+        return {
+          ...base, ok: false, exitCode: 1,
+          output: '网页正在提取密钥或配置环境，等它结束再建立索引；进度在网页「设置」里。',
+        }
+      }
+      if (running) {
+        return {
+          ...base, running: true,
+          output: [
+            '已有一次索引构建在进行，没有重复启动。',
+            `进度：${buildProgressText(build) || '进行中'}`,
+            '再调一次 qqnt_index（action: "status"）看结果。',
+          ].join('\n'),
+        }
+      }
+      const argv = ['-X', 'utf8', QUERY_CLI, '--work', workDir]
+      if (settings.tencentRoot) argv.push('--root', settings.tencentRoot)
+      if (account) argv.push('--account', String(account))
+      argv.push('build')
+      if (args.refresh === true) argv.push('--refresh')
+      argv.push('--keep', String(settings.keepAccountIndexes ?? 2))
+      argv.push('--search', settings.searchIndex === 'like' ? 'like' : 'fts')
+      const spawnedAt = Date.now()
+      const started = await spawnBuild(settings, argv)
+      if (!started.ok) {
+        const missing = started.error?.code === 'ENOENT'
+        return {
+          ...base, ok: false, exitCode: 1,
+          output: missing
+            ? `无法运行 Python 解释器「${settings.python}」：找不到可执行文件。用 qqnt_doctor 看应该填哪个路径。`
+            : `无法启动索引构建：${started.error?.message || '未知错误'}`,
+        }
+      }
+      const wait = Math.min(Math.max(Number(args.waitSeconds ?? 120) || 0, 0), 600)
+      if (wait === 0) {
+        return {
+          ...base, running: true,
+          output: [
+            '索引构建已启动（waitSeconds=0，没有等待）。',
+            '再调一次 qqnt_index（action: "status"）看结果；构建进程会自己跑完。',
+          ].join('\n'),
+        }
+      }
+      // The previous run's status file is still on disk, so a state only counts
+      // when it was written by the child this call just started.
+      const spawnSecond = Math.floor(spawnedAt / 1000)
+      const fresh = (value) => Number(value?.startedAt) > 0 && Number(value.startedAt) >= spawnSecond - 1
+      const deadline = spawnedAt + wait * 1000
+      let state = readBuildState(workDir)
+      while (Date.now() < deadline) {
+        if (fresh(state) && (state.state === 'done' || state.state === 'error')) break
+        if (!fresh(state) && Date.now() - spawnedAt > 5000 && !buildRunning(workDir)) break
+        await sleep(400)
+        state = readBuildState(workDir)
+      }
+      if (fresh(state) && state.state === 'error') {
+        return {
+          ...base, ok: false, exitCode: 1,
+          output: [
+            `索引构建失败：${state.error || '没有给出原因'}`,
+            '',
+            '按上面的原因处理后再调一次 qqnt_index（action: "build"）；密钥问题用 qqnt_extract_key，环境问题用 qqnt_doctor。',
+          ].join('\n'),
+        }
+      }
+      if (!fresh(state) || state.state === 'running') {
+        return {
+          ...base, running: true,
+          output: [
+            `构建还在进行，没有等它结束（已等 ${Math.round((Date.now() - spawnedAt) / 1000)} 秒）。`,
+            `进度：${buildProgressText(state) || '还没写出进度'}`,
+            '再调一次 qqnt_index（action: "status"）看结果；构建进程会自己跑完。如果一直没进度，用 qqnt_doctor 检查 Python 与密钥。',
+          ].join('\n'),
+        }
+      }
+      const seconds = Math.max(0, (Number(state.finishedAt) || 0) - (Number(state.startedAt) || 0))
+      const mode = state.mode === 'incremental' ? '增量' : '全量'
+      const lines = [`索引构建完成：${mode} · 新增 ${withCommas(state.added)} 条 · 共 ${withCommas(state.total)} 条`
+        + (seconds > 0 ? ` · 用时 ${seconds} 秒` : '')]
+      if (state.fullReasonText) lines.push(`退回全量的原因：${state.fullReasonText}`)
+      if (state.schemaChanged) lines.push('注意：源表结构变了，这次按新结构重建，核对一下统计再导出。')
+      if (state.walPending) lines.push('注意：源库的 WAL 里还有没落盘的内容，最近几分钟的消息可能缺几条。')
+      let after = null
+      try {
+        after = (await queryStatus(settings, exec, asked)).payload
+      } catch {
+        // The build's own numbers are enough when the follow-up read fails.
+      }
+      if (after) lines.push(...indexLines(settings, after, null, false))
+      lines.push('下一步：qqnt_list_chats 看会话，或 qqnt_stats 看总量。')
+      return {
+        ...base,
+        messages: Number(after?.index?.messages) || Number(state.total) || 0,
+        chats: Number(after?.index?.chats) || 0,
+        output: lines.join('\n'),
+      }
+    },
+  }
+}
+
+/**
+ * Aggregates over the index, without paging through messages.
+ *
+ * Counting with `qqnt_search` meant hoping a page size covered the answer; the
+ * helper's `stats` command runs the aggregation in SQL and is what the stats
+ * page already draws.
+ */
+export function statsTool(settings) {
+  return {
+    name: 'qqnt_stats',
+    description: 'Aggregate the local QQ index instead of paging through messages: total messages, chats and senders, monthly totals, the busiest hours, and the top senders and chats. Takes the same filters as qqnt_search (chatKind, chatId, keyword, sender, since, until). Requires the sidecar index.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        chatKind: { type: 'string', enum: ['group', 'private'] },
+        chatId: { type: 'string', description: 'Group number, or the other party\'s uid for a private chat.' },
+        keyword: { type: 'string', description: 'Substring match, Chinese included; the same inline filters qqnt_search accepts.' },
+        sender: { type: 'string', description: 'Sender name fragment or exact QQ number.' },
+        since: { type: 'string', description: 'Start date (`YYYY-MM-DD`) or Unix seconds.' },
+        until: { type: 'string', description: 'End date (`YYYY-MM-DD`) or Unix seconds.' },
+        sources: {
+          type: 'array',
+          items: { type: 'string', enum: ['text', 'ocr', 'asr'] },
+          description: 'Which text the keyword matches: typed text, recognized images, speech transcripts. Defaults to all of them.',
+        },
+        top: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 20,
+          description: 'How many senders and chats to list. Defaults to 6.',
+        },
+      },
+    },
+    output: {
+      schema: outputSchema({
+        total: { type: 'integer' },
+        chats: { type: 'integer' },
+        senders: { type: 'integer' },
+      }),
+      render: renderReport,
+    },
+    async execute(args, exec) {
+      const empty = { ok: false, exitCode: 1, total: 0, chats: 0, senders: 0 }
+      if (!existsSync(indexPath(settings))) return missingIndex(settings, empty)
+      const payloadArgs = {}
+      for (const key of ['chatKind', 'chatId', 'keyword', 'sender', 'since', 'until']) {
+        const value = typeof args[key] === 'string' ? args[key].trim() : ''
+        if (value !== '') payloadArgs[key] = value
+      }
+      if (Array.isArray(args.sources) && args.sources.length > 0) payloadArgs.sources = args.sources
+      const top = Math.min(Math.max(Number(args.top) || 6, 1), 20)
+      let payload
+      try {
+        const answer = await runQueryJson(
+          settings, ['stats', '--json', JSON.stringify(payloadArgs)], exec)
+        if (answer.code !== 0) {
+          return { ...empty, output: answer.payload.error || '统计失败' }
+        }
+        payload = answer.payload
+      } catch (error) {
+        return {
+          ...empty,
+          output: `统计失败：${error instanceof Error ? error.message : String(error)}`,
+        }
+      }
+      const total = Number(payload.total) || 0
+      const chats = Number(payload.chats) || 0
+      const senders = Number(payload.senders) || 0
+      if (total === 0) {
+        return {
+          ok: true, exitCode: 0, total, chats, senders,
+          output: [
+            '没有匹配的消息（0 条）。',
+            '放宽 since/until 或 keyword 再看；如果索引本身是空的，用 qqnt_index 建一次。',
+          ].join('\n'),
+        }
+      }
+      const scope = []
+      if (payloadArgs.chatKind === 'group') scope.push('只看群聊')
+      else if (payloadArgs.chatKind === 'private') scope.push('只看私聊')
+      for (const [key, label] of [['keyword', '关键词'], ['sender', '发送者'], ['since', '起'], ['until', '止']]) {
+        if (payloadArgs[key]) scope.push(`${label}「${payloadArgs[key]}」`)
+      }
+      const first = String(payload.firstTime || '').slice(0, 10)
+      const last = String(payload.lastTime || '').slice(0, 10)
+      const range = first !== '' && last !== '' ? ` · ${first} → ${last}` : ''
+      const lines = [`范围：${scope.length > 0 ? scope.join(' · ') : '整个索引'}${range}`]
+      lines.push(`合计：${withCommas(total)} 条 · ${withCommas(chats)} 个会话 · ${withCommas(senders)} 位发言人`)
+      const monthly = Array.isArray(payload.monthly) ? payload.monthly : []
+      if (monthly.length > 0) {
+        // Empty months are absent from the payload; say so instead of printing
+        // a run of zeroes for a chat that sat quiet for half a year.
+        const shown = monthly.length > 12 ? monthly.slice(-12) : monthly
+        const head = monthly.length > 12 ? `最近 12 个月（共 ${monthly.length} 个月）：` : '月度：'
+        lines.push(head + shown.map((row) => `${row.month} ${withCommas(row.count)}`).join(' · '))
+      }
+      // Rows whose sender name never resolved come back as "?", which reads
+      // like a parsing failure; the count is real, the name is not known.
+      const label = (row) => (row.name === '?' ? '未命名' : row.name)
+      const pick = (rows) => rows.slice(0, top)
+        .map((row) => `${label(row)} ${withCommas(row.count)}`).join(' · ')
+      if (Array.isArray(payload.topSenders) && payload.topSenders.length > 0) {
+        lines.push(`Top 发言人：${pick(payload.topSenders)}`)
+      }
+      if (Array.isArray(payload.topChats) && payload.topChats.length > 0) {
+        lines.push(`Top 会话：${pick(payload.topChats)}`)
+      }
+      const hourly = Array.isArray(payload.hourly) ? payload.hourly : []
+      const busy = hourly.map((count, hour) => [hour, Number(count) || 0])
+        .filter(([, count]) => count > 0)
+      if (busy.length > 0) {
+        lines.push(`小时（本地时间）：${busy.map(([hour, count]) => `${hour} 时 ${withCommas(count)}`).join(' · ')}`)
+      }
+      lines.push('', '要具体内容用 qqnt_search；要文件用 qqnt_export_chat（chat 可以直接给名字）。')
+      return { ok: true, exitCode: 0, total, chats, senders, output: lines.join('\n') }
+    },
+  }
+}
+
+/**
+ * One call that answers "why doesn't it work".
+ *
+ * Answers the question with the same probes the settings page uses
+ * (`probePython`, `ptraceInfo`, `status`), then states the next step for each
+ * missing piece. Deliberately not a flag on `qqnt_status`: a model that does
+ * not pass `deep` still gets the short answer, and the first call is the one
+ * that matters.
+ */
+export function doctorTool(settings, currentUrl) {
+  return {
+    name: 'qqnt_doctor',
+    description: 'One-call health check for this plugin: version and platform, the Python interpreter with sqlcipher3 and pyzipper, the cached database key, ptrace permission on Linux, the sidecar index with its counts and any build in progress, the derived store, and the exact next step for whatever is missing. Call it first when a qqnt_ tool fails or before asking the user to open the web UI. deep=true also inspects the optional OCR/speech/embedding components and downloaded model files (about a second slower).',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        deep: {
+          type: 'boolean',
+          description: 'Also report the optional components (OCR, speech, embeddings) and the model files.',
+        },
+      },
+    },
+    output: { schema: outputSchema(), render: renderReport },
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const deep = args.deep === true
+      const workDir = settings.workDir
+      const probePromise = probePython(settings)
+      const statusPromise = queryStatus(settings, exec, '').then(
+        (answer) => answer.payload, () => null)
+      let models = null
+      let components = null
+      if (deep) {
+        const [modelsAnswer, componentsAnswer] = await Promise.all([
+          runQueryJson(settings, ['models', '--json', '{}'], exec).catch(() => null),
+          runQueryJson(settings, ['components', '--json', JSON.stringify({ action: 'status' })], exec)
+            .catch(() => null),
+        ])
+        models = modelsAnswer?.payload ?? null
+        components = componentsAnswer?.payload?.components ?? null
+      }
+      const probe = await probePromise
+      const status = await statusPromise
+      const build = readBuildState(workDir)
+      const running = buildRunning(workDir)
+      const ptrace = ptraceInfo()
+      const storage = storageSnapshot(workDir)
+      let keyStamp = 0
+      try {
+        keyStamp = Math.floor(statSync(path.join(workDir, 'key.txt')).mtimeMs / 1000)
+      } catch {
+        // No cached key.
+      }
+      const lines = []
+      lines.push(`插件 ${BUNDLE_VERSION} · ${process.platform} ${process.arch} · Node ${process.versions.node}`)
+      if (probe.ok) {
+        lines.push(`Python ${probe.python} · ${probe.version || '版本未知'}（${probe.bits || '?'} 位）`
+          + ` · sqlcipher3 ${probe.sqlcipher3 ? '✅' : '❌'} · pyzipper ${probe.pyzipper ? '✅' : '❌'}`)
+      } else {
+        lines.push(`Python ${probe.python} · 无法运行：${probe.error || '未知错误'}`)
+      }
+      const keyText = keyStamp > 0 ? `已缓存（${clockText(keyStamp)}）` : '没有'
+      const scope = ptrace.ptraceScope
+      const ptraceText = scope === null
+        ? '不受限'
+        : (ptrace.restricted ? `受限（scope=${scope}）` : `正常（scope=${scope}）`)
+      lines.push(`密钥 ${keyText} · ptrace ${ptraceText} · 工作目录占 ${sizeText(storage.totalBytes)}`)
+      if (status === null) {
+        lines.push('索引：状态读取失败（Python 或 helper 有问题，先看上面两行）')
+      } else {
+        lines.push(...indexLines(settings, status, build, running))
+        const derived = status.derived || {}
+        lines.push(`派生：分块 ${withCommas(derived.chunks)} · 向量 ${withCommas(derived.vectors)}`
+          + (derived.exists === true ? '' : ' · 还没有派生库'))
+      }
+      if (components !== null) {
+        const names = { ocr: '截图识别', asr: '语音转写', embed: '语义检索' }
+        const parts = Object.keys(components).map((id) => {
+          const item = components[id] || {}
+          return `${item.label || names[id] || id} ${item.installed ? '已装' : '未装'}`
+        })
+        if (parts.length > 0) lines.push(`组件：${parts.join(' · ')}`)
+      }
+      if (models !== null) {
+        const rows = Object.values(models)
+        const installed = rows.filter((row) => row.installed === true).length
+        const bytes = rows.reduce((sum, row) => sum + (Number(row.bytes) || 0), 0)
+        lines.push(`模型：${installed}/${rows.length} 已下载 · 占 ${sizeText(bytes)}`)
+      }
+      const url = typeof currentUrl === 'function' ? currentUrl() : ''
+      lines.push(url === '' ? '网页：没有监听（工具不受影响）' : `网页：${url}（监听中）`)
+
+      const steps = []
+      if (!probe.ok) {
+        steps.push(`Python 跑不起来：在网页「设置」里把「Python 解释器」指向一个 64 位 Python 3，或用一键配置创建虚拟环境。`)
+      } else {
+        if (!probe.sqlcipher3) {
+          steps.push(`sqlcipher3 未安装：${probe.install}（装进插件的虚拟环境，不要装进系统 Python）`)
+        }
+        if (!probe.pyzipper) steps.push(`pyzipper 未安装：密码 ZIP 会失败，${probe.install}`)
+      }
+      if (keyStamp === 0) {
+        // ptrace only matters when a scan is actually needed; a cached key makes
+        // the warning noise, and the header line already reports the scope.
+        if (ptrace.restricted) {
+          steps.push(`ptrace 受限（scope=${scope}）：密钥提取会失败，先执行 sudo sysctl kernel.yama.ptrace_scope=0`)
+        }
+        steps.push('还没有数据库密钥：调 qqnt_extract_key（QQ 要在登录状态，大约一到三分钟）。')
+      }
+      const index = (status && status.index) || {}
+      if (index.exists !== true) {
+        steps.push('还没有索引：调 qqnt_index（action: "build"），之后 list_chats / search / stats / 导出才能用。')
+      } else if (build && build.state === 'error' && build.error) {
+        steps.push(`上次索引构建失败：${build.error}`)
+      } else {
+        const derived = (status && status.derived) || {}
+        const chunks = Number(derived.chunks) || 0
+        const vectors = Number(derived.vectors) || 0
+        if (chunks === 0) {
+          steps.push('索引里还没有分块：qqnt_ask / qqnt_recall 只能做关键词检索，去网页点一次「分块与嵌入」会好很多。')
+        } else if (vectors === 0) {
+          steps.push(`有 ${withCommas(chunks)} 个分块但没有向量：语义检索用不了，qqnt_ask 只能走关键词。`
+            + '在网页「模型」页装好嵌入模型后，再点一次「分块与嵌入」。')
+        }
+      }
+      if (components !== null) {
+        for (const [id, item] of Object.entries(components)) {
+          if (!item || item.installed) continue
+          const label = item.label || id
+          steps.push(`${label}组件未安装：网页「模型」页可以一键安装（${(item.packages || []).join(' ')}）。`)
+        }
+      }
+      if (steps.length === 0) steps.push('没有发现阻塞项：直接用 qqnt_list_chats、qqnt_stats 或 qqnt_search。')
+      lines.push('', '下一步', ...steps.map((step) => `  · ${step}`))
+      return { ok: true, exitCode: 0, output: lines.join('\n') }
     },
   }
 }
@@ -1227,7 +1799,7 @@ function groupsTool(settings) {
 /** Workflow and guardrails the tool definitions do not carry. */
 const GUIDANCE = `## QQ chat export
 
-The qqnt_* tools read the message database of the NTQQ client installed on this machine. Use them in order: qqnt_status, then qqnt_extract_key, then qqnt_list_groups, then qqnt_export_group. Finding the key is slow: before calling qqnt_extract_key, tell the user that searching for the key takes one to three minutes and to please wait patiently (查找密钥耗时较长，请耐心等待); the call returns only when the scan finishes, so do not retry or cancel it while it runs. Key extraction only works while QQ is logged in; when it finds no key, ask the user to confirm QQ is signed in rather than retrying. Confirm the exact group number with the user before exporting, because the common off-by-one-digit guess exports nothing. Never move, edit, or delete files under the QQ data directory, and do not end the QQ process. Never install Python packages into the global/system interpreter; use a virtualenv, and the local web UI offers a one-click venv setup. On Linux the key is read from the qq main process memory: if the kernel's ptrace scope denies it, the tool prints the exact sysctl command to run; report that fix instead of retrying blindly. When the user names a chat instead of giving an id — a group name, a nickname, a group number, or 「和某某的私聊」 — pass that phrase as chat to qqnt_export_chat (or as chatNames to qqnt_export_batch) instead of listing every chat and guessing: the tool resolves names and aliases, and refuses to export when two chats match equally well. Use dryRun: true to preview the resolved chat, the message count and the target directory before a large export, and narrow the content with keyword / sender / since / until instead of filtering the file afterwards.`
+The qqnt_* tools read the message database of the NTQQ client installed on this machine. Use them in order: qqnt_status, then qqnt_extract_key, then qqnt_list_groups, then qqnt_export_group. Finding the key is slow: before calling qqnt_extract_key, tell the user that searching for the key takes one to three minutes and to please wait patiently (查找密钥耗时较长，请耐心等待); the call returns only when the scan finishes, so do not retry or cancel it while it runs. Key extraction only works while QQ is logged in; when it finds no key, ask the user to confirm QQ is signed in rather than retrying. Confirm the exact group number with the user before exporting, because the common off-by-one-digit guess exports nothing. Never move, edit, or delete files under the QQ data directory, and do not end the QQ process. Never install Python packages into the global/system interpreter; use a virtualenv, and the local web UI offers a one-click venv setup. On Linux the key is read from the qq main process memory: if the kernel's ptrace scope denies it, the tool prints the exact sysctl command to run; report that fix instead of retrying blindly. When the user names a chat instead of giving an id — a group name, a nickname, a group number, or 「和某某的私聊」 — pass that phrase as chat to qqnt_export_chat (or as chatNames to qqnt_export_batch) instead of listing every chat and guessing: the tool resolves names and aliases, and refuses to export when two chats match equally well. Use dryRun: true to preview the resolved chat, the message count and the target directory before a large export, and narrow the content with keyword / sender / since / until instead of filtering the file afterwards. When any of these tools fails, call qqnt_doctor first: it names the exact blocker — interpreter, sqlcipher3, cached key, ptrace scope, missing sidecar index — and the next step, before asking the user to open the page. When the sidecar index is missing or stale, call qqnt_index with action build instead of asking the user to click the sync button; a build takes one to three minutes, answers with progress when it is still running, and a second status call reports the result. Use qqnt_stats for counts, monthly totals and who talks most instead of paging through qqnt_search. Either export tool also accepts preset: a saved export preset; an unknown name comes back with the ones that exist.`
 
 /** Appended only while the browsing UI is actually listening. */
 function webGuidance(url) {
@@ -1342,6 +1914,11 @@ export function apply(ctx, config) {
   // The model-facing key tool shares the web job's slot: `busy` is evaluated
   // when the tool runs, long after `keyJob` below is initialised.
   ctx.tools.register(statusTool(settings))
+  // "Why doesn't it work": one call, before the user is asked to open the page.
+  ctx.tools.register(doctorTool(settings, () => webUrl))
+  // The index every message-reading tool needs; the page was the only way to
+  // create it before, which is the one blocker an Agent could not fix itself.
+  ctx.tools.register(indexTool(settings, () => keyJob.state === 'running' || setup.state === 'running'))
   ctx.tools.register(keyTool(settings, () => keyJob.state === 'running'))
   ctx.tools.register(groupsTool(settings))
   ctx.tools.register(exportTool(settings))
@@ -1349,6 +1926,8 @@ export function apply(ctx, config) {
   // the group exporter above cannot reach.
   ctx.tools.register(listChatsTool(settings))
   ctx.tools.register(searchTool(settings))
+  // Counts instead of pages: "how many, who talks most, which month".
+  ctx.tools.register(statsTool(settings))
   ctx.tools.register(exportChatTool(settings))
   // Batch export: one ZIP, one manifest, instead of N tool calls.
   ctx.tools.register(exportBatchTool(settings))

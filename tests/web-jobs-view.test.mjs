@@ -133,3 +133,32 @@ test('an unchanged poll keeps the rows, and only new work animates in', async ()
     restore()
   }
 })
+
+test('a poll that only moves progress keeps the row and its button', async () => {
+  const restore = installDocument()
+  let jobs = [{
+    id: 'j1', kind: 'ocr', summary: '识别图片', state: 'running',
+    progress: 0.2, message: '20/100', canCancel: true, canRetry: false,
+  }]
+  // A fresh object per response, like the JSON the route actually returns.
+  const api = { get: async () => ({ jobs: jobs.map((job) => ({ ...job })) }), post: async () => ({}) }
+  const root = makeElement('aside')
+  const cleanup = mountJobs(root, { api, intervalMs: 20 })
+  try {
+    await tick()
+    const list = findByClass(root, 'jobs-panel').children[1]
+    const row = list.children[0]
+    const cancel = row.children[2].children[0]
+
+    jobs = [{ ...jobs[0], progress: 0.7, message: '70/100' }]
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    // Progress is the one thing that changes twice a second: patching the text
+    // must not replace the node the pointer and the focus ring are attached to.
+    assert.equal(list.children[0], row)
+    assert.equal(list.children[0].children[2].children[0], cancel)
+    assert.match(textOf(list.children[0]), /70/)
+  } finally {
+    cleanup()
+    restore()
+  }
+})

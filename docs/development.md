@@ -1,7 +1,7 @@
 # 开发
 
 ```
-index.js              插件入口：十个工具 + 启动网页服务 + 侧边栏面板路由
+index.js              插件入口：十三个工具 + 启动网页服务 + 侧边栏面板路由
 client.js             浏览器半边：侧边栏图标 / 主面板 / better-sidebar tab（原生 iframe）
 web.js                本地 HTTP 服务与 JSON API
 jobs.js               通用后台任务队列（排队、并发、取消、重试、落盘恢复）
@@ -11,7 +11,7 @@ chatlookup.js         把「名字/别名/群号/和某某的私聊」解析成�
 settings.js           设置持久化、校验与默认值
 storage.js            生成文件统计与白名单清理
 web/                  前端（原生 ESM，无构建）：index.html、css/base.css、
-                      js/{api,state,app}.js、js/views/{chats,export,stats,ask,settings,models,jobs}.js
+                      js/{api,state,rows,app}.js、js/views/{chats,export,stats,ask,settings,models,jobs}.js
 cordis.patch.yml      插件行与默认配置
 scripts/
   qqnt_export.py      密钥提取 / 解密 / Protobuf 解析 / 单群导出（Windows + Linux）

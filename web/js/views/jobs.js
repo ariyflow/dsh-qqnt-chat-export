@@ -10,6 +10,8 @@
  * channel through the iframe.
  */
 
+import { createRowList } from '../rows.js'
+
 const STATE_LABELS = {
   queued: '排队中',
   running: '进行中',
@@ -89,8 +91,12 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
 
     const meta = document.createElement('span')
     meta.className = 'job-meta'
-    meta.textContent = jobMeta(job)
-    if (job.error) meta.title = String(job.error)
+    /** Progress and detail move every poll; the row around them is reused. */
+    const paint = (next) => {
+      meta.textContent = jobMeta(next)
+      meta.title = next.error ? String(next.error) : ''
+    }
+    paint(job)
 
     const actions = document.createElement('span')
     actions.className = 'job-actions'
@@ -111,7 +117,7 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
     }
 
     item.append(summary, meta, actions)
-    return item
+    return { node: item, update: paint }
   }
 
   async function act(id, action) {
@@ -126,8 +132,15 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
   let collapsed = false
   let first = true
   let seen = new Set()
-  /** What the list currently shows; an unchanged poll must not rebuild it. */
-  let rendered = ''
+  const renderRows = createRowList(list, {
+    id: (job) => String(job.id),
+    // `progress` and `message` are left out on purpose: they change on every
+    // poll while a job runs, and rebuilding the row for them both restarted
+    // the animation and stole focus from the button under the pointer.
+    signature: (job) => [job.state, job.summary || '', job.kind || '',
+      job.canCancel ? 1 : 0, job.canRetry ? 1 : 0, job.error || ''].join('~'),
+    create: (job, isEnter) => renderRow(job, isEnter),
+  })
 
   /** Jobs that are still doing something: only those deserve the panel. */
   const ACTIVE = new Set(['queued', 'running', 'canceling'])
@@ -140,7 +153,6 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
       const jobs = visibleJobs(payload?.jobs)
       const ids = new Set(jobs.map((job) => job.id))
       const isNew = [...ids].some((id) => !seen.has(id))
-      const fresh = new Set([...ids].filter((id) => !seen.has(id)))
       const active = jobs.some((job) => ACTIVE.has(job.state))
       // New work reopens the panel; an explicit 收起 keeps it shut while the
       // same rows are still on screen.
@@ -160,12 +172,7 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
       const open = jobs.length > 0 && !collapsed
       panel.hidden = !open
       dock.hidden = open || jobs.length === 0
-      const sig = [open ? 'open' : 'shut',
-        jobs.map((job) => [job.id, job.state, job.progress, job.message,
-          job.summary, job.canCancel ? 1 : 0, job.canRetry ? 1 : 0].join('~')).join('\n')].join('\n')
-      if (sig === rendered) return
-      rendered = sig
-      list.replaceChildren(...jobs.map((job) => renderRow(job, fresh.has(job.id))))
+      renderRows(jobs)
     } catch {
       // The panel is a convenience; a failed poll must not spam the page.
     }

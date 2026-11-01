@@ -7,7 +7,18 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { askTool, exportBatchTool, exportChatTool, listChatsTool, recallTool, searchTool, statusTool } from '../index.js'
+import {
+  askTool,
+  doctorTool,
+  exportBatchTool,
+  exportChatTool,
+  indexTool,
+  listChatsTool,
+  recallTool,
+  searchTool,
+  statsTool,
+  statusTool,
+} from '../index.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const SCRIPTS = path.join(path.dirname(HERE), 'scripts')
@@ -516,6 +527,164 @@ test('two chats with the same name refuse the export', { skip: !hasPython() && '
     assert.match(result.output, /group g1 测试群/)
     assert.match(result.output, /group g9 测试群/)
     assert.equal(existsSync(outDir), false, 'an ambiguous name must not create anything')
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('stats counts, scopes and reports an empty match', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const all = await statsTool(settings).execute({}, { signal: signal() })
+    assert.equal(all.ok, true, all.output)
+    assert.equal(all.total, 3)
+    assert.equal(all.chats, 2)
+    // 甲 and 乙 share QQ 1, so two QQ numbers are two senders even though the
+    // names differ; the helper groups by QQ first, as the stats page does.
+    assert.equal(all.senders, 2)
+    assert.match(all.output, /整个索引/)
+    assert.match(all.output, /合计：3 条 · 2 个会话 · 2 位发言人/)
+    assert.match(all.output, /Top 发言人：/)
+    assert.match(all.output, /Top 会话：测试群 2/)
+
+    const scoped = await statsTool(settings).execute({ chatKind: 'group', chatId: 'g1' }, { signal: signal() })
+    assert.equal(scoped.ok, true, scoped.output)
+    assert.equal(scoped.total, 2)
+    assert.match(scoped.output, /只看群聊/)
+
+    const byKeyword = await statsTool(settings).execute({ keyword: '私聊' }, { signal: signal() })
+    assert.equal(byKeyword.total, 1)
+    assert.match(byKeyword.output, /关键词「私聊」/)
+
+    const none = await statsTool(settings).execute({ keyword: '查无此话' }, { signal: signal() })
+    assert.equal(none.ok, true, none.output)
+    assert.equal(none.total, 0)
+    assert.match(none.output, /没有匹配的消息/)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('index status describes the file, and says how to create it when missing', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  const empty = await mkdtemp(path.join(os.tmpdir(), 'qqnt-noindex-'))
+  try {
+    const ready = await indexTool(settings).execute({}, { signal: signal() })
+    assert.equal(ready.ok, true, ready.output)
+    assert.equal(ready.running, false)
+    assert.equal(ready.messages, 3)
+    assert.equal(ready.chats, 2)
+    assert.match(ready.output, /索引：3 条消息 · 2 个会话 · FTS/)
+    assert.match(ready.output, /文件：.*index\.sqlite/)
+    assert.match(ready.output, /下一步：qqnt_list_chats/)
+
+    const bare = await indexTool({ ...settings, workDir: empty }).execute({}, { signal: signal() })
+    assert.equal(bare.ok, true, bare.output)
+    assert.match(bare.output, /索引：还没有建立/)
+    assert.match(bare.output, /qqnt_index（action: "build"）/)
+    // Without a cached key the build cannot work, so the next step says so.
+    assert.match(bare.output, /qqnt_extract_key/)
+    assert.equal(existsSync(path.join(empty, 'index.sqlite')), false)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+    await rm(empty, { recursive: true, force: true })
+  }
+})
+
+test('index build refuses to start twice and reports the running one', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    await writeFile(path.join(work, 'build-status.json'), JSON.stringify({
+      state: 'running', mode: 'full', processed: 5, total: 10, step: '解析消息',
+      startedAt: Math.floor(Date.now() / 1000), finishedAt: 0, error: '',
+    }))
+    await writeFile(path.join(work, 'build.lock'), '')
+    const result = await indexTool(settings).execute({ action: 'build' }, { signal: signal() })
+    assert.equal(result.running, true)
+    assert.match(result.output, /已有一次索引构建在进行，没有重复启动/)
+    assert.match(result.output, /解析消息 50% · 5\/10/)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('index build stands aside while the page extracts the key', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const result = await indexTool(settings, () => true).execute({ action: 'build' }, { signal: signal() })
+    assert.equal(result.ok, false)
+    assert.match(result.output, /网页正在提取密钥或配置环境/)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('doctor answers the whole question in one call', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const result = await doctorTool(settings, () => 'http://127.0.0.1:46728/')
+      .execute({}, { signal: signal() })
+    assert.equal(result.ok, true, result.output)
+    assert.match(result.output, /插件 \d+\.\d+\.\d+/)
+    assert.match(result.output, /Python .*sqlcipher3 [✅❌]/)
+    assert.match(result.output, /密钥 没有/)
+    assert.match(result.output, /索引：3 条消息 · 2 个会话/)
+    assert.match(result.output, /网页：http:\/\/127\.0\.0\.1:46728\/（监听中）/)
+    assert.match(result.output, /下一步/)
+    // The fixture has no key and no build history: extraction is the step.
+    assert.match(result.output, /qqnt_extract_key/)
+
+    const deep = await doctorTool(settings, () => '').execute({ deep: true }, { signal: signal() })
+    assert.equal(deep.ok, true, deep.output)
+    assert.match(deep.output, /组件：/)
+    assert.match(deep.output, /模型：/)
+    assert.match(deep.output, /网页：没有监听/)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('an unknown preset names the ones that exist', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const none = await exportChatTool(settings).execute(
+      { chat: '测试群', preset: '快速' }, { signal: signal() })
+    assert.equal(none.ok, false)
+    assert.match(none.output, /没有名为「快速」的导出预设/)
+    assert.match(none.output, /还没有保存过预设/)
+
+    await writeFile(path.join(work, 'presets.json'),
+      JSON.stringify([{ name: '简洁', format: 'csv' }, { name: '全量', format: 'txt' }]))
+    const bad = await exportChatTool(settings).execute(
+      { chat: '测试群', preset: '快速' }, { signal: signal() })
+    assert.equal(bad.ok, false)
+    assert.match(bad.output, /可用的是「简洁」、「全量」/)
+
+    const batch = await exportBatchTool(settings).execute(
+      { chatNames: ['测试群'], preset: '快速' }, { signal: signal() })
+    assert.equal(batch.ok, false)
+    assert.match(batch.output, /可用的是「简洁」、「全量」/)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('batch export narrows every chat with the same filters', { skip: !hasPython() && 'python is not installed' }, async () => {
+  const { work, settings } = await fixture()
+  try {
+    const outDir = path.join(work, 'batch-filters')
+    const result = await exportBatchTool(settings).execute({
+      chats: [{ kind: 'group', id: 'g1' }, { kind: 'private', id: 'p1' }],
+      keyword: '私聊内容',
+      format: 'txt',
+      outDir,
+    }, { signal: signal() })
+    assert.equal(result.ok, true, result.output)
+    assert.equal(result.rows, 1)
+    assert.match(result.output, /已导出 2 个会话 \/ 1 条/)
+    // The chat the filter excluded is reported rather than silently missing.
+    assert.match(result.output, /1 个会话没有匹配的消息/)
+    assert.ok(existsSync(result.outPath), result.outPath)
   } finally {
     await rm(work, { recursive: true, force: true })
   }

@@ -15,6 +15,7 @@
  * `/api/jobs/<id>/download` when done.
  */
 import { formatBytes } from './models.js'
+import { createRowList } from '../rows.js'
 
 export const EXPORT_FORMATS = ['txt', 'csv', 'json', 'md', 'html', 'sqlite']
 export const CSV_COLUMNS = [
@@ -378,9 +379,13 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
     name.textContent = job.summary || '导出'
     const info = document.createElement('span')
     info.className = 'export-task-meta'
-    info.textContent = jobStateLabel(job)
-    // The line is clamped to one line; the full error stays on hover.
-    if (job.error) info.title = String(job.error)
+    /** Only the text moves between polls; the row itself is reused. */
+    const paint = (next) => {
+      info.textContent = jobStateLabel(next)
+      // The line is clamped to one line; the full error stays on hover.
+      info.title = next.error ? String(next.error) : ''
+    }
+    paint(job)
 
     const actions = document.createElement('span')
     actions.className = 'export-task-actions'
@@ -423,13 +428,21 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
     }
 
     row.append(name, info, actions)
-    return row
+    return { node: row, update: paint }
   }
 
   const TASKS_SHOWN = 8
-  /** What the list currently shows; an unchanged poll must not rebuild it. */
-  let renderedTasks = ''
-  let renderedIds = new Set()
+  /**
+   * Progress and message are deliberately absent from the signature: they move
+   * every two seconds while an export runs, and rebuilding the row for them
+   * dropped the focus of the 取消 button the user was about to press.
+   */
+  const renderTaskRows = createRowList(tasks, {
+    id: (job) => String(job.id),
+    signature: (job) => [job.state, job.summary || '', job.canCancel ? 1 : 0,
+      job.canRetry ? 1 : 0, job.error || ''].join('~'),
+    create: (job, isEnter) => taskRow(job, isEnter),
+  })
 
   function renderTasks() {
     const list = state.tasks
@@ -438,16 +451,7 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
     tasksMore.textContent = state.showAllTasks
       ? `只看最近 ${TASKS_SHOWN} 个`
       : `显示全部 ${list.length} 个`
-    const sig = [state.showAllTasks ? 'all' : 'head',
-      shown.map((job) => [job.id, job.state, job.progress, job.message,
-        job.summary, job.canCancel ? 1 : 0, job.canRetry ? 1 : 0].join('~')).join('\n')].join('\n')
-    // Rebuilding an identical list every two seconds also drops the focus of a
-    // button the user is about to press.
-    if (sig === renderedTasks) return
-    renderedTasks = sig
-    const fresh = new Set(shown.map((job) => job.id).filter((id) => !renderedIds.has(id)))
-    renderedIds = new Set(shown.map((job) => job.id))
-    tasks.replaceChildren(...shown.map((job) => taskRow(job, fresh.has(job.id))))
+    renderTaskRows(shown)
   }
 
   async function refresh() {

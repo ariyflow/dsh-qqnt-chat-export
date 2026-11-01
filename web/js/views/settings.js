@@ -239,7 +239,6 @@ export function mountSettings(root, { api }) {
   root.append(section)
 
   let closed = false
-  let timer = null
   let armed = false
   let armedAt = 0
   const storageChecks = new Map()
@@ -656,13 +655,11 @@ export function mountSettings(root, { api }) {
   loadPresets()
   loadDiagnostics()
   loadStorage()
-  timer = setInterval(() => {
-    if (closed) return
-  }, 5000)
-
+  // No polling timer here on purpose: the settings page is refreshed by the
+  // user (and by `schedule` while a job runs), so a five-second tick whose body
+  // only re-checked `closed` earned nothing and kept the page alive forever.
   return () => {
     closed = true
-    if (timer) clearInterval(timer)
     section.remove()
   }
 }

@@ -361,3 +361,40 @@ test('the task list is diffed: a poll does not rebuild, revealed rows animate', 
     restore()
   }
 })
+
+test('a running export keeps its row and its cancel button between polls', async () => {
+  const restore = installDocument()
+  let jobs = [{
+    id: 'j1', kind: 'export', summary: '导出 TXT', state: 'running',
+    progress: 0.25, message: '已写 40 条', canCancel: true, canRetry: false,
+  }]
+  const api = {
+    get: async (path) => {
+      if (path === '/api/sessions') return { sessions: [] }
+      if (path === '/api/presets') return { presets: [] }
+      // A fresh object per response, like the JSON the route returns.
+      return { jobs: jobs.map((job) => ({ ...job })) }
+    },
+    post: async () => ({}),
+  }
+  const root = makeElement('main')
+  const cleanup = mountExport(root, { api })
+  try {
+    await tick()
+    const tasks = findByClass(root, 'export-tasks')
+    const row = tasks.children[0]
+    const cancel = row.children[2].children[0]
+
+    jobs = [{ ...jobs[0], progress: 0.75, message: '已写 120 条' }]
+    // The export view polls on a fixed two-second interval.
+    await new Promise((resolve) => setTimeout(resolve, 2150))
+    // Progress moves every two seconds while an export runs; rebuilding the row
+    // for it took the focus ring (and the click) away from 取消.
+    assert.equal(tasks.children[0], row)
+    assert.equal(tasks.children[0].children[2].children[0], cancel)
+    assert.match(textOf(tasks.children[0]), /导出中 75%/)
+  } finally {
+    cleanup()
+    restore()
+  }
+})

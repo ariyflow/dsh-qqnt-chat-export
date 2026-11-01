@@ -165,7 +165,7 @@ function readJsonBody(req, limit = 64 * 1024) {
  * process down. Waiting for `spawn` also lets the HTTP response report a bad
  * `pythonPath` instead of answering 202 for a build that never existed.
  */
-function spawnBuild(settings, argv) {
+export function spawnBuild(settings, argv) {
   return new Promise((resolve) => {
     let child
     try {
@@ -531,7 +531,7 @@ function mergeChatState(workDir, sessions, includeHidden) {
 }
 
 /** The helper's progress file; `{ state: 'idle' }` before the first build. */
-function readBuildState(workDir) {
+export function readBuildState(workDir) {
   try {
     const value = JSON.parse(readFileSync(path.join(workDir, 'build-status.json'), 'utf8'))
     return value && typeof value === 'object' ? value : { state: 'idle' }
@@ -798,7 +798,9 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
     rejectReady = reject
   })
   ready.catch(() => {})       // callers that ignore ready must not crash the process
-  if (!port) return { close: async () => {}, url: '', error: undefined, ready: Promise.resolve('') }
+  if (!port) {
+    return { close: async () => {}, url: '', error: undefined, ready: Promise.resolve(''), jobs: null }
+  }
 
   /**
    * Long jobs for the ported features (OCR, speech, embedding, archiving).
@@ -1640,6 +1642,9 @@ function exportRequest(body) {
       return state.error
     },
     ready,
+    // The queue is shared with the tools: an OCR job started by the model has
+    // to appear in the page's task panel, and one queue means one set of rows.
+    jobs,
     close: () => new Promise((resolve) => {
       jobs.shutdown()
       if (!server.listening) {
