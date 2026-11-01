@@ -930,6 +930,13 @@ test('storage reports, then previews before deleting', async () => {
     assert.match(unknown.output, /没有这些清理项：nope/)
     assert.match(unknown.output, /可清理的是/)
 
+    // An allow-listed category that happens to be empty is a no-op, not an
+    // unknown id: "clean the decrypted copies" must work before they exist.
+    const emptyCategory = await tool.execute({ action: 'cleanup', ids: ['decrypted'] }, { signal: signal() })
+    assert.equal(emptyCategory.ok, true, emptyCategory.output)
+    assert.match(emptyCategory.output, /选中的项现在都是空的/)
+    assert.match(emptyCategory.output, /· decrypted/)
+
     const done = await tool.execute(
       { action: 'cleanup', ids: ['exports'], confirm: true }, { signal: signal() })
     assert.equal(done.ok, true, done.output)

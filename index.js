@@ -30,7 +30,15 @@ import {
   validatePatch,
   venvPython,
 } from './settings.js'
-import { buildRunning, cleanupStorage, migrateWorkDir, removeWorkDirEntries, storageSnapshot } from './storage.js'
+import {
+  ACCOUNT_CACHE_ID,
+  STORAGE_ITEMS,
+  buildRunning,
+  cleanupStorage,
+  migrateWorkDir,
+  removeWorkDirEntries,
+  storageSnapshot,
+} from './storage.js'
 import { applyPreset, readPresets } from './presets.js'
 import { makeAsrRunner, makeChunksRunner, makeComponentsRunner, makeExportRunner, makeOcrRunner } from './runners.js'
 import {
@@ -2354,32 +2362,38 @@ export function storageTool(settings, busy) {
       }
       const wanted = (Array.isArray(args.ids) ? args.ids : (args.ids === undefined ? [] : [args.ids]))
         .map((id) => String(id ?? '').trim()).filter((id) => id !== '')
-      const available = snapshot.items.map((item) => item.id)
+      // The allow-list, not "what happens to have files right now": asking to
+      // clear an empty category is a no-op, not an unknown id.
+      const allowed = [...STORAGE_ITEMS.map((item) => item.id), ACCOUNT_CACHE_ID]
       if (wanted.length === 0) {
         return {
           ...base, ok: false, exitCode: 1,
-          output: `cleanup 需要 ids：可清理的是 ${available.join('、')}（见 report 的输出）。`,
+          output: `cleanup 需要 ids：可清理的是 ${allowed.join('、')}（带体积的那几个是现在有内容的）。`,
         }
       }
-      const unknown = wanted.filter((id) => !available.includes(id))
+      const unknown = wanted.filter((id) => !allowed.includes(id))
       if (unknown.length > 0) {
         return {
           ...base, ok: false, exitCode: 1,
-          output: `没有这些清理项：${unknown.join('、')}。`
-            + (available.length > 0 ? `可清理的是 ${available.join('、')}。` : '工作目录里现在没有可清理的文件。'),
+          output: `没有这些清理项：${unknown.join('、')}。可清理的是 ${allowed.join('、')}。`,
         }
       }
       const picked = snapshot.items.filter((item) => wanted.includes(item.id))
+      const empty = wanted.filter((id) => !picked.some((item) => item.id === id))
       const bytes = picked.reduce((sum, item) => sum + item.bytes, 0)
-      const planned = [`将删除 ${picked.length} 项，释放约 ${sizeText(bytes)}：`,
-        ...picked.map((item) => `  · ${detail(item)}`)]
+      const planned = picked.length === 0
+        ? ['选中的项现在都是空的，不会删除任何文件：',
+          ...empty.map((id) => `  · ${id}`)]
+        : [`将删除 ${picked.length} 项，释放约 ${sizeText(bytes)}：`,
+          ...picked.map((item) => `  · ${detail(item)}`),
+          ...empty.map((id) => `  · ${id}（现在没有可删的文件）`)]
       if (args.confirm !== true) {
         lines.push('', ...planned, '', '这一步没有删除任何东西；确认后带 confirm: true 再调一次。')
         return { ...base, bytes, output: lines.join('\n') }
       }
       let result
       try {
-        result = cleanupStorage(settings.workDir, picked.map((item) => item.id))
+        result = cleanupStorage(settings.workDir, wanted)
       } catch (error) {
         return {
           ...base, ok: false, exitCode: 1,
@@ -2393,7 +2407,7 @@ export function storageTool(settings, busy) {
         done.push(`有 ${result.failed.length} 个没删掉：`
           + result.failed.slice(0, 5).map((item) => `${item.name}（${item.error}）`).join('、'))
       }
-      const labels = picked.map((item) => item.id)
+      const labels = wanted
       if (labels.includes('index')) done.push('索引已删除：qqnt_list_chats / qqnt_search / qqnt_stats 会提示先建索引。')
       if (labels.includes('key')) done.push('密钥已删除：下次建索引前要重新调 qqnt_extract_key。')
       if (labels.includes('decrypted')) done.push('解密副本已删除：下次建索引会重新从 QQ 复制。')
