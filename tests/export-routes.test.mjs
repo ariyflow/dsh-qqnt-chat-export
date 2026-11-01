@@ -137,3 +137,28 @@ test('single chat, batch and media pick the container they imply', async () => {
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('starting an export also drops the files that are past their hour', async () => {
+  const { rm, mkdir, writeFile, utimes } = await import('node:fs/promises')
+  const { dir, server, base } = await harness()
+  try {
+    const exportsDir = path.join(dir, 'exports')
+    await mkdir(exportsDir, { recursive: true })
+    const oldFile = path.join(exportsDir, 'old--stale.txt')
+    const newFile = path.join(exportsDir, 'new--fresh.txt')
+    await writeFile(oldFile, 'stale')
+    await writeFile(newFile, 'fresh')
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000)
+    await utimes(oldFile, twoHoursAgo, twoHoursAgo)
+
+    const { response } = await post(base, { format: 'txt', chatKind: 'group', chatId: '1' })
+    assert.equal(response.status, 202)
+
+    const { existsSync } = await import('node:fs')
+    assert.equal(existsSync(oldFile), false, 'a file older than an hour is swept on the next export')
+    assert.equal(existsSync(newFile), true, 'a fresh download is kept')
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})

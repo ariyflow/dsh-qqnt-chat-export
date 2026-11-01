@@ -1333,6 +1333,10 @@ function exportRequest(body) {
       readJsonBody(req)
         .then((body) => {
           const request = exportRequest(body)
+          // The page says a download is kept for an hour; sweeping only when the
+          // listener started made that true for servers that restart and false
+          // for the ones that do not. Each new export clears the old ones.
+          sweepExports(path.join(settings.workDir, 'exports'))
           const job = jobs.submit('export', {
             summary: `导出 ${request.format.toUpperCase()}`,
             params: request,
