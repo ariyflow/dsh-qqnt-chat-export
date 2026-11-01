@@ -17,6 +17,7 @@
 | `qqnt_stats` | 聚合统计（在 SQL 里算，不翻页）：总量、会话数、发言人数、月度、Top 发言人 / 会话、24 小时分布；过滤条件与 `qqnt_search` 同名 |
 | `qqnt_jobs` | 后台任务：`list` / `get` / `cancel` / `retry` / `start`（ocr、asr、chunks、components、model-download）。队列是网页创建的那一条，工具起的任务会出现在网页右下角；`start` 前先查组件与模型，缺什么就返回装它的那次调用 |
 | `qqnt_media` | 一个会话的图片：`list` 分页（时间、发送者、体积、rowId/seq）、`get` 返回真实路径、`export` 拷到 `QQ媒体_<时间戳>/`（按「序号-原名」命名，单次上限 200 个 / 2 GB） |
+| `qqnt_storage` | 工作目录的体积盘点与清理：`report` 列出各类文件与合计（派生库标明不可删）；`cleanup` 不带 `confirm` 只预演，带 `confirm: true` 才按白名单删除；构建、提取密钥、装环境进行中时拒绝 |
 | `qqnt_export_chat` | 导出任意会话为 txt / csv / json / md / html / sqlite。会话用 `chat`（名字/别名/群号/QQ，「和某某的私聊」）或 `chatKind` + `chatId` 指定；名字解析出多个候选时**不写文件**并返回候选。`dryRun` 预演条数与目标目录，`keyword`/`sender`/`since`/`until` 只导一部分；可选 `redact`（脱敏）、`media`（含媒体，ZIP）、`split=day`（按天分文件，ZIP）、`embed`（图片内嵌的单文件 HTML）、`preset`（套用网页里保存的导出预设） |
 | `qqnt_export_batch` | 一次导出最多 200 个会话到一个 ZIP（每个会话一份文件 + `manifest.json`），会话可给 `chatNames`（名字列表），支持格式、脱敏、媒体、按天、密码与预设，`keyword`/`sender`/`since`/`until` 对每个会话同时生效（没匹配到的会话记在 manifest 的 `skipped` 里） |
 | `qqnt_ask` | 问答检索：给一个问题，返回最可能回答它的对话片段（会话、时间范围、逐条消息与引用编号）；插件不生成句子，答案由宿主模型来写 |

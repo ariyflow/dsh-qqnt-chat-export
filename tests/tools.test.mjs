@@ -18,6 +18,7 @@ import {
   listChatsTool,
   recallTool,
   searchTool,
+  storageTool,
   statsTool,
   statusTool,
 } from '../index.js'
@@ -895,6 +896,72 @@ test('media lists, resolves and copies the downloaded images of a chat', { skip:
       { action: 'get', rowId: 99 }, { signal: signal() })
     assert.equal(missingFile.ok, false)
     assert.match(missingFile.output, /索引里没有这条消息/)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('storage reports, then previews before deleting', async () => {
+  const work = await mkdtemp(path.join(os.tmpdir(), 'qqnt-storage-'))
+  try {
+    await mkdir(path.join(work, 'exports'), { recursive: true })
+    await writeFile(path.join(work, 'exports', 'old.txt'), 'x'.repeat(64))
+    await writeFile(path.join(work, 'index.sqlite'), 'i'.repeat(128))
+    const settings = { python: PYTHON, workDir: work, tencentRoot: '', account: '', webPort: 0 }
+    const tool = storageTool(settings)
+
+    const report = await tool.execute({}, { signal: signal() })
+    assert.equal(report.ok, true, report.output)
+    assert.match(report.output, /查询索引（index）/)
+    assert.match(report.output, /临时导出文件（exports）/)
+    assert.ok(report.bytes > 0)
+    assert.match(report.output, /action=cleanup/)
+
+    // A preview is a preview: nothing disappears without confirm.
+    const preview = await tool.execute({ action: 'cleanup', ids: ['exports'] }, { signal: signal() })
+    assert.equal(preview.ok, true, preview.output)
+    assert.match(preview.output, /将删除 1 项/)
+    assert.match(preview.output, /confirm: true/)
+    assert.equal(existsSync(path.join(work, 'exports', 'old.txt')), true)
+
+    const unknown = await tool.execute({ action: 'cleanup', ids: ['nope'] }, { signal: signal() })
+    assert.equal(unknown.ok, false)
+    assert.match(unknown.output, /没有这些清理项：nope/)
+    assert.match(unknown.output, /可清理的是/)
+
+    const done = await tool.execute(
+      { action: 'cleanup', ids: ['exports'], confirm: true }, { signal: signal() })
+    assert.equal(done.ok, true, done.output)
+    assert.equal(done.removed, 1)
+    assert.equal(done.freed, 64)
+    assert.match(done.output, /已删除 1 个文件/)
+    assert.equal(existsSync(path.join(work, 'exports', 'old.txt')), false)
+    // The index was not in the selection, so it is still there.
+    assert.equal(existsSync(path.join(work, 'index.sqlite')), true)
+
+    // A build holds the same lock the page's cleanup button respects.
+    await writeFile(path.join(work, 'build-status.json'), JSON.stringify({
+      state: 'running', startedAt: Math.floor(Date.now() / 1000), processed: 1, total: 2,
+    }))
+    await writeFile(path.join(work, 'build.lock'), '')
+    const busy = await tool.execute({ action: 'cleanup', ids: ['index'], confirm: true }, { signal: signal() })
+    assert.equal(busy.ok, false)
+    assert.match(busy.output, /索引正在建立/)
+    assert.equal(existsSync(path.join(work, 'index.sqlite')), true)
+  } finally {
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+test('storage stands aside while the page extracts the key', async () => {
+  const work = await mkdtemp(path.join(os.tmpdir(), 'qqnt-storage-busy-'))
+  try {
+    await writeFile(path.join(work, 'key.txt'), 'k')
+    const tool = storageTool({ workDir: work, webPort: 0, python: PYTHON }, () => true)
+    const result = await tool.execute({ action: 'cleanup', ids: ['key'] }, { signal: signal() })
+    assert.equal(result.ok, false)
+    assert.match(result.output, /密钥提取或环境配置正在进行/)
+    assert.equal(existsSync(path.join(work, 'key.txt')), true)
   } finally {
     await rm(work, { recursive: true, force: true })
   }

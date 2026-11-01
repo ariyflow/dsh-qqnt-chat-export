@@ -2224,6 +2224,128 @@ async function lookupChat(settings, exec, args) {
   return { chat: picked.chat }
 }
 
+/**
+ * What the work directory is using, and the allow-listed way to free it.
+ *
+ * The page has the same card; the tool exists because "磁盘满了，能清什么" is a
+ * question an Agent can answer in one call, and because the answer has to be
+ * the same allow-list the page uses — never a hand-built `rm` of a path that
+ * looks like a cache. Destructive by nature, so `cleanup` without `confirm`
+ * only reports what would go.
+ */
+export function storageTool(settings, busy) {
+  return {
+    name: 'qqnt_storage',
+    description: 'Report what this plugin\'s work directory is using — decrypted copies, the query index, the key, temporary exports, build state, the non-rebuildable derived store, account caches and downloaded models — or delete one or more allow-listed categories. cleanup without confirm=true only says what would be deleted and how much it frees; nothing is removed. The QQ data directory is never touched, and cleanup is refused while a build, key extraction or environment setup is running.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['report', 'cleanup'], description: 'Defaults to report.' },
+        ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'cleanup only: the ids printed by report (decrypted, index, key, exports, state, indexCache). The derived store can never be deleted here.',
+        },
+        confirm: {
+          type: 'boolean',
+          description: 'cleanup only: false (default) previews; true actually deletes.',
+        },
+      },
+    },
+    output: {
+      schema: outputSchema({
+        bytes: { type: 'integer' },
+        freed: { type: 'integer' },
+        removed: { type: 'integer' },
+      }),
+      render: renderReport,
+    },
+    isConcurrencySafe: () => false,
+    async execute(args) {
+      const base = { ok: true, exitCode: 0, bytes: 0, freed: 0, removed: 0 }
+      const snapshot = storageSnapshot(settings.workDir)
+      const detail = (item) => {
+        const files = Array.isArray(item.files) ? item.files.length : 0
+        return `${item.label}（${item.id}）${sizeText(item.bytes)}`
+          + (files > 1 ? ` · ${files} 个文件` : '')
+      }
+      const lines = [
+        `工作目录：${snapshot.workDir}`,
+        `合计：${sizeText(snapshot.totalBytes)}${snapshot.derived.exists
+          ? `（含派生库 ${sizeText(snapshot.derived.bytes)}，它不在这里删除）` : ''}`,
+      ]
+      for (const item of snapshot.items) lines.push(`  ${detail(item)}`)
+      if (snapshot.items.length === 0) lines.push('  （还没有任何生成的文件）')
+      if (args.action !== 'cleanup') {
+        lines.push('', '清理用 action=cleanup + ids（先不带 confirm 看预演）。')
+        return { ...base, bytes: snapshot.totalBytes, output: lines.join('\n') }
+      }
+      if (busy?.()) {
+        return {
+          ...base, ok: false, exitCode: 1,
+          output: '密钥提取或环境配置正在进行，等它结束再清理。',
+        }
+      }
+      if (buildRunning(settings.workDir)) {
+        return {
+          ...base, ok: false, exitCode: 1,
+          output: '索引正在建立，等它结束后再清理。',
+        }
+      }
+      const wanted = (Array.isArray(args.ids) ? args.ids : (args.ids === undefined ? [] : [args.ids]))
+        .map((id) => String(id ?? '').trim()).filter((id) => id !== '')
+      const available = snapshot.items.map((item) => item.id)
+      if (wanted.length === 0) {
+        return {
+          ...base, ok: false, exitCode: 1,
+          output: `cleanup 需要 ids：可清理的是 ${available.join('、')}（见 report 的输出）。`,
+        }
+      }
+      const unknown = wanted.filter((id) => !available.includes(id))
+      if (unknown.length > 0) {
+        return {
+          ...base, ok: false, exitCode: 1,
+          output: `没有这些清理项：${unknown.join('、')}。`
+            + (available.length > 0 ? `可清理的是 ${available.join('、')}。` : '工作目录里现在没有可清理的文件。'),
+        }
+      }
+      const picked = snapshot.items.filter((item) => wanted.includes(item.id))
+      const bytes = picked.reduce((sum, item) => sum + item.bytes, 0)
+      const planned = [`将删除 ${picked.length} 项，释放约 ${sizeText(bytes)}：`,
+        ...picked.map((item) => `  · ${detail(item)}`)]
+      if (args.confirm !== true) {
+        lines.push('', ...planned, '', '这一步没有删除任何东西；确认后带 confirm: true 再调一次。')
+        return { ...base, bytes, output: lines.join('\n') }
+      }
+      let result
+      try {
+        result = cleanupStorage(settings.workDir, picked.map((item) => item.id))
+      } catch (error) {
+        return {
+          ...base, ok: false, exitCode: 1,
+          output: `清理失败：${error instanceof Error ? error.message : String(error)}`,
+        }
+      }
+      const after = storageSnapshot(settings.workDir)
+      const done = [`已删除 ${result.removed} 个文件，释放 ${sizeText(result.freedBytes)}。`,
+        `现在工作目录占 ${sizeText(after.totalBytes)}。`]
+      if (Array.isArray(result.failed) && result.failed.length > 0) {
+        done.push(`有 ${result.failed.length} 个没删掉：`
+          + result.failed.slice(0, 5).map((item) => `${item.name}（${item.error}）`).join('、'))
+      }
+      const labels = picked.map((item) => item.id)
+      if (labels.includes('index')) done.push('索引已删除：qqnt_list_chats / qqnt_search / qqnt_stats 会提示先建索引。')
+      if (labels.includes('key')) done.push('密钥已删除：下次建索引前要重新调 qqnt_extract_key。')
+      if (labels.includes('decrypted')) done.push('解密副本已删除：下次建索引会重新从 QQ 复制。')
+      return {
+        ...base, bytes, freed: result.freedBytes, removed: result.removed,
+        output: done.join('\n'),
+      }
+    },
+  }
+}
+
 /** Reports the Python/SQLCipher environment plus the exporter's data info. */
 export function statusTool(settings) {
   return {
@@ -2494,6 +2616,9 @@ export function apply(ctx, config) {
   ctx.tools.register(jobsTool(settings, () => (webServer && webServer.jobs) || null))
   // The gallery: list, fetch a path, or copy a chat's images out.
   ctx.tools.register(mediaTool(settings))
+  // Storage: the same allow-list the page's cleanup card uses.
+  ctx.tools.register(storageTool(settings,
+    () => keyJob.state === 'running' || setup.state === 'running'))
   // Question answering in two steps: this side retrieves and cites, the host
   // model writes the sentence (ADR-008).
   ctx.tools.register(askTool(settings))
