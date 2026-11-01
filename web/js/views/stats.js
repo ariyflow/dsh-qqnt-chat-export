@@ -59,7 +59,7 @@ export function mountStats(root, { api, initialChat = null }) {
   title.textContent = '统计'
 
   const form = document.createElement('form')
-  form.className = 'export-row'
+  form.className = 'stats-form'
   const chatSelect = document.createElement('select')
   chatSelect.className = 'stats-chat'
   chatSelect.setAttribute('aria-label', '统计范围')
@@ -119,14 +119,18 @@ export function mountStats(root, { api, initialChat = null }) {
     return row
   }
 
-  function block(heading, rows) {
+  function block(heading, rows, extraClass = '') {
     const sectionEl = document.createElement('section')
-    sectionEl.className = 'stat-block'
+    sectionEl.className = `stat-block ${extraClass}`.trim()
     const head = document.createElement('h3')
     head.className = 'models-subtitle'
     head.textContent = heading
-    sectionEl.append(head)
-    for (const row of rows) sectionEl.append(row)
+    // The rows are wrapped so a long block (24 hours) can flow into two
+    // columns without the heading landing in the middle of the list.
+    const list = document.createElement('div')
+    list.className = 'stat-bars'
+    for (const row of rows) list.append(row)
+    sectionEl.append(head, list)
     return sectionEl
   }
 
@@ -150,7 +154,7 @@ export function mountStats(root, { api, initialChat = null }) {
       block('最近 30 天', (data.daily || []).map((item) =>
         bar(item.date.slice(5), item.count, dailyMax))),
       block('24 小时分布', (data.hourly || []).map((count, hour) =>
-        bar(`${String(hour).padStart(2, '0')}:00`, count, hourlyMax))),
+        bar(`${String(hour).padStart(2, '0')}:00`, count, hourlyMax)), 'is-hours'),
       block('发言人 Top 10', (data.topSenders || []).map((item) =>
         bar(item.qq ? `${item.name} (${item.qq})` : item.name,
           item.count, peak((data.topSenders || []).map((entry) => entry.count))))),
@@ -159,7 +163,7 @@ export function mountStats(root, { api, initialChat = null }) {
     ]
 
     const heat = document.createElement('section')
-    heat.className = 'stat-block'
+    heat.className = 'stat-block is-heat'
     const heatTitle = document.createElement('h3')
     heatTitle.className = 'models-subtitle'
     heatTitle.textContent = '周 × 小时'

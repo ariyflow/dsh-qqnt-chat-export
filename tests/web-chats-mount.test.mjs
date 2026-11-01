@@ -326,18 +326,28 @@ test('a search is remembered and can be saved, replayed and deleted', async () =
       .find((item) => item.tagName === 'datalist')
     assert.equal(history.children[0].value, '402')
 
+    // Save with a sidebar filter too: replaying it must restore the filter.
+    const filter = findByClass(shell, 'chat-filter')
+    filter.value = '课程'
+    filter.dispatch('input')
     const save = findByClass(shell, 'chat-search').children
       .find((item) => textOf(item) === '保存搜索')
     save.dispatch('click')
     const savedRow = findByClass(shell, 'saved-list').children[0]
     assert.match(textOf(savedRow), /402/)
+    filter.value = ''
+    filter.dispatch('input')
+    assert.match(textOf(findByClass(shell, 'hint')), /2 \/ 2 个会话/)
 
     const before = calls.filter((call) => call.params?.keyword === '402').length
-    savedRow.children[0].dispatch('click')
+    // Clearing the filter re-renders the saved list, so re-read the row.
+    findByClass(shell, 'saved-list').children[0].children[0].dispatch('click')
     await new Promise((resolve) => setTimeout(resolve, 20))
     assert.ok(calls.filter((call) => call.params?.keyword === '402').length > before)
+    assert.equal(filter.value, '课程', 'the saved list filter comes back')
+    assert.match(textOf(findByClass(shell, 'hint')), /1 \/ 2 个会话/)
 
-    savedRow.children[1].dispatch('click')
+    findByClass(shell, 'saved-list').children[0].children[1].dispatch('click')
     assert.equal(findByClass(shell, 'saved-list').children.length, 0)
     assert.equal(globalThis.localStorage.getItem('qqnt.savedSearches'), '[]')
   } finally {
@@ -616,8 +626,8 @@ test('an anchored window goes back to the newest instead of appending an offset'
       if (params.keyword) return { total: 1, rows: [hit] }
       if (params.around) {
         return { total: 200, offset: 0, limit: 50, rows: [
-          { ts: 3, sender: '甲', text: '窗口甲' },
-          { ts: 2, sender: '甲', text: '窗口乙' },
+          { ts: 3, sender: '甲', text: '窗口甲', rowId: 8 },
+          { ts: 2, sender: '甲', text: '窗口乙', rowId: 7 },
         ] }
       }
       return { total: 200, offset: 0, limit: 2, rows: [
@@ -642,6 +652,10 @@ test('an anchored window goes back to the newest instead of appending an offset'
     await new Promise((resolve) => setTimeout(resolve, 0))
     assert.equal(calls.at(-1).params.around, 7)
     assert.match(textOf(msgList), /窗口甲/)
+    // The message the hit pointed at is marked, so the reader knows where it is.
+    const anchored = msgList.children.filter((item) => item.className.includes('is-anchor'))
+    assert.equal(anchored.length, 1)
+    assert.equal(anchored[0].dataset.rowId, '7')
 
     // "载入更早" here would ask for offset 50 of a list that is not on screen.
     const more = main.children.find((item) => textOf(item) === '回到最新')

@@ -201,21 +201,54 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
   const derived = document.createElement('p')
   derived.className = 'hint export-derived'
 
-  const row1 = document.createElement('div')
-  row1.className = 'export-row'
-  row1.append(chatSelect, keyword, sender, since, until)
-  const row2 = document.createElement('div')
-  row2.className = 'export-row'
   const mediaLabel = labelWrap(media, '含媒体')
   const splitLabel = labelWrap(split, '按天分文件')
   const embedLabel = labelWrap(embed, '内嵌图片')
   const frontLabel = labelWrap(frontMatter, 'MD 元信息')
-  row2.append(format, preset, redact, mediaLabel, splitLabel, embedLabel, password)
-  const row3 = document.createElement('div')
-  row3.className = 'export-row'
-  row3.append(columns, frontLabel, submit, savePreset)
 
-  form.append(row1, row2, row3, derived)
+  /** One labelled control: the form used to be three rows of bare boxes. */
+  function field(text, control, extraClass = '') {
+    const wrap = document.createElement('label')
+    wrap.className = `export-field ${extraClass}`.trim()
+    const name = document.createElement('span')
+    name.className = 'field-label'
+    name.textContent = text
+    wrap.append(name, control)
+    return wrap
+  }
+
+  const fields = document.createElement('div')
+  fields.className = 'export-fields'
+  fields.append(
+    field('范围', chatSelect),
+    field('关键词', keyword),
+    field('发送者 / QQ', sender),
+    field('开始日期', since),
+    field('结束日期', until),
+    field('格式', format),
+    field('预设', preset),
+    field('脱敏', redact),
+    field('ZIP 密码', password),
+  )
+
+  const toggles = document.createElement('div')
+  toggles.className = 'export-toggles'
+  toggles.append(mediaLabel, splitLabel, embedLabel, frontLabel)
+
+  // Label and checkboxes live together so the whole strip can be hidden for a
+  // format that has no columns.
+  const columnsField = document.createElement('div')
+  columnsField.className = 'export-field export-field--wide'
+  const columnsLabel = document.createElement('span')
+  columnsLabel.className = 'field-label'
+  columnsLabel.textContent = 'CSV 列'
+  columnsField.append(columnsLabel, columns)
+
+  const actions = document.createElement('div')
+  actions.className = 'export-actions'
+  actions.append(submit, savePreset, derived)
+
+  form.append(fields, toggles, columnsField, actions)
 
   const tasksTitle = document.createElement('h3')
   tasksTitle.className = 'models-subtitle'
@@ -225,8 +258,14 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
   status.textContent = '正在读取任务…'
   const tasks = document.createElement('ul')
   tasks.className = 'export-tasks'
+  // Twenty finished exports are history, not a task list: show the recent ones
+  // and let the reader ask for the rest.
+  const tasksMore = document.createElement('button')
+  tasksMore.type = 'button'
+  tasksMore.className = 'ghost export-more'
+  tasksMore.hidden = true
 
-  section.append(title, form, tasksTitle, status, tasks)
+  section.append(title, form, tasksTitle, status, tasks, tasksMore)
   root.append(section)
 
   const sessions = []
@@ -234,6 +273,8 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
     chat: initialChat ? { kind: initialChat.kind, id: initialChat.id, label: initialChat.name || '' } : null,
     chats: Array.isArray(initialChats) ? initialChats.slice() : [],
     presets: [],
+    tasks: [],
+    showAllTasks: false,
     lastJobId: '',
   }
   let closed = false
@@ -276,7 +317,7 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
     derived.textContent = container === 'zip'
       ? `下载：ZIP（内部 ${String(format.value).toUpperCase()}）`
       : `下载：${String(format.value).toUpperCase()}`
-    columns.hidden = format.value !== 'csv'
+    columnsField.hidden = format.value !== 'csv'
     frontLabel.hidden = format.value !== 'md'
   }
 
@@ -378,16 +419,29 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
     return row
   }
 
+  const TASKS_SHOWN = 8
+
+  function renderTasks() {
+    const list = state.tasks
+    const shown = state.showAllTasks ? list : list.slice(0, TASKS_SHOWN)
+    tasks.replaceChildren(...shown.map(taskRow))
+    tasksMore.hidden = list.length <= TASKS_SHOWN
+    tasksMore.textContent = state.showAllTasks
+      ? `只看最近 ${TASKS_SHOWN} 个`
+      : `显示全部 ${list.length} 个`
+  }
+
   async function refresh() {
     if (closed) return
     try {
       const payload = await api.get('/api/jobs', { kind: 'export' })
       if (closed) return
       const list = Array.isArray(payload?.jobs) ? payload.jobs : []
+      state.tasks = list
       status.textContent = list.length === 0
         ? '还没有导出任务。'
         : `${list.length} 个任务（导出文件只保留一小时）`
-      tasks.replaceChildren(...list.map(taskRow))
+      renderTasks()
     } catch (error) {
       if (!closed) status.textContent = `读取任务失败：${error.message}`
     }
@@ -516,6 +570,10 @@ export function mountExport(root, { api, initialChat = null, initialChats = null
   password.addEventListener('input', syncDerived)
   form.addEventListener('submit', run)
   savePreset.addEventListener('click', storePreset)
+  tasksMore.addEventListener('click', () => {
+    state.showAllTasks = !state.showAllTasks
+    renderTasks()
+  })
 
   syncDerived()
   loadOptions().then(refresh)

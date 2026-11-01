@@ -293,3 +293,33 @@ test('saving a preset updates the dropdown instead of throwing or duplicating', 
     else globalThis.window = previousWindow
   }
 })
+
+test('a long export history shows the recent eight and can be expanded', async () => {
+  const restore = installDocument()
+  const jobs = Array.from({ length: 12 }, (_, index) => ({
+    id: `job${index}`, kind: 'export', summary: '导出 TXT', state: 'done',
+    result: { rows: 1, bytes: 10 }, canCancel: false,
+  }))
+  const api = {
+    get: async (path) => {
+      if (path === '/api/sessions') return { sessions: [] }
+      if (path === '/api/presets') return { presets: [] }
+      return { jobs }
+    },
+    post: async () => ({}),
+  }
+  const root = makeElement('main')
+  const cleanup = mountExport(root, { api })
+  try {
+    await tick()
+    assert.equal(findByClass(root, 'export-tasks').children.length, 8)
+    const more = findByClass(root, 'export-more')
+    assert.equal(more.hidden, false)
+    more.dispatch('click')
+    assert.equal(findByClass(root, 'export-tasks').children.length, 12)
+    assert.match(textOf(more), /只看最近 8 个/)
+  } finally {
+    cleanup()
+    restore()
+  }
+})

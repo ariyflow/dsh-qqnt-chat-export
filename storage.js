@@ -157,12 +157,18 @@ export function storageSnapshot(workDir) {
     totalBytes += cache.bytes
     items.push(cache)
   }
+  // `derived.sqlite` holds OCR text, transcripts, chunks and vectors — the data
+  // that cannot be rebuilt — so it is never deletable here. It is still the
+  // biggest file on most installs, and the storage card cannot answer "why is
+  // this directory 800 MB" without it.
+  const derivedInfo = infoFor(path.join(workDir, 'derived.sqlite'), 'derived.sqlite')
   return {
     workDir,
     exists: existsSync(workDir),
     running,
     key: existsSync(path.join(workDir, 'key.txt')),
     index: existsSync(path.join(workDir, 'index.sqlite')),
+    derived: { exists: derivedInfo.exists, bytes: derivedInfo.exists ? derivedInfo.bytes : 0 },
     totalBytes,
     items,
   }

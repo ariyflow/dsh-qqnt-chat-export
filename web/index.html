@@ -9,23 +9,42 @@
 </head>
 <body>
 <header class="app-header">
-  <h1>QQ 聊天记录</h1>
-  <p class="meta" id="app-meta">正在读取索引状态…</p>
-  <span class="app-status" id="app-status"></span>
-  <nav class="app-nav">
-    <button type="button" class="ghost" id="syncBtn" title="重新复制 QQ 数据库并重建索引">从 QQ 同步</button>
-    <button type="button" class="ghost" id="refreshBtn">刷新</button>
-    <label class="chat-search-label" title="切换账号索引（切换后自动增量更新）">账号
-      <select id="accountSelect" class="account-select"></select>
-    </label>
-    <button type="button" class="ghost" id="viewChats">会话</button>
-    <button type="button" class="ghost" id="viewExport">导出</button>
-    <button type="button" class="ghost" id="viewStats">统计</button>
-    <button type="button" class="ghost" id="viewAsk">问答</button>
-    <button type="button" class="ghost" id="ocrBtn" title="识别已下载的截图里的文字">识别图片文字</button>
-    <button type="button" class="ghost" id="asrBtn" title="转写已下载的语音消息">转写语音</button>
-    <button type="button" class="ghost" id="viewSettings">设置</button>
-    <button type="button" class="ghost" id="viewModels">模型与组件</button>
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9 9 0 0 1-3.8-.8L3 21l1.9-5.1A8.4 8.4 0 1 1 21 11.5Z"/>
+      </svg>
+    </span>
+    <div class="brand-text">
+      <div class="brand-line">
+        <h1>QQ 聊天记录</h1>
+        <span class="app-status" id="app-status"></span>
+      </div>
+      <p class="meta" id="app-meta">正在读取索引状态…</p>
+    </div>
+  </div>
+  <nav class="app-nav" aria-label="主导航">
+    <div class="nav-group">
+      <button type="button" class="ghost" id="syncBtn" title="重新复制 QQ 数据库并重建索引">从 QQ 同步</button>
+      <button type="button" class="ghost" id="refreshBtn" title="重新读取索引状态">刷新</button>
+      <label class="account" title="切换账号索引（切换后自动增量更新）">
+        <span>账号</span>
+        <select id="accountSelect" class="account-select"></select>
+      </label>
+    </div>
+    <div class="nav-group nav-views" role="tablist" aria-label="页面">
+      <button type="button" class="ghost" id="viewChats" role="tab">会话</button>
+      <button type="button" class="ghost" id="viewExport" role="tab">导出</button>
+      <button type="button" class="ghost" id="viewStats" role="tab">统计</button>
+      <button type="button" class="ghost" id="viewAsk" role="tab">问答</button>
+    </div>
+    <div class="nav-group">
+      <button type="button" class="ghost" id="ocrBtn" title="识别已下载的截图里的文字">识别图片</button>
+      <button type="button" class="ghost" id="asrBtn" title="转写已下载的语音消息">转写语音</button>
+      <button type="button" class="ghost" id="viewSettings">设置</button>
+      <button type="button" class="ghost" id="viewModels" title="模型与组件">模型</button>
+    </div>
   </nav>
 </header>
 <div id="startup-host"></div>

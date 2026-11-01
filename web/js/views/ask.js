@@ -45,6 +45,11 @@ export function mountAsk(root, { api, onOpenChat = null }) {
   const shell = document.createElement('section')
   shell.className = 'ask-view'
 
+  // Same heading rhythm as the other pages.
+  const title = document.createElement('h2')
+  title.className = 'chat-title'
+  title.textContent = '问答'
+
   const form = document.createElement('form')
   form.className = 'ask-form'
   const input = document.createElement('input')
@@ -77,7 +82,7 @@ export function mountAsk(root, { api, onOpenChat = null }) {
   const results = document.createElement('ol')
   results.className = 'ask-results'
 
-  shell.append(form, tools, status, results)
+  shell.append(title, form, tools, status, results)
   root.append(shell)
 
   const state = { question: '', busy: false }

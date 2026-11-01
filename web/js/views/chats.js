@@ -56,20 +56,27 @@ export function formatClock(epochSeconds) {
     + `${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
-/** The query shape a saved search keeps; chat is `{kind, id, name}` or null. */
+/**
+ * The query shape a saved search keeps; chat is `{kind, id, name}` or null.
+ *
+ * Only what the sidebar can actually restore: the keyword, the list filter and
+ * the chat. Sender and date filters have no control in this view (the search
+ * box takes `from:` / `since:` / `until:` inline), so writing them here only
+ * produced fields nothing ever set.
+ */
 export function savedFromState(state) {
   return {
     savedAt: Date.now(),
     query: String(state?.query || ''),
     keyword: String(state?.keyword || ''),
-    sender: String(state?.sender || ''),
-    since: String(state?.since || ''),
-    until: String(state?.until || ''),
     chat: state?.chat || null,
   }
 }
 
-/** One line describing a saved search, used in the list. */
+/**
+ * One line describing a saved search, used in the list. `sender`/`since`/
+ * `until` are still read for entries stored by an older build.
+ */
 export function savedLabel(saved) {
   const parts = []
   if (saved.chat) parts.push(saved.chat.name || saved.chat.id)
@@ -112,7 +119,7 @@ export function pushHistory(rows, keyword) {
 /** Key of one saved search, so the same filter combination is kept once. */
 function savedKey(saved) {
   return [saved.chat ? `${saved.chat.kind}:${saved.chat.id}` : '',
-    saved.keyword, saved.sender, saved.since, saved.until].join('|')
+    saved.query || '', saved.keyword].join('|')
 }
 
 /** Keep one saved search per identical filter combination, newest first. */
@@ -131,6 +138,10 @@ export function pushSaved(rows, saved) {
 function messageRow(row, { onOpenMedia = null } = {}) {
   const item = document.createElement('li')
   item.className = 'msg-row'
+  // Own messages get a tinted sender; the row shape stays the same.
+  if (row.out) item.classList.add('is-out')
+  // Kept so "open this hit" can point at the exact message it jumped to.
+  if (row.rowId !== undefined) item.dataset.rowId = String(row.rowId)
 
   const head = document.createElement('div')
   head.className = 'msg-head'
@@ -405,6 +416,11 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
         renderBatch()
       })
 
+      const avatar = document.createElement('span')
+      avatar.className = `chat-avatar is-${session.kind === 'private' ? 'private' : 'group'}`
+      avatar.textContent = String(session.name || session.id).trim().slice(0, 1) || '·'
+      avatar.setAttribute('aria-hidden', 'true')
+
       const name = document.createElement('span')
       name.className = 'chat-name'
       name.textContent = session.name || session.id
@@ -435,7 +451,7 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
         }),
       )
 
-      item.append(check, name, meta, actions)
+      item.append(check, avatar, name, meta, actions)
       item.addEventListener('click', () => select(session))
       list.append(item)
     }
@@ -475,6 +491,13 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
 
   function applySaved(saved) {
     searchInput.value = saved.keyword || ''
+    // The list filter is saved too; replay it or the saved view opens on a
+    // list the user did not save.
+    const query = String(saved.query || '')
+    filter.value = query
+    state.query = query
+    // Repaint the session list now: the reader's own load does not touch it.
+    renderList()
     if (saved.chat) {
       const found = state.sessions.find((session) =>
         session.kind === saved.chat.kind && String(session.id) === String(saved.chat.id))
@@ -505,6 +528,24 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
       await loadSessions()
     } catch (error) {
       if (!closed) title.textContent = `保存失败：${error.message}`
+    }
+  }
+
+  /**
+   * Mark the message a search hit jumped to and bring it into view.
+   *
+   * Without it the window lands with no indication of which row was the hit,
+   * so "在会话中查看" opened a chat and left the reader guessing.
+   */
+  function markAnchor(anchorId) {
+    const wanted = String(anchorId)
+    for (const item of messages.children) {
+      item.classList.remove('is-anchor')
+      if (item.dataset && item.dataset.rowId !== wanted) continue
+      item.classList.add('is-anchor')
+      if (typeof item.scrollIntoView === 'function') {
+        item.scrollIntoView({ block: 'center' })
+      }
     }
   }
 
@@ -594,6 +635,7 @@ export function mountChats(root, { api, initial = null, onExport = null, onExpor
       // Only the new page is appended; `renderMessages(false, state.rows)`
       // would draw every page a second time.
       renderMessages(reset, rows)
+      if (around) markAnchor(around)
     } catch (error) {
       if (closed || seq !== loadSeq) return
       title.textContent = `读取消息失败：${error.message}`

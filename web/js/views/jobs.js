@@ -57,7 +57,14 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
   const list = document.createElement('ul')
   list.className = 'jobs-list'
   panel.append(head, list)
-  root.append(panel)
+
+  // Folded state: a pill that reopens the list.
+  const dock = document.createElement('button')
+  dock.type = 'button'
+  dock.className = 'jobs-dock'
+  dock.hidden = true
+  dock.textContent = '任务'
+  root.append(panel, dock)
 
   let closed = false
   let timer = null
@@ -106,7 +113,11 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
   }
 
   let collapsed = false
+  let first = true
   let seen = new Set()
+
+  /** Jobs that are still doing something: only those deserve the panel. */
+  const ACTIVE = new Set(['queued', 'running', 'canceling'])
 
   async function refresh() {
     if (closed) return
@@ -114,12 +125,24 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
       const payload = await api.get('/api/jobs')
       if (closed) return
       const jobs = visibleJobs(payload?.jobs)
-      // A new job reopens the panel; an explicit 收起 keeps it shut while the
-      // same rows are still on screen.
       const ids = new Set(jobs.map((job) => job.id))
-      if ([...ids].some((id) => !seen.has(id))) collapsed = false
+      const isNew = [...ids].some((id) => !seen.has(id))
+      const active = jobs.some((job) => ACTIVE.has(job.state))
+      // New work reopens the panel; an explicit 收起 keeps it shut while the
+      // same rows are still on screen.
+      if (isNew && active) collapsed = false
+      // A list of old exports is history, not a task: start folded into the
+      // pill instead of covering the page it is floating over.
+      if (first) {
+        first = false
+        collapsed = jobs.length > 0 && !active
+      }
       seen = ids
-      panel.hidden = jobs.length === 0 || collapsed
+      title.textContent = jobs.length > 0 ? `任务 · ${jobs.length}` : '任务'
+      dock.textContent = `任务 · ${jobs.length}`
+      const open = jobs.length > 0 && !collapsed
+      panel.hidden = !open
+      dock.hidden = open || jobs.length === 0
       list.replaceChildren()
       for (const job of jobs) list.append(renderRow(job))
     } catch {
@@ -130,6 +153,12 @@ export function mountJobs(root, { api, intervalMs = 2000 }) {
   close.addEventListener('click', () => {
     collapsed = true
     panel.hidden = true
+    dock.hidden = list.children.length === 0
+  })
+
+  dock.addEventListener('click', () => {
+    collapsed = false
+    refresh()
   })
 
   refresh()

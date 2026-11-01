@@ -841,6 +841,10 @@ export function startWebServer(settings, port = DEFAULT_PORT, host = DEFAULT_HOS
     runners,
     concurrency: Number(options.jobConcurrency) > 0 ? Number(options.jobConcurrency) : undefined,
   })
+  // `restore()` keeps the rows, and `list()` caps them at 40, but their log
+  // files and old entries never went away. One sweep per start keeps a year of
+  // exports from being a directory of stale task logs.
+  jobs.sweep()
 
 
   const server = createServer((req, res) => {

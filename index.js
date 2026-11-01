@@ -738,18 +738,28 @@ export function exportChatTool(settings) {
       // embedding stays a single shareable HTML.
       const container = embed ? 'html'
         : (media || split || password ? 'zip' : format)
-      // Prefer the name the index knows; the label also names the file.
+      // Resolve the chat before writing anything: a typo used to produce a file
+      // with a header and zero messages and an `ok: true`, which reads like a
+      // successful export.
       let label = typeof args.label === 'string' ? args.label.trim() : ''
-      if (label === '') {
-        try {
-          const sessions = await runQueryJson(settings, ['sessions'], exec)
-          const match = (sessions.payload.sessions || [])
-            .find((item) => item.kind === kind && String(item.id) === chatId)
-          label = (match && match.name) || chatId
-        } catch {
-          label = chatId
+      let known = null
+      try {
+        const sessions = await runQueryJson(settings, ['sessions'], exec)
+        known = (sessions.payload.sessions || [])
+          .find((item) => item.kind === kind && String(item.id) === chatId) || null
+      } catch (error) {
+        return {
+          ok: false, exitCode: 1, outPath: '',
+          output: `读取索引里的会话列表失败：${error.message}`,
         }
       }
+      if (known === null) {
+        return {
+          ok: false, exitCode: 1, outPath: '',
+          output: `索引里没有这个会话：${kind}/${chatId}。先用 qqnt_list_chats 查一下会话 id 与类型。`,
+        }
+      }
+      if (label === '') label = known.name || chatId
       const outDir = typeof args.outDir === 'string' && args.outDir.trim() !== ''
         ? path.resolve(args.outDir.trim())
         : path.join(defaultDownloadDir(), `QQ导出_${fileStem(label, chatId)}`)

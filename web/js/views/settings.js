@@ -42,11 +42,17 @@ export function settingsPatch(values) {
   return patch
 }
 
-/** `{totalBytes, items}` → one sentence for the storage card. */
+/** `{totalBytes, items, derived}` → one sentence for the storage card. */
 export function storageSummary(storage) {
   const items = Array.isArray(storage?.items) ? storage.items : []
-  if (items.length === 0) return '没有可清理的明文文件。'
-  return `${items.length} 类 · 共 ${formatBytes(storage.totalBytes)}`
+  const derived = Number(storage?.derived?.bytes) || 0
+  if (items.length === 0) {
+    return derived > 0
+      ? `没有可清理的明文文件；派生数据 ${formatBytes(derived)}。`
+      : '没有可清理的明文文件。'
+  }
+  const cleanable = `${items.length} 类 · 共 ${formatBytes(storage.totalBytes)}`
+  return derived > 0 ? `${cleanable}；另有派生数据 ${formatBytes(derived)}` : cleanable
 }
 
 /**
@@ -221,8 +227,15 @@ export function mountSettings(root, { api }) {
   storageActions.append(storageRefresh, cleanupButton, storageNote)
   storageCard.body.append(storageLine, storageList, storageActions)
 
-  section.append(title, status, runtimeCard.node, keyCard.node, setupCard.node,
-    presetCard.node, diagCard.node, storageCard.node)
+  // Two columns on a wide window: a single 900 px strip hugging the left edge
+  // left half the screen empty and made one long scroll for ten fields.
+  const grid = document.createElement('div')
+  grid.className = 'settings-grid'
+  runtimeCard.node.classList.add('settings-card--wide')
+  storageCard.node.classList.add('settings-card--wide')
+  grid.append(runtimeCard.node, keyCard.node, setupCard.node, presetCard.node,
+    diagCard.node, storageCard.node)
+  section.append(title, status, grid)
   root.append(section)
 
   let closed = false
@@ -569,6 +582,21 @@ export function mountSettings(root, { api }) {
         detail.className = 'storage-detail'
         detail.textContent = `${formatBytes(item.bytes)} · ${item.detail || ''}`
         row.append(check, name, detail)
+        storageList.append(row)
+      }
+      const derived = Number(payload?.derived?.bytes) || 0
+      if (derived > 0) {
+        // Listed but never selectable: deleting it would throw away OCR text,
+        // transcripts and vectors that no rebuild can reproduce.
+        const row = document.createElement('div')
+        row.className = 'storage-row is-readonly'
+        const name = document.createElement('span')
+        name.className = 'storage-name'
+        name.textContent = '派生数据（OCR / 转写 / 分块）'
+        const detail = document.createElement('span')
+        detail.className = 'storage-detail'
+        detail.textContent = `${formatBytes(derived)} · 不可重建，不参与清理`
+        row.append(name, detail)
         storageList.append(row)
       }
       if ((payload?.items || []).length === 0) {
