@@ -118,6 +118,7 @@ dsh plugin --profile web remove dsh-qqnt-chat-export
 - [docs/how-it-works.md](docs/how-it-works.md) — 密钥、SQLCipher、Protobuf 与索引
 - [docs/development.md](docs/development.md) — 目录结构、测试、`file:` / `link:` 安装方式
 - [docs/wal-notes.md](docs/wal-notes.md) · [docs/media-notes.md](docs/media-notes.md) — WAL 与媒体的实测笔记
+- [docs/agent-tools-plan.md](docs/agent-tools-plan.md) — 给 Agent 调用的工具扩展计划（未实现）
 
 ## 许可
 
